@@ -42,16 +42,9 @@ Grab `tonearm.exe` from the Releases page on GitHub. The file is unsigned,
 so Windows SmartScreen warns on first run. Pick "More info", then "Run
 anyway".
 
-To cut a release, push a version tag. GitHub builds the exe on Windows and
-attaches it.
-
-```bash
-git tag v0.1.1
-```
-
-```bash
-git push origin v0.1.1
-```
+To cut a release, open the Actions tab, pick Release, press "Run workflow"
+and enter a version such as `v0.1.1`. GitHub builds the exe on Windows and
+attaches it. Pushing a version tag does the same.
 
 ## Build
 

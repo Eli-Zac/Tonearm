@@ -1,8 +1,13 @@
 name: Release
 
-# Push a tag like v0.1.0 and this builds tonearm.exe on Windows and
-# attaches it to a GitHub release for that tag.
+# Builds tonearm.exe on Windows and attaches it to a GitHub release.
+# Start it from the Actions tab with a version, or push a tag like v0.1.0.
 on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version tag to release, for example v0.1.0
+        required: true
   push:
     tags: ["v*"]
 
@@ -30,8 +35,10 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version || github.ref_name }}
         run: |
           cp target/release/tonearm.exe tonearm.exe
-          gh release create "$GITHUB_REF_NAME" tonearm.exe \
-            --title "Tonearm $GITHUB_REF_NAME" \
+          gh release create "$VERSION" tonearm.exe \
+            --target "$GITHUB_SHA" \
+            --title "Tonearm $VERSION" \
             --generate-notes
