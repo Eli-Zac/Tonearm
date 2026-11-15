@@ -1,0 +1,1198 @@
+import { ListView } from "std-widgets.slint";
+import "icons.ttf";
+
+export struct ItemData {
+    id: int,
+    title: string,
+    subtitle: string,
+    duration: string,
+    art: image,
+    has-art: bool,
+    round: bool,
+}
+
+// kind: 0 header, 1 list item, 2 row of cards, 3 load more marker
+export struct RowData {
+    kind: int,
+    title: string,
+    item: ItemData,
+    cards: [ItemData],
+}
+
+export struct SyllableData {
+    text: string,
+    start: int,
+    end: int,
+    space: bool,
+}
+
+export struct LyricRow {
+    text: string,
+    syllables: [SyllableData],
+    start: int,
+    end: int,
+    // 0 words, 1 gap between lines, 2 interlude dots
+    kind: int,
+    line: int,
+}
+
+export global Theme {
+    in property <string> font: "Inter";
+    out property <color> bg: #08080a;
+    out property <color> island: #131316;
+    out property <color> raised: #1c1c21;
+    out property <color> hover: #ffffff12;
+    out property <color> line: #ffffff14;
+    out property <color> text: #f5f5f7;
+    out property <color> dim: #9c9ca6;
+    out property <color> faint: #ffffff59;
+    out property <color> accent: #ff4f6d;
+    out property <length> radius: 14px;
+}
+
+// Lucide icons, subset to the glyphs we use. See icons-LICENSE.txt.
+export global Icons {
+    out property <string> play: "\u{e13c}";
+    out property <string> pause: "\u{e12e}";
+    out property <string> prev: "\u{e15f}";
+    out property <string> next: "\u{e160}";
+    out property <string> heart: "\u{e0f2}";
+    out property <string> home: "\u{e0f5}";
+    out property <string> search: "\u{e151}";
+    out property <string> explore: "\u{e09b}";
+    out property <string> library: "\u{e100}";
+    out property <string> settings: "\u{e154}";
+    out property <string> back: "\u{e048}";
+    out property <string> queue: "\u{e2e0}";
+    out property <string> lyrics: "\u{e349}";
+    out property <string> volume: "\u{e1ab}";
+    out property <string> shuffle: "\u{e15e}";
+    out property <string> left: "\u{e06e}";
+    out property <string> right: "\u{e06f}";
+}
+
+component Icon inherits Text {
+    font-family: "lucide";
+    color: Theme.text;
+    font-size: 16px;
+    horizontal-alignment: center;
+    vertical-alignment: center;
+}
+
+component IconButton inherits Rectangle {
+    in property <string> icon;
+    in property <length> size: 16px;
+    in property <color> tint: Theme.text;
+    in property <bool> filled;
+    callback clicked;
+    width: 36px;
+    height: 36px;
+    border-radius: self.height / 2;
+    background: filled ? (touch.pressed ? #d0d0d6 : touch.has-hover ? #ffffff : #f0f0f3) : (touch.pressed ? #ffffff24 : touch.has-hover ? Theme.hover : transparent);
+    animate background { duration: 120ms; }
+    Icon {
+        text: icon;
+        font-size: size;
+        color: filled ? #08080a : tint;
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+component PillButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> primary;
+    callback clicked;
+    height: 36px;
+    width: label.preferred-width + 36px;
+    border-radius: 18px;
+    background: primary ? (touch.has-hover ? #ffffff : #f0f0f3) : (touch.has-hover ? #ffffff24 : #ffffff14);
+    animate background { duration: 120ms; }
+    label := Text {
+        text: root.text;
+        color: primary ? #08080a : Theme.text;
+        font-size: 13px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+component Field inherits Rectangle {
+    in property <string> placeholder;
+    in property <string> icon;
+    in property <bool> secret;
+    in-out property <string> text <=> input.text;
+    callback accepted(string);
+    height: 40px;
+    border-radius: 20px;
+    background: input.has-focus ? #ffffff1c : #ffffff10;
+    border-width: 1px;
+    border-color: input.has-focus ? #ffffff40 : transparent;
+    animate background, border-color { duration: 150ms; }
+    if root.icon != "": Icon {
+        x: 14px;
+        width: 18px;
+        text: root.icon;
+        color: Theme.dim;
+        font-size: 14px;
+    }
+    Text {
+        x: root.icon != "" ? 42px : 18px;
+        width: parent.width - self.x - 18px;
+        text: input.text == "" ? root.placeholder : "";
+        color: Theme.dim;
+        font-size: 14px;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    Rectangle {
+        x: root.icon != "" ? 42px : 18px;
+        width: parent.width - self.x - 18px;
+        clip: true;
+        input := TextInput {
+            width: 100%;
+            color: Theme.text;
+            font-size: 14px;
+            single-line: true;
+            vertical-alignment: center;
+            input-type: root.secret ? InputType.password : InputType.text;
+            selection-background-color: #ffffff40;
+            accepted => { root.accepted(self.text); }
+        }
+    }
+}
+
+component Art inherits Rectangle {
+    in property <image> source;
+    in property <bool> has;
+    in property <bool> round;
+    in property <length> corner: 8px;
+    background: has ? transparent : #232329;
+    border-radius: round ? self.width / 2 : corner;
+    if has: Image {
+        source: root.source;
+        width: 100%;
+        height: 100%;
+        image-fit: cover;
+    }
+}
+
+component SongRow inherits Rectangle {
+    in property <ItemData> item;
+    in property <bool> current;
+    callback activated;
+    height: 60px;
+    border-radius: 10px;
+    background: current ? #ffffff14 : touch.has-hover ? Theme.hover : transparent;
+    animate background { duration: 120ms; }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.activated(); }
+    }
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 14px;
+        spacing: 12px;
+        VerticalLayout {
+            alignment: center;
+            Art {
+                width: 44px;
+                height: 44px;
+                corner: 6px;
+                source: item.art;
+                has: item.has-art;
+                round: item.round;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            spacing: 3px;
+            Text {
+                text: item.title;
+                color: current ? Theme.accent : Theme.text;
+                font-size: 14px;
+                font-weight: 500;
+                overflow: elide;
+            }
+            Text {
+                text: item.subtitle;
+                color: Theme.dim;
+                font-size: 12px;
+                overflow: elide;
+            }
+        }
+        Text {
+            text: item.duration;
+            color: Theme.dim;
+            font-size: 12px;
+            vertical-alignment: center;
+            horizontal-stretch: 0;
+        }
+    }
+}
+
+component Card inherits Rectangle {
+    in property <ItemData> item;
+    callback activated;
+    width: 176px;
+    height: 232px;
+    border-radius: 12px;
+    background: touch.has-hover ? Theme.hover : transparent;
+    animate background { duration: 150ms; }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.activated(); }
+    }
+    Art {
+        x: 10px;
+        y: 10px;
+        width: 156px;
+        height: 156px;
+        corner: 10px;
+        source: item.art;
+        has: item.has-art;
+        round: item.round;
+    }
+    Rectangle {
+        x: 118px;
+        y: 118px;
+        width: 40px;
+        height: 40px;
+        border-radius: 20px;
+        background: Theme.accent;
+        opacity: touch.has-hover && !item.round ? 1 : 0;
+        animate opacity { duration: 150ms; }
+        Icon {
+            text: Icons.play;
+            color: #ffffff;
+            font-size: 14px;
+        }
+    }
+    Text {
+        x: 10px;
+        y: 176px;
+        width: 156px;
+        text: item.title;
+        color: Theme.text;
+        font-size: 13px;
+        font-weight: 600;
+        overflow: elide;
+        horizontal-alignment: item.round ? center : left;
+    }
+    Text {
+        x: 10px;
+        y: 197px;
+        width: 156px;
+        text: item.subtitle;
+        color: Theme.dim;
+        font-size: 12px;
+        overflow: elide;
+        horizontal-alignment: item.round ? center : left;
+    }
+}
+
+component Carousel inherits Rectangle {
+    in property <[ItemData]> cards;
+    callback activated(int);
+    height: 236px;
+    clip: true;
+    flick := Flickable {
+        content-width: max(self.width, strip.preferred-width);
+        content-height: self.height;
+        animate content-x { duration: 300ms; easing: ease-out; }
+        strip := HorizontalLayout {
+            alignment: start;
+            for card in root.cards: Card {
+                item: card;
+                activated => { root.activated(card.id); }
+            }
+        }
+    }
+    if flick.content-x < 0: IconButton {
+        x: 4px;
+        y: 70px;
+        icon: Icons.left;
+        size: 18px;
+        filled: true;
+        clicked => { flick.content-x = min(0px, flick.content-x + flick.width * 0.8); }
+    }
+    if flick.content-x > flick.width - flick.content-width: IconButton {
+        x: root.width - 40px;
+        y: 70px;
+        icon: Icons.right;
+        size: 18px;
+        filled: true;
+        clicked => { flick.content-x = max(flick.width - flick.content-width, flick.content-x - flick.width * 0.8); }
+    }
+}
+
+component Appear inherits Rectangle {
+    callback appeared;
+    init => { root.appeared(); }
+}
+
+component Bar inherits Rectangle {
+    in property <float> value;
+    in property <bool> live;
+    callback picked(float);
+    property <float> shown: touch.pressed ? clamp(touch.mouse-x / self.width, 0, 1) : value;
+    height: 16px;
+    track := Rectangle {
+        y: (parent.height - self.height) / 2;
+        height: 4px;
+        border-radius: 2px;
+        background: #ffffff24;
+        Rectangle {
+            x: 0;
+            width: parent.width * root.shown;
+            border-radius: 2px;
+            background: touch.has-hover || touch.pressed ? Theme.accent : Theme.text;
+            animate background { duration: 120ms; }
+        }
+    }
+    Rectangle {
+        x: clamp(root.width * root.shown - 6px, 0px, root.width - 12px);
+        y: (parent.height - 12px) / 2;
+        width: 12px;
+        height: 12px;
+        border-radius: 6px;
+        background: #ffffff;
+        opacity: touch.has-hover || touch.pressed ? 1 : 0;
+        animate opacity { duration: 120ms; }
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        moved => {
+            if (root.live && self.pressed) {
+                root.picked(clamp(self.mouse-x / self.width, 0, 1));
+            }
+        }
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.up && event.button == PointerEventButton.left) {
+                root.picked(clamp(self.mouse-x / self.width, 0, 1));
+            }
+        }
+    }
+}
+
+component NavItem inherits Rectangle {
+    in property <string> icon;
+    in property <string> label;
+    in property <bool> selected;
+    callback clicked;
+    height: 42px;
+    border-radius: 10px;
+    background: selected ? #ffffff18 : touch.has-hover ? Theme.hover : transparent;
+    animate background { duration: 120ms; }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    Rectangle {
+        x: 0;
+        y: 12px;
+        width: 3px;
+        height: 18px;
+        border-radius: 2px;
+        background: Theme.accent;
+        opacity: selected ? 1 : 0;
+        animate opacity { duration: 150ms; }
+    }
+    HorizontalLayout {
+        padding-left: 14px;
+        spacing: 12px;
+        Icon {
+            text: icon;
+            width: 20px;
+            color: selected ? Theme.text : Theme.dim;
+        }
+        Text {
+            text: label;
+            color: selected ? Theme.text : Theme.dim;
+            font-size: 14px;
+            font-weight: selected ? 600 : 500;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component SyllableView inherits Rectangle {
+    in property <SyllableData> syllable;
+    in property <int> time;
+    in property <bool> active;
+    property <float> progress: !active || time <= syllable.start ? 0 : time >= syllable.end ? 1 : 1.0 * (time - syllable.start) / max(1, syllable.end - syllable.start);
+    // Sung syllables rise a little, the way Apple Music lifts them.
+    property <length> lift: active && time >= syllable.start ? -2px : 0px;
+    animate lift { duration: 350ms; easing: ease-out; }
+    width: base.preferred-width + (syllable.space ? 7px : 0px);
+    height: 36px;
+    base := Text {
+        x: 0;
+        y: root.lift;
+        height: 100%;
+        text: syllable.text;
+        color: active ? #ffffff66 : #ffffff;
+        font-size: 24px;
+        font-weight: 800;
+        vertical-alignment: center;
+    }
+    Rectangle {
+        x: 0;
+        y: root.lift;
+        width: base.preferred-width * root.progress;
+        height: 100%;
+        clip: true;
+        Text {
+            x: 0;
+            width: base.preferred-width;
+            height: 100%;
+            text: syllable.text;
+            color: #ffffff;
+            font-size: 24px;
+            font-weight: 800;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component Dot inherits Rectangle {
+    in property <float> level;
+    width: 10px;
+    height: 10px;
+    border-radius: 5px;
+    background: #ffffff;
+    opacity: 0.25 + 0.75 * clamp(level, 0, 1);
+}
+
+export component AppWindow inherits Window {
+    title: "Tonearm";
+    preferred-width: 1180px;
+    preferred-height: 760px;
+    min-width: 820px;
+    min-height: 520px;
+    background: Theme.bg;
+    default-font-size: 13px;
+    default-font-family: Theme.font;
+
+    // page
+    in property <[RowData]> rows;
+    in property <string> page-title;
+    in property <string> page-subtitle;
+    in property <bool> page-playable;
+    in property <bool> loading;
+    in property <bool> can-back;
+    in property <int> nav: 0;
+    in property <string> toast;
+    in property <bool> signed-in;
+    in property <string> account-name;
+    in property <string> settings-note;
+
+    // player
+    in property <bool> has-track;
+    in property <string> track-title;
+    in property <string> track-artist;
+    in property <image> track-art;
+    in property <bool> track-has-art;
+    in property <bool> playing;
+    in property <bool> buffering;
+    in property <bool> liked;
+    in property <float> progress;
+    in property <string> position-text: "0:00";
+    in property <string> duration-text: "0:00";
+    in property <float> volume: 1.0;
+    in property <[ItemData]> queue;
+    in property <int> queue-index: -1;
+    // Colour pulled from the playing cover. It tints the player and panel.
+    in property <color> tint: #2b2440;
+    property <color> shown-tint: tint;
+    animate shown-tint { duration: 700ms; easing: ease-in-out; }
+
+    // side panel: 0 closed, 1 queue, 2 lyrics
+    in-out property <int> panel: 0;
+
+    // lyrics: state 0 none, 1 loading, 2 ready, 3 not found
+    in property <[LyricRow]> lyrics;
+    in property <int> lyrics-state;
+    in property <bool> lyrics-synced;
+    in property <string> lyrics-source;
+    in property <int> lyrics-time;
+    in property <length> lyrics-focus;
+    in property <int> lyrics-line: -1;
+
+    callback navigate(int);
+    callback back();
+    callback search(string);
+    callback item-activated(int);
+    callback queue-activated(int);
+    callback load-more();
+    callback play-page(bool);
+    callback toggle-play();
+    callback next();
+    callback previous();
+    callback seek(float);
+    callback set-volume(float);
+    callback toggle-like();
+    callback panel-changed(int);
+    callback lyrics-seek(int);
+    callback save-cookie(string);
+    callback sign-out();
+
+    // connections
+    in-out property <string> svc-discord;
+    in-out property <string> svc-lastfm-key;
+    in-out property <string> svc-lastfm-secret;
+    in-out property <string> svc-spotify-id;
+    in-out property <string> svc-spotify-secret;
+    in property <string> lastfm-user;
+    in property <string> services-note;
+    callback save-services();
+    callback lastfm-connect();
+    callback lastfm-finish();
+
+    property <length> gap: 8px;
+    property <length> side: 216px;
+    property <length> panel-width: 380px;
+    property <length> player-height: 88px;
+    property <length> body-height: root.height - player-height - gap * 3;
+    property <length> main-width: root.width - side - gap * 3 - (panel != 0 ? panel-width + gap : 0px);
+
+    function show-panel(which: int) {
+        root.panel = root.panel == which ? 0 : which;
+        root.panel-changed(root.panel);
+    }
+
+    changed lyrics-focus => {
+        lyrics-view.content-y = -max(0px, min(root.lyrics-focus - lyrics-view.height * 0.32, lyrics-view.content-height - lyrics-view.height));
+    }
+
+    // Every island has a fixed place. Nothing here feeds the window's own
+    // size, so opening a panel never resizes the window.
+
+    // sidebar
+    Rectangle {
+        x: gap;
+        y: gap;
+        width: side;
+        height: body-height;
+        border-radius: Theme.radius;
+        background: Theme.island;
+        VerticalLayout {
+            padding: 12px;
+            spacing: 4px;
+            alignment: start;
+            HorizontalLayout {
+                height: 52px;
+                padding-left: 6px;
+                spacing: 10px;
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 26px;
+                        height: 26px;
+                        border-radius: 13px;
+                        background: Theme.accent;
+                        Rectangle {
+                            width: 8px;
+                            height: 8px;
+                            border-radius: 4px;
+                            background: Theme.island;
+                        }
+                    }
+                }
+                Text {
+                    text: "Tonearm";
+                    color: Theme.text;
+                    font-size: 19px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+            }
+            NavItem {
+                icon: Icons.home;
+                label: "Home";
+                selected: root.nav == 0;
+                clicked => { root.navigate(0); }
+            }
+            NavItem {
+                icon: Icons.explore;
+                label: "Explore";
+                selected: root.nav == 1;
+                clicked => { root.navigate(1); }
+            }
+            NavItem {
+                icon: Icons.library;
+                label: "Library";
+                selected: root.nav == 2;
+                clicked => { root.navigate(2); }
+            }
+            NavItem {
+                icon: Icons.settings;
+                label: "Settings";
+                selected: root.nav == 3;
+                clicked => { root.navigate(3); }
+            }
+        }
+        Rectangle {
+            x: 12px;
+            y: parent.height - 56px;
+            width: parent.width - 24px;
+            height: 44px;
+            border-radius: 10px;
+            background: #ffffff0a;
+            Rectangle {
+                x: 10px;
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: root.signed-in ? #3ddc84 : #6b6b75;
+            }
+            Text {
+                x: 28px;
+                width: parent.width - 38px;
+                text: root.signed-in ? root.account-name : "Not signed in";
+                color: Theme.dim;
+                font-size: 12px;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+    }
+
+    // main island
+    Rectangle {
+        x: side + gap * 2;
+        y: gap;
+        width: main-width;
+        height: body-height;
+        border-radius: Theme.radius;
+        background: Theme.island;
+        clip: true;
+        VerticalLayout {
+            HorizontalLayout {
+                height: 64px;
+                padding-left: 16px;
+                padding-right: 16px;
+                spacing: 10px;
+                VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        icon: Icons.back;
+                        tint: root.can-back || root.nav == 3 ? Theme.text : #55555e;
+                        clicked => { root.back(); }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    Field {
+                        icon: Icons.search;
+                        placeholder: "Search songs, albums, artists";
+                        max-width: 460px;
+                        accepted(text) => { root.search(text); }
+                    }
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+            }
+
+            if root.nav != 3: VerticalLayout {
+                padding-left: 16px;
+                padding-right: 6px;
+                if root.page-title != "": HorizontalLayout {
+                    height: 72px;
+                    spacing: 12px;
+                    padding-left: 8px;
+                    VerticalLayout {
+                        alignment: center;
+                        horizontal-stretch: 1;
+                        spacing: 2px;
+                        Text {
+                            text: root.page-title;
+                            color: Theme.text;
+                            font-size: 28px;
+                            font-weight: 800;
+                            overflow: elide;
+                        }
+                        if root.page-subtitle != "": Text {
+                            text: root.page-subtitle;
+                            color: Theme.dim;
+                            font-size: 13px;
+                            overflow: elide;
+                        }
+                    }
+                    if root.page-playable: VerticalLayout {
+                        alignment: center;
+                        PillButton {
+                            text: "Play";
+                            primary: true;
+                            clicked => { root.play-page(false); }
+                        }
+                    }
+                    if root.page-playable: VerticalLayout {
+                        alignment: center;
+                        padding-right: 14px;
+                        PillButton {
+                            text: "Shuffle";
+                            clicked => { root.play-page(true); }
+                        }
+                    }
+                }
+                ListView {
+                    vertical-stretch: 1;
+                    for row in root.rows: Rectangle {
+                        height: row.kind == 0 ? 56px : row.kind == 1 ? 60px : row.kind == 2 ? 236px : 40px;
+                        if row.kind == 0: Text {
+                            x: 8px;
+                            y: 18px;
+                            height: 34px;
+                            width: parent.width - 16px;
+                            text: row.title;
+                            color: Theme.text;
+                            font-size: 20px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        if row.kind == 1: SongRow {
+                            width: parent.width - 10px;
+                            item: row.item;
+                            activated => { root.item-activated(row.item.id); }
+                        }
+                        if row.kind == 2: Carousel {
+                            width: parent.width - 10px;
+                            cards: row.cards;
+                            activated(id) => { root.item-activated(id); }
+                        }
+                        if row.kind == 3: Appear {
+                            appeared => { root.load-more(); }
+                            Text {
+                                text: "Loading more";
+                                color: Theme.dim;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if root.nav == 3: Flickable {
+                content-height: settings.preferred-height;
+                settings := VerticalLayout {
+                    padding: 28px;
+                    padding-top: 12px;
+                    spacing: 14px;
+                    alignment: start;
+                    Text {
+                        text: "Settings";
+                        color: Theme.text;
+                        font-size: 28px;
+                        font-weight: 800;
+                    }
+                    Rectangle {
+                        max-width: 680px;
+                        border-radius: 12px;
+                        background: #ffffff0a;
+                        VerticalLayout {
+                            padding: 20px;
+                            spacing: 12px;
+                            Text {
+                                text: root.signed-in ? "Signed in as " + root.account-name : "Sign in";
+                                color: Theme.text;
+                                font-size: 16px;
+                                font-weight: 600;
+                            }
+                            Text {
+                                text: "Tonearm has no web view, so it cannot show the Google sign in page. Sign in to music.youtube.com in your browser, open the developer tools, pick any request to music.youtube.com on the Network tab, and copy the value of its Cookie request header. Paste it below. Tonearm encrypts it with your Windows account and sends it only to music.youtube.com.";
+                                color: Theme.dim;
+                                font-size: 13px;
+                                wrap: word-wrap;
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                cookie := Field {
+                                    placeholder: "Paste the Cookie header here";
+                                    secret: true;
+                                    accepted(text) => {
+                                        root.save-cookie(text);
+                                        self.text = "";
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    PillButton {
+                                        text: "Save";
+                                        primary: true;
+                                        clicked => {
+                                            root.save-cookie(cookie.text);
+                                            cookie.text = "";
+                                        }
+                                    }
+                                }
+                                if root.signed-in: VerticalLayout {
+                                    alignment: center;
+                                    PillButton {
+                                        text: "Sign out";
+                                        clicked => { root.sign-out(); }
+                                    }
+                                }
+                            }
+                            if root.settings-note != "": Text {
+                                text: root.settings-note;
+                                color: Theme.accent;
+                                font-size: 13px;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                    Rectangle {
+                        max-width: 680px;
+                        border-radius: 12px;
+                        background: #ffffff0a;
+                        VerticalLayout {
+                            padding: 20px;
+                            spacing: 10px;
+                            Text {
+                                text: "Connections";
+                                color: Theme.text;
+                                font-size: 16px;
+                                font-weight: 600;
+                            }
+                            Text {
+                                text: "Discord shows what you play on your profile. It needs the application ID of an app you create at discord.com/developers. Last.fm scrobbling needs an API key and shared secret from last.fm/api/account/create. Add Spotify credentials from developer.spotify.com and Tonearm reports each track with Spotify's title, artist and album.";
+                                color: Theme.dim;
+                                font-size: 13px;
+                                wrap: word-wrap;
+                            }
+                            Field {
+                                placeholder: "Discord application ID";
+                                text <=> root.svc-discord;
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Field {
+                                    placeholder: "Last.fm API key";
+                                    text <=> root.svc-lastfm-key;
+                                }
+                                Field {
+                                    placeholder: "Last.fm shared secret";
+                                    secret: true;
+                                    text <=> root.svc-lastfm-secret;
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Field {
+                                    placeholder: "Spotify client ID";
+                                    text <=> root.svc-spotify-id;
+                                }
+                                Field {
+                                    placeholder: "Spotify client secret";
+                                    secret: true;
+                                    text <=> root.svc-spotify-secret;
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: start;
+                                PillButton {
+                                    text: "Save";
+                                    primary: true;
+                                    clicked => { root.save-services(); }
+                                }
+                                PillButton {
+                                    text: root.lastfm-user != "" ? "Reconnect Last.fm" : "Connect Last.fm";
+                                    clicked => { root.lastfm-connect(); }
+                                }
+                                PillButton {
+                                    text: "Finish";
+                                    clicked => { root.lastfm-finish(); }
+                                }
+                            }
+                            Text {
+                                text: root.services-note != "" ? root.services-note : root.lastfm-user != "" ? "Scrobbling as " + root.lastfm-user : "";
+                                color: Theme.accent;
+                                font-size: 13px;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if root.loading && root.rows.length == 0 && root.nav != 3: Text {
+            text: "Loading";
+            color: Theme.dim;
+            font-size: 14px;
+        }
+    }
+
+    // side panel island
+    if root.panel != 0: Rectangle {
+        x: root.width - panel-width - gap;
+        y: gap;
+        width: panel-width;
+        height: body-height;
+        border-radius: Theme.radius;
+        background: root.shown-tint.mix(Theme.island, 0.42);
+        clip: true;
+        Text {
+            x: 20px;
+            y: 14px;
+            height: 32px;
+            text: root.panel == 1 ? "Up next" : "Lyrics";
+            color: Theme.text;
+            font-size: 18px;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+        if root.panel == 1: ListView {
+            x: 8px;
+            y: 56px;
+            width: parent.width - 12px;
+            height: parent.height - 64px;
+            for entry[index] in root.queue: SongRow {
+                item: entry;
+                current: index == root.queue-index;
+                activated => { root.queue-activated(index); }
+            }
+        }
+    }
+
+    // Lyrics sit at window level so the scroll animation can reach them.
+    lyrics-view := Flickable {
+        visible: root.panel == 2;
+        x: root.width - panel-width - gap;
+        y: gap + 56px;
+        width: panel-width;
+        height: body-height - 64px;
+        content-height: max(self.height, lines.preferred-height);
+        animate content-y { duration: 600ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+        lines := VerticalLayout {
+            alignment: start;
+            padding-top: 8px;
+            padding-bottom: 160px;
+            if root.lyrics-state != 2: Text {
+                x: 20px;
+                height: 40px;
+                text: root.lyrics-state == 1 ? "Looking for lyrics" : root.lyrics-state == 3 ? "No lyrics for this track" : "Play a song to see its lyrics";
+                color: Theme.dim;
+                font-size: 14px;
+                vertical-alignment: center;
+            }
+            for row in root.lyrics: lyric-row := Rectangle {
+                property <bool> active: root.lyrics-synced && root.lyrics-time >= row.start && root.lyrics-time < row.end;
+                property <int> distance: abs(row.line - root.lyrics-line);
+                // Lines fade with distance from the one being sung.
+                property <float> fade: !root.lyrics-synced || active ? 1 : clamp(0.5 - 0.09 * distance, 0.16, 0.5);
+                property <float> gap-progress: clamp(1.0 * (root.lyrics-time - row.start) / max(1, row.end - row.start), 0, 1);
+                height: row.kind == 1 ? 18px : row.kind == 2 ? (active ? 36px : 0px) : root.lyrics-synced ? 36px : 24px;
+                animate height { duration: 300ms; easing: ease-out; }
+                if row.kind == 2 && active: HorizontalLayout {
+                    alignment: start;
+                    padding-left: 22px;
+                    spacing: 8px;
+                    VerticalLayout { alignment: center; Dot { level: lyric-row.gap-progress * 3; } }
+                    VerticalLayout { alignment: center; Dot { level: lyric-row.gap-progress * 3 - 1; } }
+                    VerticalLayout { alignment: center; Dot { level: lyric-row.gap-progress * 3 - 2; } }
+                }
+                if row.kind == 0: Rectangle {
+                    opacity: lyric-row.fade;
+                    animate opacity { duration: 350ms; easing: ease-out; }
+                    if row.syllables.length > 0: HorizontalLayout {
+                        alignment: start;
+                        padding-left: 20px;
+                        for syllable in row.syllables: SyllableView {
+                            syllable: syllable;
+                            time: root.lyrics-time;
+                            active: lyric-row.active;
+                        }
+                    }
+                    if row.syllables.length == 0: Text {
+                        x: 20px;
+                        width: parent.width - 40px;
+                        height: 100%;
+                        text: row.text;
+                        color: Theme.text;
+                        font-size: root.lyrics-synced ? 24px : 14px;
+                        font-weight: root.lyrics-synced ? 800 : 400;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+                if row.kind == 0 && root.lyrics-synced: TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.lyrics-seek(row.start); }
+                }
+            }
+            if root.lyrics-state == 2: Text {
+                x: 20px;
+                height: 44px;
+                text: "Lyrics from " + root.lyrics-source;
+                color: Theme.faint;
+                font-size: 11px;
+                vertical-alignment: bottom;
+            }
+        }
+    }
+
+    // player island
+    Rectangle {
+        x: gap;
+        y: root.height - player-height - gap;
+        width: root.width - gap * 2;
+        height: player-height;
+        border-radius: Theme.radius;
+        background: root.shown-tint.mix(Theme.raised, 0.3);
+        clip: true;
+
+        // left: what is playing
+        Art {
+            x: 14px;
+            y: 14px;
+            width: 60px;
+            height: 60px;
+            corner: 8px;
+            source: root.track-art;
+            has: root.track-has-art;
+        }
+        Text {
+            x: 88px;
+            y: 24px;
+            width: max(60px, parent.width / 2 - 250px - 88px - 44px);
+            text: root.has-track ? root.track-title : "Nothing playing";
+            color: Theme.text;
+            font-size: 14px;
+            font-weight: 600;
+            overflow: elide;
+        }
+        Text {
+            x: 88px;
+            y: 46px;
+            width: max(60px, parent.width / 2 - 250px - 88px - 44px);
+            text: root.buffering ? "Loading" : root.has-track ? root.track-artist : "Pick something to play";
+            color: Theme.dim;
+            font-size: 12px;
+            overflow: elide;
+        }
+        IconButton {
+            x: parent.width / 2 - 250px - 40px;
+            y: 26px;
+            icon: Icons.heart;
+            tint: root.liked ? Theme.accent : Theme.dim;
+            clicked => { root.toggle-like(); }
+        }
+
+        // centre: transport and timeline
+        IconButton {
+            x: parent.width / 2 - 68px;
+            y: 10px;
+            icon: Icons.prev;
+            size: 17px;
+            clicked => { root.previous(); }
+        }
+        IconButton {
+            x: parent.width / 2 - 20px;
+            y: 8px;
+            width: 40px;
+            height: 40px;
+            icon: root.playing ? Icons.pause : Icons.play;
+            size: 16px;
+            filled: true;
+            clicked => { root.toggle-play(); }
+        }
+        IconButton {
+            x: parent.width / 2 + 32px;
+            y: 10px;
+            icon: Icons.next;
+            size: 17px;
+            clicked => { root.next(); }
+        }
+        Text {
+            x: parent.width / 2 - 250px;
+            y: 56px;
+            width: 40px;
+            height: 16px;
+            text: root.position-text;
+            color: Theme.dim;
+            font-size: 11px;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+        }
+        Bar {
+            x: parent.width / 2 - 200px;
+            y: 56px;
+            width: 400px;
+            value: root.progress;
+            picked(v) => { root.seek(v); }
+        }
+        Text {
+            x: parent.width / 2 + 210px;
+            y: 56px;
+            width: 40px;
+            height: 16px;
+            text: root.duration-text;
+            color: Theme.dim;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+
+        // right: volume and panels
+        Icon {
+            x: parent.width - 232px;
+            y: 26px;
+            width: 24px;
+            height: 36px;
+            text: Icons.volume;
+            color: Theme.dim;
+            font-size: 13px;
+        }
+        Bar {
+            x: parent.width - 204px;
+            y: 36px;
+            width: 96px;
+            value: root.volume;
+            live: true;
+            picked(v) => { root.set-volume(v); }
+        }
+        IconButton {
+            x: parent.width - 94px;
+            y: 26px;
+            icon: Icons.lyrics;
+            tint: root.panel == 2 ? Theme.accent : Theme.text;
+            clicked => { root.show-panel(2); }
+        }
+        IconButton {
+            x: parent.width - 52px;
+            y: 26px;
+            icon: Icons.queue;
+            tint: root.panel == 1 ? Theme.accent : Theme.text;
+            clicked => { root.show-panel(1); }
+        }
+    }
+
+    if root.toast != "": Rectangle {
+        x: (root.width - self.width) / 2;
+        y: root.height - player-height - gap - self.height - 12px;
+        width: min(root.width - 48px, message.preferred-width + 40px);
+        height: 40px;
+        border-radius: 20px;
+        background: #f0f0f3;
+        message := Text {
+            text: root.toast;
+            color: #08080a;
+            font-size: 13px;
+            font-weight: 500;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            overflow: elide;
+            width: parent.width - 24px;
+        }
+    }
+}
