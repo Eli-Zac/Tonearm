@@ -1,6 +1,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod audio;
+mod decode;
 mod images;
 mod innertube;
 mod lyrics;
@@ -11,6 +12,7 @@ mod pool;
 mod resolver;
 mod services;
 mod store;
+mod update;
 
 slint::include_modules!();
 
@@ -123,6 +125,7 @@ struct App {
     lastfm_token: RefCell<String>,
     listen: RefCell<Listen>,
     toast_timer: Timer,
+    release: RefCell<Option<update::Release>>,
     #[cfg(windows)]
     keys: RefCell<Option<media_keys::Keys>>,
 }
@@ -602,7 +605,14 @@ impl App {
             let index = start + offset;
             model.push(self.item_data(item, index, 64, Target::Queue { generation, index }));
         }
+        let was_last = {
+            let player = self.player.borrow();
+            player.index + 1 == player.queue.len()
+        };
         self.player.borrow_mut().queue.extend(fresh);
+        if was_last {
+            self.prefetch_next();
+        }
     }
 
     /// Asks for the radio of the last song and appends it, so music keeps
@@ -694,7 +704,8 @@ impl App {
                             app.player.borrow_mut().duration = stream.duration;
                             app.ui.set_duration_text(clock_text(stream.duration));
                         }
-                        app.audio.load(stream.url, generation);
+                        app.audio.load(stream.url, stream.headers, generation);
+                        app.prefetch_next();
                     }
                     Err(message) => {
                         app.ui.set_buffering(false);
@@ -703,6 +714,24 @@ impl App {
                 }
             });
         });
+    }
+
+    /// Resolves the next track in the background so skipping to it, or
+    /// reaching it, starts without the yt-dlp wait.
+    fn prefetch_next(self: &Rc<Self>) {
+        let Some(resolver) = self.resolver.clone() else {
+            return;
+        };
+        let next = {
+            let player = self.player.borrow();
+            player
+                .queue
+                .get(player.index + 1)
+                .and_then(|item| item.video_id.clone())
+        };
+        if let Some(video_id) = next {
+            self.api.run(move || resolver.prefetch(&video_id));
+        }
     }
 
     fn load_cover(self: &Rc<Self>, title: &str, artist: &str, generation: u64) {
@@ -1203,6 +1232,75 @@ impl App {
         self.check_account();
     }
 
+    /// Asks GitHub for a newer release. A quiet check only speaks up when
+    /// there is one, so a failed check at start up stays out of the way.
+    fn check_update(self: &Rc<Self>, quiet: bool) {
+        if self.ui.get_update_busy() {
+            return;
+        }
+        self.ui.set_update_busy(true);
+        if !quiet {
+            self.ui.set_update_note("".into());
+        }
+        let http = self.http.clone();
+        self.api.run(move || {
+            let result = update::check(&http);
+            on_ui(move |app| {
+                app.ui.set_update_busy(false);
+                match result {
+                    Ok(Some(release)) => {
+                        let note = format!("Tonearm {} is ready to install.", release.version);
+                        app.ui.set_update_note(note.as_str().into());
+                        app.ui.set_update_available(true);
+                        *app.release.borrow_mut() = Some(release);
+                        if quiet {
+                            app.toast(format!("{note} Open Settings to update."));
+                        }
+                    }
+                    Ok(None) => {
+                        app.ui.set_update_available(false);
+                        if !quiet {
+                            app.ui
+                                .set_update_note("You have the latest version.".into());
+                        }
+                    }
+                    Err(message) => {
+                        if !quiet {
+                            app.ui.set_update_note(message.into());
+                        }
+                    }
+                }
+            });
+        });
+    }
+
+    fn install_update(self: &Rc<Self>) {
+        let Some(release) = self.release.borrow().clone() else {
+            return;
+        };
+        if self.ui.get_update_busy() {
+            return;
+        }
+        self.ui.set_update_busy(true);
+        self.ui
+            .set_update_note(format!("Downloading Tonearm {}", release.version).into());
+        let http = self.http.clone();
+        self.api.run(move || {
+            let result = update::install(&http, &release);
+            on_ui(move |app| match result {
+                Ok(()) => {
+                    app.ui.set_update_note("Restarting".into());
+                    app.audio.stop();
+                    update::restart();
+                }
+                Err(message) => {
+                    app.ui.set_update_busy(false);
+                    app.ui.set_update_note(message.into());
+                }
+            });
+        });
+    }
+
     fn sign_out(self: &Rc<Self>) {
         store::clear("session");
         self.client.set_cookie(None);
@@ -1279,6 +1377,95 @@ fn probe(args: &[String]) {
             }],
             ..Page::default()
         }),
+        "play" => {
+            let Some(resolver) = resolver::default() else {
+                return println!("error: no resolver");
+            };
+            let started = Instant::now();
+            let stream = match resolver.resolve(arg(1)) {
+                Ok(stream) => stream,
+                Err(message) => return println!("error: {message}"),
+            };
+            println!("resolved in {:?}", started.elapsed());
+            let audio = audio::Audio::new();
+            audio.volume(0.0);
+            audio.load(stream.url, stream.headers, 1);
+            for _ in 0..16 {
+                std::thread::sleep(Duration::from_millis(500));
+                let status = &audio.status;
+                println!(
+                    "{:>5?} state {} position {} ms {}",
+                    started.elapsed().as_millis(),
+                    status.state.load(Ordering::SeqCst),
+                    status.position_ms.load(Ordering::SeqCst),
+                    status.error.lock().unwrap()
+                );
+            }
+            audio.seek(150.0);
+            std::thread::sleep(Duration::from_secs(2));
+            println!(
+                "after seek to 150 s: state {} position {} ms",
+                audio.status.state.load(Ordering::SeqCst),
+                audio.status.position_ms.load(Ordering::SeqCst)
+            );
+            return;
+        }
+        "decode" => {
+            // `--probe decode <file.m4a> <out.raw>` writes interleaved i16.
+            let file = match std::fs::File::open(arg(1)) {
+                Ok(f) => f,
+                Err(e) => return println!("error: {e}"),
+            };
+            let track = match decode::Track::open(Box::new(file), arg(3).parse().unwrap_or(0)) {
+                Ok(t) => t,
+                Err(e) => return println!("error: {e}"),
+            };
+            use rodio::Source;
+            println!("channels {} rate {}", track.channels(), track.sample_rate());
+            // What the output device gets, after rodio's own conversion.
+            let rate = track.sample_rate();
+            let samples: Vec<i16> =
+                rodio::source::UniformSourceIterator::<_, i16>::new(track, 2, rate).collect();
+            let clipped = samples.iter().filter(|s| s.unsigned_abs() >= 32767).count();
+            println!("samples {} clipped {}", samples.len(), clipped);
+            let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+            let _ = std::fs::write(arg(2), bytes);
+            return;
+        }
+        "stream" => {
+            let Some(resolver) = resolver::default() else {
+                return println!("error: no resolver");
+            };
+            match resolver.resolve(arg(1)) {
+                Ok(stream) => {
+                    println!("duration {}", stream.duration);
+                    println!("headers {:?}", stream.headers);
+                    println!("url {}", stream.url);
+                    let mut request = innertube::agent(Duration::from_secs(15))
+                        .get(&stream.url)
+                        .set("Range", "bytes=2000000-2000063");
+                    for (key, value) in &stream.headers {
+                        request = request.set(key, value);
+                    }
+                    match request.call() {
+                        Ok(response) => {
+                            println!(
+                                "http {} {:?}",
+                                response.status(),
+                                response.header("Content-Type")
+                            );
+                            let mut head = Vec::new();
+                            let _ =
+                                std::io::Read::read_to_end(&mut response.into_reader(), &mut head);
+                            println!("head {:?}", String::from_utf8_lossy(&head));
+                        }
+                        Err(e) => println!("fetch error: {e}"),
+                    }
+                }
+                Err(message) => println!("error: {message}"),
+            }
+            return;
+        }
         "lyrics" => {
             let query = lyrics::Query {
                 video_id: arg(4),
@@ -1368,8 +1555,10 @@ fn main() -> Result<(), slint::PlatformError> {
         return Ok(());
     }
 
+    update::clean_up();
     let ui = AppWindow::new()?;
     set_font(&ui);
+    ui.set_app_version(update::VERSION.trim_start_matches('v').into());
     let client = Arc::new(Client::new());
     let signed_in = store::load("session").is_some_and(|cookie| client.set_cookie(Some(&cookie)));
 
@@ -1397,6 +1586,7 @@ fn main() -> Result<(), slint::PlatformError> {
         timer: Timer::default(),
         fast: Cell::new(false),
         toast_timer: Timer::default(),
+        release: RefCell::new(None),
         #[cfg(windows)]
         keys: RefCell::new(None),
     });
@@ -1454,6 +1644,8 @@ fn main() -> Result<(), slint::PlatformError> {
     on!(on_save_services, |app| app.save_services());
     on!(on_lastfm_connect, |app| app.lastfm_connect());
     on!(on_lastfm_finish, |app| app.lastfm_finish());
+    on!(on_check_update, |app| app.check_update(false));
+    on!(on_install_update, |app| app.install_update());
     app.show_services();
 
     let weak = Rc::downgrade(&app);
@@ -1467,7 +1659,9 @@ fn main() -> Result<(), slint::PlatformError> {
     if signed_in {
         app.check_account();
     }
+    app.check_update(true);
     let result = app.ui.run();
     APP.with(|slot| slot.borrow_mut().take());
+    update::relaunch_if_updated();
     result
 }

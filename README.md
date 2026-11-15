@@ -19,22 +19,30 @@ This is an early build. Here is what works and what does not.
 | Queue, radio, autoplay when the queue ends | Works |
 | Syllable synced lyrics with Apple Music style animation | Works |
 | Audio engine, streaming AAC decode, seek, volume | Written, needs testing on Windows |
-| Getting the audio stream for a track | Missing, see below |
+| Getting the audio stream for a track | Written with yt-dlp, needs testing |
 | Windows media keys and media overlay | Written, needs testing on Windows |
 | Discord Rich Presence | Written, needs testing with Discord running |
 | Last.fm scrobbling with Spotify metadata | Written, needs testing with real keys |
 | Animated album covers | Frame player works, no catalogue source yet |
 
-### The missing piece: audio streams
+### Audio streams
 
-YouTube has no public API that hands out audio streams. Every client that
-plays music without a web view gets them one of two ways. It imitates
-another YouTube client, or it runs YouTube's own player script to unlock the
-stream links. Both break often and both sit outside YouTube's terms.
+YouTube has no public API that hands out audio streams, and the ways
+around that break often and sit outside YouTube's terms. Tonearm hands the
+job to [yt-dlp](https://github.com/yt-dlp/yt-dlp), which keeps up with
+those changes. On first play it downloads `yt-dlp.exe` from yt-dlp's GitHub
+releases into `%LOCALAPPDATA%	onearm`, checks it against GitHub's SHA-256
+digest, and lets it update itself once per start. Some YouTube formats need
+a JavaScript runtime, so yt-dlp uses Deno, Node or Bun if one is installed.
 
-That choice is yours to make, so Tonearm keeps it behind one trait in
-`src/resolver.rs`. Implement `Resolver::resolve` and playback works. Until
-then you can set `TONEARM_TEST_STREAM` to any M4A URL to test the audio path.
+The resolver lives behind one trait in `src/resolver.rs`. Set
+`TONEARM_TEST_STREAM` to any M4A URL to test the audio path without it.
+
+## Updates
+
+Settings has an Updates card. Tonearm also checks GitHub for a newer release
+at start up and shows a toast when one is out. Installing downloads the new
+`tonearm.exe`, checks its SHA-256, swaps it in and restarts.
 
 ## Download
 

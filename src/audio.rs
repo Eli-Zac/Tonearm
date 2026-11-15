@@ -3,7 +3,7 @@
 //! Tracks stream over HTTP into memory while they play. A four minute AAC
 //! track is about 4 MB, and we free it as soon as the next track loads.
 
-use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink};
+use rodio::{OutputStream, OutputStreamHandle, Sink};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
@@ -20,7 +20,11 @@ pub const ENDED: u32 = 4;
 pub const FAILED: u32 = 5;
 
 enum Command {
-    Load { url: String, generation: u64 },
+    Load {
+        url: String,
+        headers: Vec<(String, String)>,
+        generation: u64,
+    },
     Play,
     Pause,
     Seek(f32),
@@ -54,11 +58,15 @@ impl Audio {
         Audio { tx, status }
     }
 
-    pub fn load(&self, url: String, generation: u64) {
+    pub fn load(&self, url: String, headers: Vec<(String, String)>, generation: u64) {
         self.status.generation.store(generation, Ordering::SeqCst);
         self.status.state.store(LOADING, Ordering::SeqCst);
         self.status.position_ms.store(0, Ordering::SeqCst);
-        let _ = self.tx.send(Command::Load { url, generation });
+        let _ = self.tx.send(Command::Load {
+            url,
+            headers,
+            generation,
+        });
     }
     pub fn play(&self) {
         let _ = self.tx.send(Command::Play);
@@ -79,7 +87,8 @@ impl Audio {
 
 fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
     // The device opens on first play, so an idle app holds no audio handle.
-    let mut output: Option<(OutputStream, OutputStreamHandle)> = None;
+    // The stream, its handle, and the device's sample rate.
+    let mut output: Option<(OutputStream, OutputStreamHandle, u32)> = None;
     let mut sink: Option<Sink> = None;
     let mut volume = 1.0f32;
     let fail = |status: &Status, message: String| {
@@ -88,23 +97,33 @@ fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
     };
     loop {
         match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(Command::Load { url, generation }) => {
+            Ok(Command::Load {
+                url,
+                headers,
+                generation,
+            }) => {
                 sink = None;
                 if generation != status.generation.load(Ordering::SeqCst) {
                     continue; // A newer track was requested while we waited.
                 }
                 if output.is_none() {
-                    match OutputStream::try_default() {
-                        Ok(pair) => output = Some(pair),
+                    match open_output() {
+                        Ok(opened) => output = Some(opened),
                         Err(e) => {
                             fail(&status, format!("No audio output: {e}"));
                             continue;
                         }
                     }
                 }
-                let handle = &output.as_ref().unwrap().1;
-                let opened = Decoder::new(HttpSource::open(url))
-                    .map_err(|e| format!("Cannot decode this track: {e}"))
+                let (_, handle, rate) = output.as_ref().unwrap();
+                let source = HttpSource::open(url, headers);
+                let shared = source.shared.clone();
+                let opened = crate::decode::Track::open(Box::new(source), *rate)
+                    .map_err(|e| {
+                        // A failed download looks like a broken file to the
+                        // decoder. Report the download error instead.
+                        shared.buffer.lock().unwrap().error.clone().unwrap_or(e)
+                    })
                     .and_then(|source| {
                         let sink =
                             Sink::try_new(handle).map_err(|e| format!("No audio output: {e}"))?;
@@ -161,6 +180,20 @@ fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
     }
 }
 
+/// Opens the default output device at its own rate and remembers that
+/// rate, so the decoder can resample to it and rodio never has to.
+fn open_output() -> Result<(OutputStream, OutputStreamHandle, u32), String> {
+    use rodio::cpal::traits::{DeviceTrait, HostTrait};
+    let device = rodio::cpal::default_host()
+        .default_output_device()
+        .ok_or("no output device")?;
+    let config = device.default_output_config().map_err(|e| e.to_string())?;
+    let rate = config.sample_rate().0;
+    let (stream, handle) =
+        OutputStream::try_from_device_config(&device, config).map_err(|e| e.to_string())?;
+    Ok((stream, handle, rate))
+}
+
 // ------------------------------------------------------------ HTTP source
 
 #[derive(Default)]
@@ -185,7 +218,7 @@ pub struct HttpSource {
 }
 
 impl HttpSource {
-    pub fn open(url: String) -> Self {
+    pub fn open(url: String, headers: Vec<(String, String)>) -> Self {
         let shared = Arc::new(Shared {
             buffer: Mutex::new(Buffer::default()),
             ready: Condvar::new(),
@@ -195,7 +228,7 @@ impl HttpSource {
         std::thread::Builder::new()
             .name("download".into())
             .spawn(move || {
-                let result = download(&url, &worker);
+                let result = download(&url, &headers, &worker);
                 let mut buffer = worker.buffer.lock().unwrap();
                 buffer.done = true;
                 buffer.error = result.err();
@@ -211,7 +244,7 @@ impl HttpSource {
 
 /// Fetches in ranged chunks. YouTube throttles one long request hard but
 /// serves short ranges at full speed.
-fn download(url: &str, shared: &Shared) -> Result<(), String> {
+fn download(url: &str, headers: &[(String, String)], shared: &Shared) -> Result<(), String> {
     let http = crate::innertube::agent(Duration::from_secs(20));
     let mut offset = 0u64;
     loop {
@@ -219,12 +252,17 @@ fn download(url: &str, shared: &Shared) -> Result<(), String> {
             return Ok(());
         }
         let range = format!("bytes={offset}-{}", offset + CHUNK - 1);
-        let response = match http
-            .get(url)
-            .set("Range", &range)
-            .set("User-Agent", crate::innertube::USER_AGENT)
-            .call()
+        let mut request = http.get(url).set("Range", &range);
+        if !headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("User-Agent"))
         {
+            request = request.set("User-Agent", crate::innertube::USER_AGENT);
+        }
+        for (key, value) in headers {
+            request = request.set(key, value);
+        }
+        let response = match request.call() {
             Ok(r) => r,
             Err(ureq::Error::Status(416, _)) => return Ok(()),
             Err(e) => return Err(format!("Stream failed: {e}")),
@@ -311,6 +349,21 @@ impl Seek for HttpSource {
         }
         self.position = target as u64;
         Ok(self.position)
+    }
+}
+
+impl symphonia::core::io::MediaSource for HttpSource {
+    fn is_seekable(&self) -> bool {
+        true
+    }
+
+    /// Waits for the first response, which carries the full length.
+    fn byte_len(&self) -> Option<u64> {
+        let mut buffer = self.shared.buffer.lock().unwrap();
+        while buffer.total.is_none() && !buffer.done {
+            buffer = self.shared.ready.wait(buffer).unwrap();
+        }
+        buffer.total.or(Some(buffer.data.len() as u64))
     }
 }
 

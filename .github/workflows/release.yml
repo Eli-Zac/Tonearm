@@ -29,6 +29,9 @@ jobs:
           key: release-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Build
+        env:
+          # Baked into the exe so the in-app updater knows what it runs.
+          TONEARM_VERSION: ${{ inputs.version || github.ref_name }}
         run: cargo build --release --locked
 
       - name: Publish

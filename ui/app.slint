@@ -79,6 +79,27 @@ component Icon inherits Text {
     vertical-alignment: center;
 }
 
+// The one loading indicator. Three dots that rise and brighten in turn.
+// It only animates while it is on screen, so an idle app stays idle.
+component Loader inherits Rectangle {
+    in property <length> dot: 7px;
+    in property <color> tint: Theme.dim;
+    property <float> t: animation-tick() / 1ms;
+    width: dot * 5;
+    height: dot * 3;
+    for i in 3: Rectangle {
+        // Each dot runs the same wave, a third of a cycle behind the last.
+        property <float> wave: (sin((t * 0.3 - i * 120) * 1deg) + 1) / 2;
+        x: i * dot * 2;
+        y: (root.height - dot) / 2 - wave * dot * 0.6;
+        width: dot;
+        height: dot;
+        border-radius: dot / 2;
+        background: root.tint;
+        opacity: 0.3 + wave * 0.7;
+    }
+}
+
 component IconButton inherits Rectangle {
     in property <string> icon;
     in property <length> size: 16px;
@@ -554,6 +575,14 @@ export component AppWindow inherits Window {
     in property <string> lastfm-user;
     in property <string> services-note;
     callback save-services();
+
+    // updates
+    in property <string> app-version;
+    in property <string> update-note;
+    in property <bool> update-available;
+    in property <bool> update-busy;
+    callback check-update();
+    callback install-update();
     callback lastfm-connect();
     callback lastfm-finish();
 
@@ -773,9 +802,10 @@ export component AppWindow inherits Window {
                         }
                         if row.kind == 3: Appear {
                             appeared => { root.load-more(); }
-                            Text {
-                                text: "Loading more";
-                                color: Theme.dim;
+                            HorizontalLayout {
+                                alignment: center;
+                                padding: 12px;
+                                Loader { }
                             }
                         }
                     }
@@ -855,6 +885,49 @@ export component AppWindow inherits Window {
                         max-width: 680px;
                         border-radius: 12px;
                         background: #ffffff0a;
+                        HorizontalLayout {
+                            padding: 20px;
+                            spacing: 12px;
+                            VerticalLayout {
+                                spacing: 6px;
+                                alignment: center;
+                                Text {
+                                    text: "Tonearm " + root.app-version;
+                                    color: Theme.text;
+                                    font-size: 16px;
+                                    font-weight: 600;
+                                }
+                                Text {
+                                    text: root.update-note != "" ? root.update-note : "Updates come from the GitHub releases page.";
+                                    color: root.update-available ? Theme.accent : Theme.dim;
+                                    font-size: 13px;
+                                    wrap: word-wrap;
+                                }
+                            }
+                            if root.update-busy: VerticalLayout {
+                                alignment: center;
+                                Loader { }
+                            }
+                            if !root.update-busy: VerticalLayout {
+                                alignment: center;
+                                PillButton {
+                                    text: root.update-available ? "Update and restart" : "Check for updates";
+                                    primary: root.update-available;
+                                    clicked => {
+                                        if root.update-available {
+                                            root.install-update();
+                                        } else {
+                                            root.check-update();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        max-width: 680px;
+                        border-radius: 12px;
+                        background: #ffffff0a;
                         VerticalLayout {
                             padding: 20px;
                             spacing: 10px;
@@ -926,10 +999,8 @@ export component AppWindow inherits Window {
                 }
             }
         }
-        if root.loading && root.rows.length == 0 && root.nav != 3: Text {
-            text: "Loading";
-            color: Theme.dim;
-            font-size: 14px;
+        if root.loading && root.rows.length == 0 && root.nav != 3: Loader {
+            dot: 9px;
         }
     }
 
@@ -978,10 +1049,16 @@ export component AppWindow inherits Window {
             alignment: start;
             padding-top: 8px;
             padding-bottom: 160px;
-            if root.lyrics-state != 2: Text {
+            if root.lyrics-state == 1: HorizontalLayout {
+                padding-left: 20px;
+                height: 40px;
+                alignment: start;
+                Loader { }
+            }
+            if root.lyrics-state == 0 || root.lyrics-state == 3: Text {
                 x: 20px;
                 height: 40px;
-                text: root.lyrics-state == 1 ? "Looking for lyrics" : root.lyrics-state == 3 ? "No lyrics for this track" : "Play a song to see its lyrics";
+                text: root.lyrics-state == 3 ? "No lyrics for this track" : "Play a song to see its lyrics";
                 color: Theme.dim;
                 font-size: 14px;
                 vertical-alignment: center;
@@ -1076,7 +1153,7 @@ export component AppWindow inherits Window {
             x: 88px;
             y: 46px;
             width: max(60px, parent.width / 2 - 250px - 88px - 44px);
-            text: root.buffering ? "Loading" : root.has-track ? root.track-artist : "Pick something to play";
+            text: root.has-track ? root.track-artist : "Pick something to play";
             color: Theme.dim;
             font-size: 12px;
             overflow: elide;
@@ -1102,10 +1179,14 @@ export component AppWindow inherits Window {
             y: 8px;
             width: 40px;
             height: 40px;
-            icon: root.playing ? Icons.pause : Icons.play;
+            icon: root.buffering ? "" : root.playing ? Icons.pause : Icons.play;
             size: 16px;
             filled: true;
             clicked => { root.toggle-play(); }
+            if root.buffering: Loader {
+                dot: 5px;
+                tint: #08080a;
+            }
         }
         IconButton {
             x: parent.width / 2 + 32px;
