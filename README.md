@@ -36,6 +36,23 @@ That choice is yours to make, so Tonearm keeps it behind one trait in
 `src/resolver.rs`. Implement `Resolver::resolve` and playback works. Until
 then you can set `TONEARM_TEST_STREAM` to any M4A URL to test the audio path.
 
+## Download
+
+Grab `tonearm.exe` from the Releases page on GitHub. The file is unsigned,
+so Windows SmartScreen warns on first run. Pick "More info", then "Run
+anyway".
+
+To cut a release, push a version tag. GitHub builds the exe on Windows and
+attaches it.
+
+```bash
+git tag v0.1.1
+```
+
+```bash
+git push origin v0.1.1
+```
+
 ## Build
 
 You need a recent stable Rust.
