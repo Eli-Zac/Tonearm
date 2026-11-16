@@ -84,15 +84,22 @@ pub fn link_runs(text: &str, item: &Item) -> (Vec<Run>, Vec<Run>) {
     };
     for (name, id) in &item.artists {
         let Some(id) = id else { continue };
-        if let Some(at) = rest.find(name.as_str()) {
+        // Names can carry stray spaces, which would widen the link and its
+        // underline past the letters.
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        if let Some(at) = rest.find(name) {
             plain(&mut runs, &rest[..at]);
-            runs.push((name.clone(), id.clone(), false));
+            runs.push((name.to_string(), id.clone(), false));
             rest = &rest[at + name.len()..];
             linked = true;
         }
     }
     if let Some((name, id)) = &item.album {
-        if let Some(at) = rest.find(name.as_str()) {
+        let name = name.trim();
+        if let Some(at) = rest.find(name).filter(|_| !name.is_empty()) {
             let before = &rest[..at];
             // The dot before the album goes with it, so hiding the album
             // hides both.
@@ -103,7 +110,7 @@ pub fn link_runs(text: &str, item: &Item) -> (Vec<Run>, Vec<Run>) {
                 }
                 None => plain(&mut runs, before),
             }
-            runs.push((name.clone(), id.clone(), true));
+            runs.push((name.to_string(), id.clone(), true));
             rest = &rest[at + name.len()..];
             linked = true;
         }
@@ -246,15 +253,9 @@ impl App {
         });
     }
 
-    /// The links under the playing track's title: its artists and album.
+    /// The links under the playing track's title: just its artists.
     pub fn show_track_links(&self, item: &Item, artist: &str) {
-        let album = self.ui.get_track_album();
-        let line = if album.is_empty() {
-            artist.to_string()
-        } else {
-            format!("{artist} • {album}")
-        };
-        let (runs, _) = link_runs(&line, item);
+        let (_, runs) = link_runs(artist, item);
         // Shows the plain artist when nothing links.
         self.ui.set_track_runs(ModelRc::new(VecModel::from(runs)));
     }

@@ -50,6 +50,10 @@ pub enum Input {
 
 enum Command {
     Load { input: Input, generation: u64 },
+    /// Opens the next song ahead, ready to fade in.
+    Prepare { input: Input, token: u64 },
+    /// Fades from the playing song into the prepared one.
+    Crossfade { token: u64, seconds: f32 },
     Play,
     Pause,
     Seek(f32),
@@ -65,6 +69,9 @@ pub struct Status {
     pub duration_ms: AtomicU64,
     /// Which `load` call the state belongs to.
     pub generation: AtomicU64,
+    /// Which `prepare` call has its song open and ready to fade in. Zero
+    /// when none is.
+    pub prepared: AtomicU64,
     pub error: Mutex<String>,
 }
 
@@ -90,7 +97,23 @@ impl Audio {
         self.status.state.store(LOADING, Ordering::SeqCst);
         self.status.position_ms.store(0, Ordering::SeqCst);
         self.status.duration_ms.store(0, Ordering::SeqCst);
+        self.status.prepared.store(0, Ordering::SeqCst);
         let _ = self.tx.send(Command::Load { input, generation });
+    }
+    /// Opens the song after this one in the background, so a crossfade can
+    /// start it without a wait. `token` names this call in `prepared`.
+    pub fn prepare(&self, input: Input, token: u64) {
+        self.status.prepared.store(0, Ordering::SeqCst);
+        let _ = self.tx.send(Command::Prepare { input, token });
+    }
+    /// Fades the playing song out and the prepared one in over `seconds`.
+    /// The new song is reported under `generation` from now on. Call only
+    /// once `prepared` shows `token`.
+    pub fn crossfade(&self, token: u64, generation: u64, seconds: f32) {
+        self.status.generation.store(generation, Ordering::SeqCst);
+        self.status.position_ms.store(0, Ordering::SeqCst);
+        self.status.duration_ms.store(0, Ordering::SeqCst);
+        let _ = self.tx.send(Command::Crossfade { token, seconds });
     }
     pub fn play(&self) {
         let _ = self.tx.send(Command::Play);
@@ -105,6 +128,7 @@ impl Audio {
         let _ = self.tx.send(Command::Volume(volume));
     }
     pub fn stop(&self) {
+        self.status.prepared.store(0, Ordering::SeqCst);
         let _ = self.tx.send(Command::Stop);
     }
 }
@@ -114,6 +138,17 @@ fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
     // The stream, its handle, and the device's sample rate.
     let mut output: Option<(OutputStream, OutputStreamHandle, u32)> = None;
     let mut sink: Option<Sink> = None;
+    // Tells the playing song to fade out, once it holds a length.
+    let mut fade_out = Arc::new(AtomicU32::new(0));
+    // The song going out during a crossfade, fading under the new one.
+    let mut fading: Option<Sink> = None;
+    // The next song, opened ahead for a crossfade, and its `prepare` token.
+    let mut next: Option<(u64, crate::decode::Track)> = None;
+    // The latest `prepare` token. Songs opened for older ones are dropped.
+    let mut wanted = 0u64;
+    // Songs open on their own threads, as a stream can take seconds to
+    // start, and hand themselves back here.
+    let (opened_tx, opened_rx) = mpsc::channel::<(u64, Result<crate::decode::Track, String>)>();
     let mut volume = 1.0f32;
     let fail = |status: &Status, message: String| {
         *status.error.lock().unwrap() = message;
@@ -123,6 +158,9 @@ fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Command::Load { input, generation }) => {
                 sink = None;
+                fading = None;
+                next = None;
+                wanted = 0;
                 if generation != status.generation.load(Ordering::SeqCst) {
                     continue; // A newer track was requested while we waited.
                 }
@@ -136,58 +174,74 @@ fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
                     }
                 }
                 let (_, handle, rate) = output.as_ref().unwrap();
-                let opened = match input {
-                    Input::Http {
-                        url,
-                        headers,
-                        cache_as,
-                    } => {
-                        let source = HttpSource::open(url, headers, cache_as);
-                        let shared = source.shared.clone();
-                        let spare = source.reader();
-                        // Opening reads only the head of the file, so playback
-                        // starts after the first few kilobytes arrive.
-                        shared.opening.store(true, Ordering::SeqCst);
-                        let first = crate::decode::Track::open(Box::new(source), *rate);
-                        shared.opening.store(false, Ordering::SeqCst);
-                        // A file with its index at the end cannot open from the
-                        // head. Try again the slow way, reading the whole file.
-                        first
-                            .or_else(|_| crate::decode::Track::open(Box::new(spare), *rate))
-                            .map_err(|e| {
-                                // A failed download looks like a broken file
-                                // to the decoder. Report the download error.
-                                shared.buffer.lock().unwrap().error.clone().unwrap_or(e)
-                            })
+                let opened = open_track(input, *rate).and_then(|track| {
+                    if let Some(length) = rodio::Source::total_duration(&track) {
+                        status
+                            .duration_ms
+                            .store(length.as_millis() as u64, Ordering::SeqCst);
                     }
-                    Input::File(path) => {
-                        let opened = std::fs::File::open(&path)
-                            .map_err(|e| format!("Cannot open the saved song: {e}"))
-                            .and_then(|file| crate::decode::Track::open(Box::new(file), *rate));
-                        if opened.is_err() {
-                            crate::offline::discard_broken(&path);
-                        }
-                        opened
+                    start(handle, track, volume, 0.0)
+                });
+                match opened {
+                    Ok((new, control)) => {
+                        sink = Some(new);
+                        fade_out = control;
+                        status.state.store(PLAYING, Ordering::SeqCst);
                     }
-                };
-                let opened = opened.and_then(|source| {
-                        if let Some(length) = rodio::Source::total_duration(&source) {
+                    Err(message) => fail(&status, message),
+                }
+            }
+            Ok(Command::Prepare { input, token }) => {
+                wanted = token;
+                next = None;
+                // Only asked for while a song plays, so the device is open.
+                if let Some((_, _, rate)) = &output {
+                    let (rate, opened) = (*rate, opened_tx.clone());
+                    std::thread::Builder::new()
+                        .name("prepare".into())
+                        .spawn(move || {
+                            let _ = opened.send((token, open_track(input, rate)));
+                        })
+                        .expect("cannot start the prepare thread");
+                }
+            }
+            Ok(Command::Crossfade { token, seconds }) => {
+                status.prepared.store(0, Ordering::SeqCst);
+                let ready = next.take().filter(|(t, _)| *t == token);
+                let started = match (ready, &output) {
+                    (Some((_, track)), Some((_, handle, _))) => {
+                        if let Some(length) = rodio::Source::total_duration(&track) {
                             status
                                 .duration_ms
                                 .store(length.as_millis() as u64, Ordering::SeqCst);
                         }
-                        let sink =
-                            Sink::try_new(handle).map_err(|e| format!("No audio output: {e}"))?;
-                        sink.set_volume(volume);
-                        sink.append(source);
-                        Ok(sink)
-                    });
-                match opened {
-                    Ok(new) => {
-                        sink = Some(new);
-                        status.state.store(PLAYING, Ordering::SeqCst);
+                        start(handle, track, volume, seconds)
                     }
-                    Err(message) => fail(&status, message),
+                    // The app checks `prepared` first, so this is a race lost
+                    // to another command. The player retries the song afresh.
+                    _ => Err(format!("{STREAM_FAILED}: the next song was not ready")),
+                };
+                match started {
+                    Ok((new, control)) => {
+                        // A pause sent just before stays a pause.
+                        let paused = sink.as_ref().is_some_and(|s| s.is_paused());
+                        if paused {
+                            new.pause();
+                        }
+                        // The old song fades out over the same time, under
+                        // the new one, and then ends.
+                        fade_out.store((seconds * 1000.0) as u32, Ordering::SeqCst);
+                        fading = sink.replace(new);
+                        fade_out = control;
+                        status
+                            .state
+                            .store(if paused { PAUSED } else { PLAYING }, Ordering::SeqCst);
+                    }
+                    Err(message) => {
+                        sink = None;
+                        fading = None;
+                        fail(&status, message);
+                    }
                 }
             }
             Ok(Command::Play) => {
@@ -195,30 +249,61 @@ fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
                     s.play();
                     status.state.store(PLAYING, Ordering::SeqCst);
                 }
+                if let Some(s) = &fading {
+                    s.play();
+                }
             }
             Ok(Command::Pause) => {
                 if let Some(s) = &sink {
                     s.pause();
                     status.state.store(PAUSED, Ordering::SeqCst);
                 }
+                if let Some(s) = &fading {
+                    s.pause();
+                }
             }
             Ok(Command::Seek(seconds)) => {
+                // A seek during a crossfade cuts the old song off. The new
+                // one comes in at full volume, as the source ends its fade.
+                fading = None;
                 if let Some(s) = &sink {
                     let _ = s.try_seek(Duration::from_secs_f32(seconds.max(0.0)));
                 }
             }
             Ok(Command::Volume(v)) => {
                 volume = v.clamp(0.0, 1.0);
-                if let Some(s) = &sink {
+                // Fades scale the samples, so both songs follow the slider.
+                for s in sink.iter().chain(fading.iter()) {
                     s.set_volume(volume);
                 }
             }
             Ok(Command::Stop) => {
                 sink = None;
+                fading = None;
+                next = None;
+                wanted = 0;
                 status.state.store(IDLE, Ordering::SeqCst);
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
+        }
+        while let Ok((token, opened)) = opened_rx.try_recv() {
+            // Dropping an older song stops its download.
+            if token != wanted {
+                continue;
+            }
+            match opened {
+                Ok(track) => {
+                    next = Some((token, track));
+                    status.prepared.store(token, Ordering::SeqCst);
+                }
+                // The song ends and the next starts as it did without
+                // crossfade, which shows any error then.
+                Err(message) => eprintln!("crossfade: {message}"),
+            }
+        }
+        if fading.as_ref().is_some_and(|s| s.empty()) {
+            fading = None;
         }
         if let Some(s) = &sink {
             status
@@ -228,6 +313,172 @@ fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
                 status.state.store(ENDED, Ordering::SeqCst);
             }
         }
+    }
+}
+
+/// Opens a track for the decoder. Blocks until its first bytes arrive.
+fn open_track(input: Input, rate: u32) -> Result<crate::decode::Track, String> {
+    match input {
+        Input::Http {
+            url,
+            headers,
+            cache_as,
+        } => {
+            let source = HttpSource::open(url, headers, cache_as);
+            let shared = source.shared.clone();
+            let spare = source.reader();
+            // Opening reads only the head of the file, so playback
+            // starts after the first few kilobytes arrive.
+            shared.opening.store(true, Ordering::SeqCst);
+            let first = crate::decode::Track::open(Box::new(source), rate);
+            shared.opening.store(false, Ordering::SeqCst);
+            // A file with its index at the end cannot open from the
+            // head. Try again the slow way, reading the whole file.
+            first
+                .or_else(|_| crate::decode::Track::open(Box::new(spare), rate))
+                .map_err(|e| {
+                    // A failed download looks like a broken file
+                    // to the decoder. Report the download error.
+                    shared.buffer.lock().unwrap().error.clone().unwrap_or(e)
+                })
+        }
+        Input::File(path) => {
+            let opened = std::fs::File::open(&path)
+                .map_err(|e| format!("Cannot open the saved song: {e}"))
+                .and_then(|file| crate::decode::Track::open(Box::new(file), rate));
+            if opened.is_err() {
+                crate::offline::discard_broken(&path);
+            }
+            opened
+        }
+    }
+}
+
+/// Plays `track` on a sink of its own, fading in over `fade_in` seconds.
+/// Returns the sink and the handle that fades it out.
+fn start(
+    handle: &OutputStreamHandle,
+    track: crate::decode::Track,
+    volume: f32,
+    fade_in: f32,
+) -> Result<(Sink, Arc<AtomicU32>), String> {
+    let sink = Sink::try_new(handle).map_err(|e| format!("No audio output: {e}"))?;
+    sink.set_volume(volume);
+    let fade = Fade::new(track, fade_in);
+    let control = fade.fade_out.clone();
+    sink.append(fade);
+    Ok((sink, control))
+}
+
+// ---------------------------------------------------------------- fading
+
+/// The gains `t` of the way through a crossfade, for the song coming in
+/// and the one going out. Equal power: their squares sum to one, so two
+/// unrelated songs together sound as loud as either alone, with no dip in
+/// the middle.
+fn fade_gains(t: f32) -> (f32, f32) {
+    let angle = t.clamp(0.0, 1.0) * std::f32::consts::FRAC_PI_2;
+    (angle.sin(), angle.cos())
+}
+
+/// A track that can fade in at its start and fade out from any point.
+/// The gain is worked out for every sample, so fades are smooth. The
+/// sink's volume, the user's slider, applies on top.
+struct Fade {
+    track: crate::decode::Track,
+    /// Samples handed out so far.
+    played: u64,
+    /// Samples the fade in lasts. Zero for none.
+    fade_in: u64,
+    /// Milliseconds to fade out over, set from the audio thread. Zero
+    /// until the fade out starts.
+    fade_out: Arc<AtomicU32>,
+    /// Where the fade out began, in samples played, and how many it lasts.
+    out: Option<(u64, u64)>,
+}
+
+impl Fade {
+    fn new(track: crate::decode::Track, fade_in: f32) -> Fade {
+        let fade_in = samples_in(&track, fade_in.max(0.0) * 1000.0);
+        Fade {
+            track,
+            played: 0,
+            fade_in,
+            fade_out: Arc::new(AtomicU32::new(0)),
+            out: None,
+        }
+    }
+}
+
+/// How many samples, across all channels, play in `ms` milliseconds.
+fn samples_in(track: &crate::decode::Track, ms: f32) -> u64 {
+    use rodio::Source;
+    let frames = (ms as f64 / 1000.0 * track.sample_rate() as f64) as u64;
+    frames * track.channels() as u64
+}
+
+impl Iterator for Fade {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        use rodio::Source;
+        // Fades start and stop only between frames, so the channels of a
+        // frame always come out together.
+        if self.played % self.track.channels().max(1) as u64 == 0 {
+            if self.out.is_none() {
+                let ms = self.fade_out.load(Ordering::Relaxed);
+                if ms > 0 {
+                    self.out = Some((self.played, samples_in(&self.track, ms as f32).max(1)));
+                }
+            }
+            if let Some((from, length)) = self.out {
+                if self.played - from >= length {
+                    return None;
+                }
+            }
+        }
+        let mut sample = self.track.next()?;
+        if self.played < self.fade_in {
+            sample *= fade_gains(self.played as f32 / self.fade_in as f32).0;
+        }
+        if let Some((from, length)) = self.out {
+            sample *= fade_gains((self.played - from) as f32 / length as f32).1;
+        }
+        self.played += 1;
+        Some(sample)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let (low, _) = self.track.size_hint();
+        let left = match self.out {
+            Some((from, length)) => (from + length).saturating_sub(self.played) as usize,
+            None => usize::MAX,
+        };
+        (low.min(left), None)
+    }
+}
+
+impl rodio::Source for Fade {
+    fn current_frame_len(&self) -> Option<usize> {
+        self.track.current_frame_len()
+    }
+
+    fn channels(&self) -> u16 {
+        self.track.channels()
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.track.sample_rate()
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        self.track.total_duration()
+    }
+
+    /// A seek lands at full volume, even midway through a fade in.
+    fn try_seek(&mut self, position: Duration) -> Result<(), rodio::source::SeekError> {
+        self.fade_in = 0;
+        self.track.try_seek(position)
     }
 }
 
@@ -477,5 +728,36 @@ impl symphonia::core::io::MediaSource for HttpSource {
             buffer = self.shared.ready.wait(buffer).unwrap();
         }
         buffer.total.or(Some(buffer.data.len() as u64))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_crossfade_starts_with_the_old_song_and_ends_with_the_new() {
+        assert_eq!(fade_gains(0.0), (0.0, 1.0));
+        let (incoming, outgoing) = fade_gains(1.0);
+        assert!((incoming - 1.0).abs() < 1e-6 && outgoing.abs() < 1e-6);
+        // Out of range clamps rather than overshooting.
+        assert_eq!(fade_gains(-1.0), fade_gains(0.0));
+        assert_eq!(fade_gains(2.0), fade_gains(1.0));
+    }
+
+    #[test]
+    fn a_crossfade_keeps_the_loudness_steady() {
+        let mut last = (0.0, 1.0);
+        for step in 0..=100 {
+            let (incoming, outgoing) = fade_gains(step as f32 / 100.0);
+            assert!((incoming * incoming + outgoing * outgoing - 1.0).abs() < 1e-5);
+            // The new song only gets louder and the old one only quieter.
+            assert!(incoming >= last.0 && outgoing <= last.1);
+            last = (incoming, outgoing);
+        }
+        // Halfway, both play at the same level, about 3 dB down.
+        let (incoming, outgoing) = fade_gains(0.5);
+        assert!((incoming - outgoing).abs() < 1e-6);
+        assert!((incoming - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
     }
 }

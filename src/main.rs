@@ -1,6 +1,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod audio;
+mod blur;
 mod canvas;
 mod decode;
 mod detail;
@@ -211,6 +212,11 @@ struct LyricsState {
     /// The lyrics as found, to break into rows again when the space for
     /// them changes width.
     found: Option<lyrics::Lyrics>,
+    /// The rows on show, so their blurred images can be added once drawn.
+    model: Option<Rc<VecModel<LyricRow>>>,
+    /// Counts the times the rows were laid out, so blurred images drawn
+    /// for an older layout are dropped.
+    layout: u64,
 }
 
 /// How much of the current track has really played. Drives scrobbling.
@@ -223,6 +229,35 @@ struct Listen {
     /// Whether this play has counted as a listen in the history yet.
     counted: bool,
     was_playing: bool,
+}
+
+/// A song opened ahead so the playing one can crossfade into it.
+struct FadeNext {
+    /// Names it to the audio engine.
+    token: u64,
+    /// The player generation of the song it follows.
+    generation: u64,
+    /// Its queue position and video id, to notice the queue changing.
+    index: usize,
+    video_id: String,
+    /// Its length as yt-dlp gave it, in seconds. Zero when unknown.
+    duration: f32,
+}
+
+/// Crossfade lengths offered in Settings, in seconds. Zero is off.
+const CROSSFADE_CHOICES: [u32; 9] = [0, 1, 2, 3, 4, 6, 8, 10, 12];
+/// How long before the fade the next song starts opening. Its link and
+/// first bytes can take a while to come.
+const PREPARE_AHEAD: f32 = 30.0;
+/// A fade shorter than this, left after a late start, is not worth it.
+const SHORTEST_FADE: f32 = 0.5;
+
+/// The crossfade length saved in Settings. Off when none is saved.
+fn load_crossfade() -> u32 {
+    store::load("crossfade")
+        .and_then(|text| text.trim().parse().ok())
+        .filter(|seconds| CROSSFADE_CHOICES.contains(seconds))
+        .unwrap_or(0)
 }
 
 struct Cover {
@@ -266,6 +301,12 @@ struct App {
     /// The Spotify Canvas looping as the cover, with the track it is for.
     canvas: RefCell<Option<(u64, canvas::Clip)>>,
     clock: Cell<(u64, Instant)>,
+    /// Seconds a song crossfades into the next one over. Zero is off.
+    crossfade: Cell<u32>,
+    /// The next song, being opened ahead for a crossfade.
+    fade_next: RefCell<Option<FadeNext>>,
+    /// Counts the songs opened ahead, so each gets its own token.
+    fade_token: Cell<u64>,
     timer: Timer,
     fast: Cell<bool>,
     /// Whether the window was minimised at the last tick.
@@ -1592,6 +1633,8 @@ impl App {
 
     /// Starts a track, from `start` seconds in when given.
     fn load_audio(&self, input: audio::Input, generation: u64, start: Option<f32>) {
+        // Loading drops whatever was opened ahead for a crossfade.
+        self.fade_next.borrow_mut().take();
         self.audio.load(input, generation);
         // Commands run in order, so the seek lands once the track is loaded.
         if let Some(seconds) = start.filter(|s| *s > 0.0) {
@@ -1802,6 +1845,149 @@ impl App {
         } else {
             self.next();
         }
+    }
+
+    // ------------------------------------------------------------ crossfade
+
+    fn set_crossfade_choice(&self, choice: i32) {
+        let seconds = CROSSFADE_CHOICES
+            .get(choice.max(0) as usize)
+            .copied()
+            .unwrap_or(0);
+        self.crossfade.set(seconds);
+        self.disk.run(move || {
+            let _ = store::save("crossfade", &seconds.to_string());
+        });
+    }
+
+    /// The queue position and video id of the song the playing one runs
+    /// into at its end, when that can be a crossfade. Never under repeat
+    /// one, where the song plays again.
+    fn crossfade_target(&self) -> Option<(usize, String)> {
+        let player = self.player.borrow();
+        if player.repeat == Repeat::One {
+            return None;
+        }
+        // The same choice `next` makes.
+        let mut next = player.index + 1;
+        if next >= player.queue.len() {
+            if player.repeat == Repeat::Off {
+                return None;
+            }
+            next = 0;
+        }
+        if next == player.index {
+            return None;
+        }
+        let video_id = player.queue.get(next)?.video_id.clone()?;
+        Some((next, video_id))
+    }
+
+    /// Called each tick while a song plays. Opens the next song ahead of
+    /// the fade, and once the playing song is within the crossfade of its
+    /// end, fades into it. Returns whether it moved on to the next song.
+    ///
+    /// If the next song is not open in time, nothing happens here: the
+    /// song ends and the next one starts the usual way.
+    fn crossfade_check(self: &Rc<Self>, generation: u64, duration: f32) -> bool {
+        let fade = self.crossfade.get() as f32;
+        if fade == 0.0 || duration <= 0.0 {
+            return false;
+        }
+        let Some((index, video_id)) = self.crossfade_target() else {
+            return false;
+        };
+        let status = &self.audio.status;
+        let left = duration - status.position_ms.load(Ordering::SeqCst) as f32 / 1000.0;
+        let opened = self
+            .fade_next
+            .borrow()
+            .as_ref()
+            .filter(|n| n.generation == generation && n.index == index && n.video_id == video_id)
+            .map(|n| (n.token, n.duration));
+        let Some((token, next_duration)) = opened else {
+            // Also opens it again when the queue changed underneath.
+            if left <= fade + PREPARE_AHEAD {
+                self.prepare_next(generation, index, video_id);
+            }
+            return false;
+        };
+        if left > fade || status.prepared.load(Ordering::SeqCst) != token {
+            return false;
+        }
+        // Reached late, as after a seek near the end, it fades over what
+        // is left rather than cutting the old song short.
+        if left < SHORTEST_FADE {
+            return false;
+        }
+        self.crossfade_into(index, token, left.min(fade), next_duration);
+        true
+    }
+
+    /// Opens the song at `index` in the audio engine, ready to fade in.
+    fn prepare_next(self: &Rc<Self>, generation: u64, index: usize, video_id: String) {
+        let token = self.fade_token.get() + 1;
+        self.fade_token.set(token);
+        *self.fade_next.borrow_mut() = Some(FadeNext {
+            token,
+            generation,
+            index,
+            video_id: video_id.clone(),
+            duration: 0.0,
+        });
+        if let Some(path) = offline::local_file(&video_id) {
+            self.audio.prepare(audio::Input::File(path), token);
+            return;
+        }
+        let Some(resolver) = self.resolver.clone() else {
+            return;
+        };
+        self.api.run(move || {
+            // Usually at once: `prefetch_next` got the link when the
+            // playing song started.
+            let result = resolver.resolve(&video_id);
+            on_ui(move |app| {
+                let mut next = app.fade_next.borrow_mut();
+                let Some(next) = next.as_mut().filter(|n| n.token == token) else {
+                    return;
+                };
+                match result {
+                    Ok(stream) => {
+                        next.duration = stream.duration;
+                        app.audio.prepare(
+                            audio::Input::Http {
+                                url: stream.url,
+                                headers: stream.headers,
+                                cache_as: Some(video_id),
+                            },
+                            token,
+                        );
+                    }
+                    // Left in place, so it is not tried again every tick.
+                    Err(message) => eprintln!("crossfade: {message}"),
+                }
+            });
+        });
+    }
+
+    /// Fades into the prepared song at `index` over `seconds`. The player,
+    /// Now playing, lyrics and media keys switch to it as the fade starts,
+    /// the same way as when a song starts.
+    fn crossfade_into(self: &Rc<Self>, index: usize, token: u64, seconds: f32, duration: f32) {
+        self.fade_next.borrow_mut().take();
+        let Some((_, generation, near_end)) = self.show_track(index) else {
+            return;
+        };
+        self.audio.crossfade(token, generation, seconds);
+        if duration > 0.0 {
+            self.player.borrow_mut().duration = duration;
+            self.ui.set_duration_text(clock_text(duration));
+        }
+        self.save_session();
+        if near_end && self.player.borrow().repeat == Repeat::Off {
+            self.extend_with_radio();
+        }
+        self.prefetch_next();
     }
 
     /// Gets a song's stream link in the background, so playing it starts
@@ -2110,11 +2296,13 @@ impl App {
         // the plain one.
         let room = (self.ui.get_lyrics_width() - 40.0).max(160.0);
         let (columns, height) = if found.synced {
-            ((room / 13.5) as usize, 36.0)
+            // Wide enough for the sung line, which is drawn larger.
+            let char_px = self.ui.get_lyrics_char_px() * self.ui.get_lyrics_grow();
+            ((room / char_px) as usize, 36.0)
         } else {
             ((room / 7.0) as usize, 24.0)
         };
-        let rows = VecModel::default();
+        let rows = Rc::new(VecModel::<LyricRow>::default());
         let mut y = 0.0;
         let mut previous_end = 0u32;
         for (number, line) in found.lines.iter().enumerate() {
@@ -2129,6 +2317,7 @@ impl App {
                         start,
                         end,
                         line: number - 1,
+                        first: true,
                         ..LyricRow::default()
                     });
                 }
@@ -2142,11 +2331,8 @@ impl App {
                 }
                 previous_end = line.end;
             }
-            for (text, syllables) in wrap(line, columns) {
-                let (start, end) = (line.start as i32, line.end as i32);
-                state.rows.push((start, end, y, number));
-                y += height;
-                let syllables: Vec<SyllableData> = syllables
+            let syllable_data = |syllables: &[lyrics::Syllable]| -> ModelRc<SyllableData> {
+                let data: Vec<SyllableData> = syllables
                     .iter()
                     .map(|s| SyllableData {
                         text: s.text.trim_end().into(),
@@ -2155,14 +2341,46 @@ impl App {
                         space: s.text.ends_with(' '),
                     })
                     .collect();
+                ModelRc::new(VecModel::from(data))
+            };
+            let (start, end) = (line.start as i32, line.end as i32);
+            for (row, (text, syllables)) in wrap(line, columns).into_iter().enumerate() {
+                state.rows.push((start, end, y, number));
+                y += height;
                 rows.push(LyricRow {
                     text: text.into(),
-                    syllables: ModelRc::new(VecModel::from(syllables)),
+                    syllables: syllable_data(&syllables),
                     start,
                     end,
                     kind: 0,
                     line: number,
+                    first: row == 0,
+                    align: line.align as i32,
+                    ..LyricRow::default()
                 });
+            }
+            // Backing vocals, smaller, under the line. They show while it
+            // is sung, so they take no room in the layout here.
+            if found.synced && !line.background.is_empty() {
+                let backing = lyrics::Line {
+                    text: line.background_text.clone(),
+                    syllables: line.background.clone(),
+                    ..lyrics::Line::default()
+                };
+                // The smaller letters fit more to a row.
+                let wider = columns * 5 / 3;
+                for (text, syllables) in wrap(&backing, wider) {
+                    rows.push(LyricRow {
+                        text: text.into(),
+                        syllables: syllable_data(&syllables),
+                        start,
+                        end,
+                        kind: 3,
+                        line: number,
+                        align: line.align as i32,
+                        ..LyricRow::default()
+                    });
+                }
             }
         }
         state.synced = found.synced;
@@ -2170,12 +2388,69 @@ impl App {
         // them itself and scrolls to `lyrics_line`.
         let texts: Vec<SharedString> = found.lines.iter().map(|l| l.text.as_str().into()).collect();
         self.ui.set_lyrics_preview(ModelRc::new(VecModel::from(texts)));
-        self.ui.set_lyrics(ModelRc::new(rows));
+        self.ui.set_lyrics(ModelRc::from(rows.clone()));
         self.ui.set_lyrics_synced(found.synced);
         self.ui.set_lyrics_source(found.source.into());
         self.ui.set_lyrics_focus(0.0);
         self.ui.set_lyrics_line(-1);
         self.ui.set_lyrics_state(2);
+
+        // Synced lines blur with distance from the sung one. Draw each
+        // line out of focus away from the window thread, and add the
+        // images to the rows as they come.
+        state.layout += 1;
+        let layout = state.layout;
+        state.model = Some(rows.clone());
+        if !found.synced {
+            return;
+        }
+        let lines: Vec<(usize, String)> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.kind == 0)
+            .map(|(index, row)| (index, row.text.to_string()))
+            .collect();
+        let scale = self.ui.window().scale_factor();
+        let px = self.ui.get_lyrics_font() * scale;
+        std::thread::spawn(move || {
+            // Light and heavy blur, as standard deviations in pixels.
+            let (light, heavy) = (1.2 * scale, 3.2 * scale);
+            let margin = (heavy * 3.0).ceil() as u32 + 1;
+            for chunk in lines.chunks(6) {
+                let drawn: Vec<_> = chunk
+                    .iter()
+                    .filter_map(|(index, text)| {
+                        let soft = blur::render(text, px, light, margin)?;
+                        let softer = blur::render(text, px, heavy, margin)?;
+                        Some((*index, soft, softer))
+                    })
+                    .collect();
+                let keep_going = Arc::new(std::sync::atomic::AtomicBool::new(true));
+                let flag = keep_going.clone();
+                on_ui(move |app| {
+                    let state = app.lyrics.borrow();
+                    let Some(model) = state.model.as_ref().filter(|_| {
+                        state.generation == generation && state.layout == layout
+                    }) else {
+                        flag.store(false, Ordering::SeqCst);
+                        return;
+                    };
+                    for (index, soft, softer) in drawn {
+                        let Some(mut row) = model.row_data(index) else { continue };
+                        row.soft_pad = margin as f32 / scale;
+                        row.soft_height = soft.height() as f32 / scale;
+                        row.soft = Image::from_rgba8(soft);
+                        row.softer = Image::from_rgba8(softer);
+                        model.set_row_data(index, row);
+                    }
+                });
+                // Stops early once the window has moved on. The answer
+                // lags a chunk behind, which is fine.
+                if !keep_going.load(Ordering::SeqCst) {
+                    return;
+                }
+            }
+        });
     }
 
     // ---------------------------------------------------------------- tick
@@ -2246,6 +2521,9 @@ impl App {
                     }
                 }
                 _ => {}
+            }
+            if playing && self.crossfade_check(generation, duration) {
+                return;
             }
             // The audio thread reports position ten times a second. Between
             // reports we run our own clock so lyrics move smoothly.
@@ -3145,6 +3423,9 @@ fn main() -> Result<(), slint::PlatformError> {
         cover: RefCell::new(None),
         canvas: RefCell::new(None),
         clock: Cell::new((0, Instant::now())),
+        crossfade: Cell::new(load_crossfade()),
+        fade_next: RefCell::new(None),
+        fade_token: Cell::new(0),
         timer: Timer::default(),
         fast: Cell::new(false),
         minimized: Cell::new(false),
@@ -3233,6 +3514,7 @@ fn main() -> Result<(), slint::PlatformError> {
     on!(on_install_update, |app| app.install_update());
     on!(on_cache_choice_changed, |app, choice| app.set_cache_choice(choice));
     on!(on_clear_cache, |app| app.clear_cache());
+    on!(on_crossfade_choice_changed, |app, choice| app.set_crossfade_choice(choice));
     // detail pages, links and the right click menu
     on!(on_show_all, |app, id| app.show_all(id as usize));
     on!(on_byline_clicked, |app| app.byline_clicked());
@@ -3242,6 +3524,12 @@ fn main() -> Result<(), slint::PlatformError> {
     on!(on_item_menu, |app, source, id| app.item_menu(source, id));
     on!(on_menu_picked, |app, index| app.menu_picked(index as usize));
     app.show_services();
+    app.ui.set_crossfade_choice(
+        CROSSFADE_CHOICES
+            .iter()
+            .position(|&c| c == app.crossfade.get())
+            .unwrap_or(0) as i32,
+    );
     app.ui
         .set_suggestions(ModelRc::from(app.suggest.borrow().rows.clone()));
 

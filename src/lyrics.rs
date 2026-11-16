@@ -32,6 +32,11 @@ pub struct Line {
     pub text: String,
     /// Empty when the source only times whole lines.
     pub syllables: Vec<Syllable>,
+    /// Where the singer's lines sit: 0 left, 1 right, 2 centred for a group.
+    pub align: u8,
+    /// Backing vocals sung along with the line, without their brackets.
+    pub background: Vec<Syllable>,
+    pub background_text: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -263,7 +268,7 @@ pub fn parse_lrc(lrc: &str) -> Vec<Line> {
                 start,
                 end: 0,
                 text: text.trim().to_string(),
-                syllables: Vec::new(),
+                ..Line::default()
             })
         })
         .collect();
@@ -309,7 +314,9 @@ fn has_timed_child(node: roxmltree::Node) -> bool {
         .any(|d| d.attribute("begin").is_some())
 }
 
-fn collect(node: roxmltree::Node, out: &mut Vec<Syllable>) {
+/// Gathers the timed syllables under `node` into `out`, and backing vocals
+/// into `bg`.
+fn collect(node: roxmltree::Node, out: &mut Vec<Syllable>, bg: &mut Vec<Syllable>) {
     for child in node.children() {
         if child.is_text() {
             let text = child.text().unwrap_or("");
@@ -331,6 +338,22 @@ fn collect(node: roxmltree::Node, out: &mut Vec<Syllable>) {
             if role == "x-translation" || role == "x-roman" {
                 continue;
             }
+            if role == "x-bg" {
+                if let Some(last) = out.last_mut() {
+                    if !last.text.ends_with(' ') {
+                        last.text.push(' ');
+                    }
+                }
+                if let Some(last) = bg.last_mut() {
+                    if !last.text.ends_with(' ') {
+                        last.text.push(' ');
+                    }
+                }
+                let mut nested = Vec::new();
+                collect(child, bg, &mut nested);
+                bg.append(&mut nested);
+                continue;
+            }
             match times(child) {
                 Some((start, end)) if !has_timed_child(child) => {
                     let text: String = child
@@ -347,25 +370,70 @@ fn collect(node: roxmltree::Node, out: &mut Vec<Syllable>) {
                             last.text.push(' ');
                         }
                     }
-                    collect(child, out);
+                    collect(child, out, bg);
                 }
             }
         }
     }
 }
 
+/// Takes the brackets off backing vocals, as they show apart from the line
+/// anyway, and gives their text.
+fn unbracket(syllables: &mut Vec<Syllable>) -> String {
+    if let Some(first) = syllables.first_mut() {
+        if let Some(rest) = first.text.strip_prefix('(') {
+            first.text = rest.to_string();
+        }
+    }
+    if let Some(last) = syllables.last_mut() {
+        let trimmed = last.text.trim_end();
+        last.text = trimmed.strip_suffix(')').unwrap_or(trimmed).to_string();
+    }
+    syllables.retain(|s| !s.text.trim().is_empty());
+    syllables.iter().map(|s| s.text.as_str()).collect::<String>().trim().to_string()
+}
+
 pub fn parse_ttml(ttml: &str) -> Vec<Line> {
     let Ok(doc) = roxmltree::Document::parse(ttml) else {
         return Vec::new();
     };
+    let attr = |n: roxmltree::Node, name: &str| -> Option<String> {
+        n.attributes().find(|a| a.name() == name).map(|a| a.value().to_string())
+    };
+    // Groups of singers, such as everyone at once, sing from the middle.
+    let groups: Vec<String> = doc
+        .descendants()
+        .filter(|n| n.tag_name().name() == "agent" && attr(*n, "type").as_deref() == Some("group"))
+        .filter_map(|n| attr(n, "id"))
+        .collect();
+    // Singers take turns left and right, in the order they first sing.
+    let mut singers: Vec<String> = Vec::new();
     let mut lines = Vec::new();
     for p in doc.descendants().filter(|n| n.has_tag_name("p")) {
         let mut syllables = Vec::new();
-        collect(p, &mut syllables);
+        let mut background = Vec::new();
+        collect(p, &mut syllables, &mut background);
+        // A line of nothing but backing vocals is sung as the line.
+        if syllables.is_empty() && !background.is_empty() {
+            syllables = std::mem::take(&mut background);
+        }
         let span = times(p);
         if let Some(last) = syllables.last_mut() {
             last.text = last.text.trim_end().to_string();
         }
+        let background_text = unbracket(&mut background);
+        let agent = p.ancestors().find_map(|n| attr(n, "agent"));
+        let align = match agent {
+            Some(id) if groups.contains(&id) || id == "v1000" => 2,
+            Some(id) => {
+                let index = singers.iter().position(|s| *s == id).unwrap_or_else(|| {
+                    singers.push(id);
+                    singers.len() - 1
+                });
+                (index % 2) as u8
+            }
+            None => 0,
+        };
         let line = if syllables.is_empty() {
             let text: String = p
                 .descendants()
@@ -377,6 +445,8 @@ pub fn parse_ttml(ttml: &str) -> Vec<Line> {
                 end,
                 text: text.trim().to_string(),
                 syllables,
+                align,
+                ..Line::default()
             }
         } else {
             let start = span
@@ -386,13 +456,16 @@ pub fn parse_ttml(ttml: &str) -> Vec<Line> {
             let end = span
                 .map(|s| s.1)
                 .unwrap_or(0)
-                .max(syllables.iter().map(|s| s.end).max().unwrap_or(0));
+                .max(syllables.iter().chain(&background).map(|s| s.end).max().unwrap_or(0));
             let text = syllables.iter().map(|s| s.text.as_str()).collect();
             Line {
                 start,
                 end,
                 text,
                 syllables,
+                align,
+                background,
+                background_text,
             }
         };
         if !line.text.is_empty() {
@@ -426,8 +499,25 @@ mod tests {
                 text: "more ".into()
             }
         );
-        assert_eq!(lines[1].text, "celebrate (oh)");
-        assert_eq!(lines[1].syllables.len(), 4);
+        assert_eq!(lines[1].text, "celebrate");
+        assert_eq!(lines[1].syllables.len(), 3);
+        assert_eq!(lines[1].background_text, "oh");
+        assert_eq!(lines[1].background[0].start, 66000);
+        assert_eq!(lines[1].end, 66819);
+    }
+
+    #[test]
+    fn singers_take_sides_and_groups_sit_in_the_middle() {
+        let ttml = r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttm="http://www.w3.org/ns/ttml#metadata">
+          <head><metadata><ttm:agent type="person" xml:id="v1"/><ttm:agent type="person" xml:id="v2"/><ttm:agent type="group" xml:id="v3"/></metadata></head>
+          <body><div>
+            <p begin="1.0" end="2.0" ttm:agent="v1">first</p>
+            <p begin="2.0" end="3.0" ttm:agent="v2">second</p>
+            <p begin="3.0" end="4.0" ttm:agent="v3">both</p>
+            <p begin="4.0" end="5.0" ttm:agent="v1">first again</p>
+          </div></body></tt>"#;
+        let aligns: Vec<u8> = parse_ttml(ttml).iter().map(|l| l.align).collect();
+        assert_eq!(aligns, [0, 1, 2, 0]);
     }
 
     #[test]

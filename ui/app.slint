@@ -105,9 +105,20 @@ export struct LyricRow {
     syllables: [SyllableData],
     start: int,
     end: int,
-    // 0 words, 1 gap between lines, 2 interlude dots
+    // 0 words, 1 gap between lines, 2 interlude dots, 3 backing vocals
     kind: int,
     line: int,
+    // The first row of its line. The view scrolls to it.
+    first: bool,
+    // 0 left, 1 right, 2 centred: where the singer's lines sit.
+    align: int,
+    // The row drawn out of focus, a little and a lot, for lines away from
+    // the sung one. Empty until drawn. Each has `soft-pad` of clear room
+    // on every side, and is `soft-height` tall in all.
+    soft: image,
+    softer: image,
+    soft-pad: length,
+    soft-height: length,
 }
 
 export global Theme {
@@ -1129,17 +1140,26 @@ component RunLine inherits Rectangle {
         : root.text;
     // How wide the whole line is when nothing is cut off.
     out property <length> line-width: base.preferred-width;
+    // How many of the links are under the mouse: zero or one.
+    property <int> hot;
+    // A link removed while under the mouse never says it left. New text
+    // means new links, so start the count again.
+    changed line => { root.hot = 0; }
+    // One text for the whole line. A second copy for the link under the
+    // mouse never lined up exactly with it, so the whole line brightens.
     base := Text {
         width: 100%;
         height: 100%;
         text: root.line;
-        color: root.text-color;
+        color: root.hot > 0 ? root.hover-color : root.text-color;
         font-size: root.font-size;
         overflow: elide;
         vertical-alignment: center;
     }
     for run in root.runs: Rectangle {
-        x: lead.preferred-width;
+        // An empty text still measures a few pixels wide, so a link at the
+        // start of the line would sit (and underline) past its words.
+        x: run.before == "" ? 0px : lead.preferred-width;
         y: 0;
         width: max(0px, min(piece.preferred-width, root.width - self.x));
         height: root.height;
@@ -1154,17 +1174,7 @@ component RunLine inherits Rectangle {
             font-size: root.font-size;
             visible: false;
         }
-        // Under the mouse the link brightens and is underlined just below
-        // its letters, the way links read.
-        if hit.has-hover: Text {
-            width: parent.width;
-            height: parent.height;
-            text: run.text;
-            color: root.hover-color;
-            font-size: root.font-size;
-            overflow: elide;
-            vertical-alignment: center;
-        }
+        // Under the mouse the link is underlined just below its letters.
         if hit.has-hover: Rectangle {
             x: 0;
             // The baseline sits about a third of the font size below the
@@ -1176,6 +1186,7 @@ component RunLine inherits Rectangle {
         }
         hit := TouchArea {
             mouse-cursor: pointer;
+            changed has-hover => { root.hot += self.has-hover ? 1 : -1; }
             clicked => { root.open(run.browse); }
             pointer-event(event) => {
                 if event.kind == PointerEventKind.down && event.button == PointerEventButton.right {
@@ -2201,19 +2212,20 @@ component SyllableView inherits Rectangle {
     in property <SyllableData> syllable;
     in property <int> time;
     in property <bool> active;
+    in property <length> font-size: 24px;
     property <float> progress: !active || time <= syllable.start ? 0 : time >= syllable.end ? 1 : 1.0 * (time - syllable.start) / max(1, syllable.end - syllable.start);
     // Sung syllables rise a little, the way Apple Music lifts them.
     property <length> lift: active && time >= syllable.start ? -2px : 0px;
     animate lift { duration: 350ms; easing: ease-out; }
-    width: base.preferred-width + (syllable.space ? 7px : 0px);
-    height: 36px;
+    width: base.preferred-width + (syllable.space ? root.font-size * 0.3 : 0px);
+    height: root.font-size * 1.5;
     base := Text {
         x: 0;
         y: root.lift;
         height: 100%;
         text: syllable.text;
         color: active ? #ffffff66 : #ffffff;
-        font-size: 24px;
+        font-size: root.font-size;
         font-weight: 800;
         vertical-alignment: center;
     }
@@ -2229,10 +2241,73 @@ component SyllableView inherits Rectangle {
             height: 100%;
             text: syllable.text;
             color: #ffffff;
-            font-size: 24px;
+            font-size: root.font-size;
             font-weight: 800;
             vertical-alignment: center;
         }
+    }
+}
+
+// A line of text that can be drawn out of focus. Slint cannot blur, so Rust
+// draws the line blurred, a little (`soft`) and a lot (`softer`), and the
+// images are faded over the text by `level`: 0 sharp, 1 soft, 2 softer.
+// Until the images arrive the line stays sharp.
+component BlurText inherits Rectangle {
+    in property <string> text;
+    in property <length> font-size: 24px;
+    in property <int> font-weight: 800;
+    in property <color> text-color: #ffffff;
+    in property <TextHorizontalAlignment> align: left;
+    in property <float> level;
+    in property <image> soft;
+    in property <image> softer;
+    // The clear room around the letters in each image, and its full height.
+    in property <length> soft-pad;
+    in property <length> soft-height;
+    property <bool> drawn: root.soft.width > 0 && root.softer.width > 0;
+    // Where the letters really are, so the images land on them. Stretching
+    // the image to this width hides small differences between how Rust and
+    // Slint lay the line out.
+    measure := Text {
+        text: root.text;
+        font-size: root.font-size;
+        font-weight: root.font-weight;
+        visible: false;
+    }
+    property <length> text-width: min(measure.preferred-width, root.width);
+    property <length> text-x: root.align == TextHorizontalAlignment.right ? root.width - root.text-width
+        : root.align == TextHorizontalAlignment.center ? (root.width - root.text-width) / 2 : 0px;
+    if !root.drawn || root.level < 1: Text {
+        width: 100%;
+        height: 100%;
+        text: root.text;
+        color: root.text-color;
+        opacity: root.drawn ? 1 - root.level : 1;
+        font-size: root.font-size;
+        font-weight: root.font-weight;
+        horizontal-alignment: root.align;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    if root.drawn && root.level > 0 && root.level < 2: Image {
+        x: root.text-x - root.soft-pad;
+        y: (root.height - root.soft-height) / 2;
+        width: root.text-width + root.soft-pad * 2;
+        height: root.soft-height;
+        source: root.soft;
+        image-fit: fill;
+        colorize: root.text-color;
+        opacity: root.level <= 1 ? root.level : 2 - root.level;
+    }
+    if root.drawn && root.level > 1: Image {
+        x: root.text-x - root.soft-pad;
+        y: (root.height - root.soft-height) / 2;
+        width: root.text-width + root.soft-pad * 2;
+        height: root.soft-height;
+        source: root.softer;
+        image-fit: fill;
+        colorize: root.text-color;
+        opacity: root.level - 1;
     }
 }
 
@@ -2428,6 +2503,9 @@ export component AppWindow inherits Window {
     in-out property <int> cache-choice: 2;
     callback cache-choice-changed(int);
     callback clear-cache();
+    // Index into the crossfade lengths: off, 1, 2, 3, 4, 6, 8, 10, 12 s.
+    in-out property <int> crossfade-choice: 0;
+    callback crossfade-choice-changed(int);
     callback lastfm-connect();
 
     property <length> gap: 8px;
@@ -2511,11 +2589,30 @@ export component AppWindow inherits Window {
     // to fit it, and again whenever it changes.
     out property <length> lyrics-width: np-expanded && panel == 3
         ? root.wide-width * (1 - root.art-share) - 32px : panel-width;
+    // Expanded Now playing shows the lyrics larger.
+    property <bool> lyrics-wide: np-expanded && panel == 3;
+    out property <length> lyrics-font: lyrics-wide ? 32px : 24px;
+    property <length> lyrics-row: lyrics-font * 1.5;
+    // The line being sung stands out larger. Rust breaks lines to fit
+    // this size, so a line growing never runs out of room.
+    out property <float> lyrics-grow: 1.2;
+    // About how wide a character of synced lyrics is, for Rust to break
+    // lines to fit `lyrics-width`.
+    out property <float> lyrics-char-px: lyrics-wide ? 18 : 13.5;
+    // How far the lyrics have scrolled to keep the sung line in view. Each
+    // row follows it on its own, a little later the further down it is, so
+    // the lines ripple up the way Apple Music's do.
+    in-out property <length> lyrics-scroll;
     callback lyrics-width-changed();
     changed lyrics-width => { root.lyrics-width-changed(); }
 
-    changed lyrics-focus => {
-        lyrics-view.content-y = -max(0px, min(root.lyrics-focus - lyrics-view.height * 0.32, lyrics-view.content-height - lyrics-view.height));
+    // A new line in view takes back any scrolling by hand.
+    changed lyrics-scroll => {
+        lyrics-view.content-y = 0;
+    }
+    // New lyrics start at the top.
+    changed lyrics-state => {
+        root.lyrics-scroll = 0;
     }
 
     // Every island has a fixed place. Nothing here feeds the window's own
@@ -2557,25 +2654,37 @@ export component AppWindow inherits Window {
                 icon: Icons.home;
                 label: "Home";
                 selected: root.nav == 0;
-                clicked => { root.navigate(0); }
+                clicked => {
+                    root.np-expanded = false;
+                    root.navigate(0);
+                }
             }
             NavItem {
                 icon: Icons.explore;
                 label: "Explore";
                 selected: root.nav == 1;
-                clicked => { root.navigate(1); }
+                clicked => {
+                    root.np-expanded = false;
+                    root.navigate(1);
+                }
             }
             NavItem {
                 icon: Icons.library;
                 label: "Library";
                 selected: root.nav == 2;
-                clicked => { root.navigate(2); }
+                clicked => {
+                    root.np-expanded = false;
+                    root.navigate(2);
+                }
             }
             NavItem {
                 icon: Icons.download;
                 label: "Downloads";
                 selected: root.nav == 4;
-                clicked => { root.navigate(4); }
+                clicked => {
+                    root.np-expanded = false;
+                    root.navigate(4);
+                }
             }
             NavItem {
                 icon: Icons.settings;
@@ -2809,6 +2918,23 @@ export component AppWindow inherits Window {
                                 PillButton {
                                     text: "Clear";
                                     clicked => { root.clear-history(); }
+                                }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        max-width: 680px;
+                        border-radius: 12px;
+                        background: #ffffff0a;
+                        HorizontalLayout {
+                            padding: 20px;
+                            SettingRow {
+                                title: "Crossfade";
+                                subtitle: "As a song ends, the next one fades in while it fades out. Skipping a song still switches at once.";
+                                Dropdown {
+                                    options: ["Off", "1 s", "2 s", "3 s", "4 s", "6 s", "8 s", "10 s", "12 s"];
+                                    selected <=> root.crossfade-choice;
+                                    changed(i) => { root.crossfade-choice-changed(i); }
                                 }
                             }
                         }
@@ -3484,7 +3610,9 @@ export component AppWindow inherits Window {
             height: root.np-art-h + (root.wide-art - root.np-art-h) * parent.t;
             border-radius: 12px;
             clip: true;
-            background: root.panel-color;
+            // The expanded cover goes without: its own corners are rounded
+            // wider than this, so the colour showed past them.
+            background: root.panel-color.transparentize(parent.t);
             if root.track-has-art: Image {
                 width: 100%;
                 height: 100%;
@@ -3604,46 +3732,123 @@ export component AppWindow inherits Window {
                 vertical-alignment: center;
             }
             for row in root.lyrics: lyric-row := Rectangle {
-                property <bool> active: root.lyrics-synced && root.lyrics-time >= row.start && root.lyrics-time < row.end;
+                // A sung line stays lit through the quiet after it, until the
+                // next one starts. The interlude dots show only in their gap.
+                property <bool> active: root.lyrics-synced && (row.kind == 2
+                    ? root.lyrics-time >= row.start && root.lyrics-time < row.end
+                    : row.line == root.lyrics-line);
                 property <int> distance: abs(row.line - root.lyrics-line);
+                // Puts this row a third of the way down the view, from where
+                // the layout really has it.
+                function bring-in() {
+                    root.lyrics-scroll = clamp(self.y - lyrics-view.height * 0.3, 0px, max(0px, lines.preferred-height - lyrics-view.height));
+                }
+                changed active => {
+                    if self.active && row.first {
+                        self.bring-in();
+                    }
+                }
+                init => {
+                    if self.active && row.first {
+                        self.bring-in();
+                    }
+                }
+                // This row's own copy of the scroll. Lines below the sung one
+                // follow a beat later each.
+                property <length> shift: root.lyrics-scroll;
+                animate shift {
+                    duration: 750ms;
+                    delay: clamp(row.line - root.lyrics-line, 0, 8) * 40ms;
+                    easing: cubic-bezier(0.2, 0.85, 0.25, 1);
+                }
                 // Lines fade with distance from the one being sung.
                 property <float> fade: !root.lyrics-synced || active ? 1 : clamp(0.5 - 0.09 * distance, 0.16, 0.5);
+                animate fade { duration: 350ms; easing: ease-out; }
+                // Rows fade out as they pass the top or bottom of the view,
+                // rather than being cut off there. The top only fades once
+                // the lyrics have scrolled, so the first line starts whole.
+                property <length> top: self.y - self.shift;
+                property <length> half: max(1px, self.height / 2);
+                property <float> edge: clamp((self.top + self.half) / (self.half + min(28px, self.shift)), 0, 1)
+                    * clamp((lyrics-view.height - self.top - self.height + self.half) / (self.half + 28px), 0, 1);
+                // Synced lines go out of focus with distance from the one
+                // being sung: 0 sharp, 1 a little, 2 a lot.
+                property <float> blur: root.lyrics-synced && row.kind == 0 && distance > 0 ? min(2, 0.5 + 0.5 * distance) : 0;
+                animate blur { duration: 400ms; easing: ease-out; }
+                // The sung line grows.
+                property <float> grow: active && row.kind == 0 ? root.lyrics-grow : 1;
+                animate grow { duration: 350ms; easing: cubic-bezier(0.2, 0.85, 0.25, 1); }
+                property <LayoutAlignment> lay: row.align == 1 ? LayoutAlignment.end : row.align == 2 ? LayoutAlignment.center : LayoutAlignment.start;
+                property <TextHorizontalAlignment> side: row.align == 1 ? TextHorizontalAlignment.right : row.align == 2 ? TextHorizontalAlignment.center : TextHorizontalAlignment.left;
                 property <float> gap-progress: clamp(1.0 * (root.lyrics-time - row.start) / max(1, row.end - row.start), 0, 1);
-                height: row.kind == 1 ? 18px : row.kind == 2 ? (active ? 36px : 0px) : root.lyrics-synced ? 36px : 24px;
+                // Backing vocals come out from under their line while it is
+                // sung, and tuck away after.
+                property <length> backing-font: root.lyrics-font * 0.6;
+                height: row.kind == 1 ? 18px
+                    : row.kind == 2 ? (active ? root.lyrics-row : 0px)
+                    : row.kind == 3 ? (active ? self.backing-font * 1.5 : 0px)
+                    : root.lyrics-synced ? root.lyrics-row * self.grow : 24px;
                 animate height { duration: 300ms; easing: ease-out; }
                 if row.kind == 2 && active: HorizontalLayout {
+                    y: -lyric-row.shift;
                     alignment: start;
                     padding-left: 22px;
                     spacing: 8px;
+                    opacity: lyric-row.edge;
                     VerticalLayout { alignment: center; Dot { level: lyric-row.gap-progress * 3; } }
                     VerticalLayout { alignment: center; Dot { level: lyric-row.gap-progress * 3 - 1; } }
                     VerticalLayout { alignment: center; Dot { level: lyric-row.gap-progress * 3 - 2; } }
                 }
+                if row.kind == 3: HorizontalLayout {
+                    property <float> shown: lyric-row.active ? 1 : 0;
+                    animate shown { duration: 350ms; easing: ease-out; }
+                    y: -lyric-row.shift - 10px * (1 - self.shown);
+                    height: lyric-row.backing-font * 1.5;
+                    alignment: lyric-row.lay;
+                    padding-left: 20px;
+                    padding-right: 20px;
+                    opacity: self.shown * 0.85 * lyric-row.edge;
+                    for syllable in row.syllables: SyllableView {
+                        syllable: syllable;
+                        time: root.lyrics-time;
+                        active: lyric-row.active;
+                        font-size: lyric-row.backing-font;
+                    }
+                }
                 if row.kind == 0: Rectangle {
-                    opacity: lyric-row.fade;
-                    animate opacity { duration: 350ms; easing: ease-out; }
-                    if row.syllables.length > 0: HorizontalLayout {
-                        alignment: start;
+                    y: -lyric-row.shift;
+                    opacity: lyric-row.fade * lyric-row.edge;
+                    // Word by word timing shows only on the sung line. The
+                    // rest draw whole, so they can blur.
+                    if row.syllables.length > 0 && lyric-row.distance == 0: HorizontalLayout {
+                        alignment: lyric-row.lay;
                         padding-left: 20px;
+                        padding-right: 20px;
                         for syllable in row.syllables: SyllableView {
                             syllable: syllable;
                             time: root.lyrics-time;
                             active: lyric-row.active;
+                            font-size: root.lyrics-font * lyric-row.grow;
                         }
                     }
-                    if row.syllables.length == 0: Text {
+                    if row.syllables.length == 0 || lyric-row.distance > 0: BlurText {
                         x: 20px;
                         width: parent.width - 40px;
                         height: 100%;
                         text: row.text;
-                        color: Theme.text;
-                        font-size: root.lyrics-synced ? 24px : 16px;
+                        text-color: Theme.text;
+                        font-size: root.lyrics-synced ? root.lyrics-font * lyric-row.grow : 16px;
                         font-weight: root.lyrics-synced ? 800 : 400;
-                        vertical-alignment: center;
-                        overflow: elide;
+                        align: lyric-row.side;
+                        level: lyric-row.blur;
+                        soft: row.soft;
+                        softer: row.softer;
+                        soft-pad: row.soft-pad;
+                        soft-height: row.soft-height;
                     }
                 }
                 if row.kind == 0 && root.lyrics-synced: TouchArea {
+                    y: -lyric-row.shift;
                     mouse-cursor: pointer;
                     clicked => { root.lyrics-seek(row.start); }
                 }
