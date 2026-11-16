@@ -1,6 +1,7 @@
 name: Release
 
-# Builds tonearm.exe on Windows and attaches it to a GitHub release.
+# Builds tonearm.exe and its installer on Windows and attaches both to a
+# GitHub release.
 # Start it from the Actions tab with a version, or push a tag like v0.1.0.
 on:
   workflow_dispatch:
@@ -38,14 +39,23 @@ jobs:
           TONEARM_LASTFM_SECRET: ${{ secrets.TONEARM_LASTFM_SECRET }}
         run: cargo build --release --locked
 
+      # NSIS comes with the Windows runner image.
+      - name: Installer
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version || github.ref_name }}
+        run: |
+          makensis -V3 "-DVERSION=${VERSION#v}" "-DEXE=..	argetelease	onearm.exe" installer/tonearm.nsi
+
       - name: Publish
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version || github.ref_name }}
         run: |
+          # The bare exe is for 0.5 and older, whose updater looks for it.
           cp target/release/tonearm.exe tonearm.exe
-          gh release create "$VERSION" tonearm.exe \
+          gh release create "$VERSION" tonearm-setup.exe tonearm.exe \
             --target "$GITHUB_SHA" \
             --title "Tonearm $VERSION" \
             --generate-notes

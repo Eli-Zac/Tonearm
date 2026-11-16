@@ -3,77 +3,58 @@
 A native Windows client for YouTube Music, written in Rust.
 
 Tonearm has no web view and no browser engine. It draws its own UI with
-Skia on the GPU and talks to YouTube Music over plain HTTPS, so it starts
-fast and stays small in memory.
+[Slint](https://slint.dev) and Skia, and talks to YouTube Music over plain
+HTTPS, so it starts fast and stays small in memory.
 
-Tonearm is unofficial. Google does not endorse it.
+> [!IMPORTANT]
+> Tonearm is an unofficial, independent project. It is not affiliated with,
+> endorsed by or sponsored by Google, YouTube or Spotify. YouTube Music is a
+> trademark of Google LLC, and Spotify is a trademark of Spotify AB. Using
+> Tonearm may go against YouTube's Terms of Service, and you use it at your
+> own risk.
 
-## Status
+## Features
 
-This is an early build. Here is what works and what does not.
+* Home, Explore, search, and artist, album and playlist pages
+* Your library, liked songs and playlists, once you sign in
+* A queue you can drag to reorder, radio, smart shuffle, and autoplay when
+  the queue runs out
+* Crossfade, volume levelling and a sleep timer
+* Synced lyrics, timed by the syllable where the source allows, with duet
+  sides and out of focus lines
+* A Now playing panel with animated covers and Spotify Canvas clips
+* Songs kept on your computer to play offline, and a cache so songs you
+  play again start at once
+* Picks up where you left off: the queue, the song and the position
+* Windows media keys, the media flyout, and play controls under the
+  taskbar preview
+* Closes to the tray and keeps playing, if you want it to
+* Discord Rich Presence and Last.fm scrobbling
+* In-app updates
 
-| Area | State |
-| --- | --- |
-| Home, Explore, search, artist, album and playlist pages | Works |
-| Sign in with a browser cookie, library, likes | Written, needs testing with a real account |
-| Queue, radio, autoplay when the queue ends | Works |
-| Syllable synced lyrics with Apple Music style animation | Works |
-| Audio engine, streaming AAC decode, seek, volume | Written, needs testing on Windows |
-| Getting the audio stream for a track | Written with yt-dlp, needs testing |
-| Windows media keys and media overlay | Written, needs testing on Windows |
-| Discord Rich Presence | Written, needs testing with Discord running |
-| Last.fm scrobbling with Spotify metadata | Written, needs testing with real keys |
-| Animated album covers | Frame player works, no catalogue source yet |
+Tonearm is young. Expect rough edges, and please report what breaks.
 
-### Audio streams
+## Install
 
-YouTube has no public API that hands out audio streams, and the ways
-around that break often and sit outside YouTube's terms. Tonearm hands the
-job to [yt-dlp](https://github.com/yt-dlp/yt-dlp), which keeps up with
-those changes. On first play it downloads `yt-dlp.exe` from yt-dlp's GitHub
-releases into `%LOCALAPPDATA%	onearm`, checks it against GitHub's SHA-256
-digest, and lets it update itself once per start. Some YouTube formats need
-a JavaScript runtime, so yt-dlp uses Deno, Node or Bun if one is installed.
+Download `tonearm-setup.exe` from the
+[latest release](../../releases/latest) and run it. It installs just for
+you, in `%LOCALAPPDATA%\Programs\Tonearm`, and needs no admin rights. You
+can uninstall it from Settings > Apps like any other app.
 
-The resolver lives behind one trait in `src/resolver.rs`. Set
-`TONEARM_TEST_STREAM` to any M4A URL to test the audio path without it.
+The installer is not code signed, so Windows SmartScreen may warn the
+first time. Pick "More info", then "Run anyway".
 
-## Updates
+### Updates
 
-Settings has an Updates card. Tonearm also checks GitHub for a newer release
-at start up and shows a toast when one is out. Installing downloads the new
-`tonearm.exe`, checks its SHA-256, swaps it in and restarts.
-
-## Download
-
-Grab `tonearm.exe` from the Releases page on GitHub. The file is unsigned,
-so Windows SmartScreen warns on first run. Pick "More info", then "Run
-anyway".
-
-To cut a release, open the Actions tab, pick Release, press "Run workflow"
-and enter a version such as `v0.1.1`. GitHub builds the exe on Windows and
-attaches it. Pushing a version tag does the same.
-
-## Build
-
-You need a recent stable Rust.
-
-```bash
-cargo build --release
-```
-
-The binary lands in `target/release/tonearm.exe`.
-
-To cross compile from Linux, install `mingw-w64` and run this.
-
-```bash
-cargo build --release --target x86_64-pc-windows-gnu
-```
+Tonearm checks for a new release at start up and shows a note when one is
+out. Settings has an Updates card too. Installing downloads the new
+installer, checks its SHA-256 against the digest GitHub publishes, then
+closes Tonearm, installs the update and starts it again.
 
 ## Sign in
 
-Tonearm cannot show the Google sign in page, because that needs a browser.
-Use your browser's session instead.
+Tonearm cannot show Google's sign in page, because that needs a browser.
+It uses your browser's session instead.
 
 1. Sign in to music.youtube.com in your browser.
 2. Open the developer tools and pick the Network tab.
@@ -81,37 +62,95 @@ Use your browser's session instead.
 4. Copy the value of the `Cookie` request header.
 5. Paste it into Settings in Tonearm.
 
-Tonearm encrypts the cookie with Windows DPAPI and sends it only to
-music.youtube.com.
+> [!WARNING]
+> That cookie gives full access to your Google account. Never share it or
+> paste it anywhere else.
+
+Tonearm encrypts the cookie with Windows DPAPI, so only your Windows
+account can read it, and sends it only to music.youtube.com.
+
+## How playback works
+
+YouTube has no public API that hands out audio streams, and the ways
+around that change often. Tonearm hands the job to
+[yt-dlp](https://github.com/yt-dlp/yt-dlp), which keeps up with those
+changes. On first play it downloads `yt-dlp.exe` from yt-dlp's GitHub
+releases into `%LOCALAPPDATA%\tonearm`, checks it against GitHub's SHA-256
+digest, and lets it update itself once per start. Some YouTube formats need
+a JavaScript runtime, so yt-dlp uses Deno, Node or Bun if one is installed.
+
+The resolver lives behind one trait in `src/resolver.rs`. Set
+`TONEARM_TEST_STREAM` to any M4A URL to test the audio path without it.
 
 ## Lyrics
 
-Tonearm asks the same public lyric services the BitChord client asks, in the
-same order, and stops at the first one that has the track.
+Tonearm asks these public lyric services in order, and stops at the first
+one that has the track.
 
 1. lrc.red, syllable timed
 2. BetterLyrics, syllable timed
 3. LRCLIB, line timed
 4. YouTube Music's own lyrics, plain text
 
-BitChord also asks LyricsPlus. Its community mirrors were down when we built
-this, so Tonearm does not ask it yet.
-
 ## Discord, Last.fm and Spotify
 
 Open Settings, then Connections. Each service has its own card.
 
-Release builds carry Tonearm's own Discord application and Last.fm keys.
-Press Connect and you are done. Discord needs no sign in. Last.fm opens a
-page in your browser where you approve Tonearm.
+Release builds carry Tonearm's own Discord application and Last.fm keys,
+so you only press Connect. Discord needs no sign in. Last.fm opens a page
+in your browser where you approve Tonearm.
 
-Spotify needs keys that belong to you: a client ID and client secret from
-developer.spotify.com.
+Spotify is optional, and needs a client ID and client secret of your own
+from developer.spotify.com. With them, Tonearm looks each track up on
+Spotify and reports Spotify's title, artist and album to Last.fm and
+Discord. Without a sure match it reports the YouTube Music names. Canvas
+clips also need a Spotify web sign in, which Connections explains.
 
-### Building with the keys
+A track scrobbles after it has played for half its length or four minutes,
+as Last.fm asks.
 
-The keys are not in this repository. The build reads them from the
-environment, or from a `keys.env` file next to `Cargo.toml` that git ignores:
+## Your data
+
+Everything stays on your computer.
+
+* Settings, the sign in cookie and service keys are in
+  `%APPDATA%\tonearm`, all encrypted with DPAPI.
+* Offline songs, the song cache, yt-dlp and Canvas clips are in
+  `%LOCALAPPDATA%\tonearm`.
+* Listening history is kept encrypted on this computer, only to put what
+  you play first in search. Settings can clear it.
+
+Tonearm talks to YouTube Music, the lyric services above, GitHub (for
+updates and yt-dlp), and Discord, Last.fm and Spotify only when you connect
+them. Uninstalling keeps your data, in case you come back. Delete the two
+folders above to remove it.
+
+## Build
+
+You need Windows and a recent stable Rust.
+
+```bash
+cargo build --release
+```
+
+The binary lands in `target/release/tonearm.exe`. For quicker optimised
+builds while working, `cargo build --profile fast` skips link time
+optimisation.
+
+To build the installer as well, install [NSIS](https://nsis.sourceforge.io)
+and run this from the repository root.
+
+```bash
+makensis -DVERSION=0.6.0 installer/tonearm.nsi
+```
+
+It writes `tonearm-setup.exe` next to `Cargo.toml`.
+
+### Service keys
+
+Tonearm's own Discord and Last.fm keys are not in this repository. The
+build reads them from the environment, or from a `keys.env` file next to
+`Cargo.toml` that git ignores:
 
 ```
 TONEARM_DISCORD_APP=your application ID from discord.com/developers
@@ -119,26 +158,15 @@ TONEARM_LASTFM_KEY=your API key from last.fm/api/account/create
 TONEARM_LASTFM_SECRET=the shared secret that comes with it
 ```
 
-The release workflow reads the same three names from the repository secrets.
-A build without them still works. Connections then asks for your own
-Discord application ID and Last.fm keys.
+A build without them works too. Connections then asks for your own keys.
 
-With Spotify keys set, Tonearm looks each track up on Spotify and reports
-Spotify's title, artist and album to Last.fm and Discord. Without a sure
-match it reports the YouTube Music names.
+### Releases
 
-A track scrobbles after it has played for half its length or four minutes.
-
-## How it stays small
-
-* No web view, no JavaScript engine, no GPU context
-* Slint's software renderer, which repaints only what changed
-* Blocking HTTP on a few worker threads, no async runtime
-* Windows' own TLS stack instead of a bundled one
-* Thumbnails fetched at the size we draw, in a 12 MB cache
-* One track buffered in memory at a time
-* The audio device opens on first play
-* The UI ticks four times a second, and faster only while lyrics move
+Open the Actions tab, pick Release, press "Run workflow" and enter a
+version such as `v0.6.0`. Pushing a version tag does the same. GitHub
+builds the app and its installer on Windows and attaches both to a new
+release. The workflow reads the three keys above from the repository
+secrets.
 
 ## Layout
 
@@ -147,18 +175,28 @@ A track scrobbles after it has played for half its length or four minutes.
 | `ui/app.slint` | The whole interface |
 | `src/main.rs` | App state and wiring |
 | `src/innertube/` | YouTube Music API client and parsers |
-| `src/audio.rs` | Streaming download, decode and output |
-| `src/resolver.rs` | The stream resolver trait |
-| `src/lyrics.rs` | Lyric services and TTML parsing |
+| `src/audio.rs`, `src/decode.rs` | Streaming download, decode and output |
+| `src/resolver.rs` | Turns a song into an audio stream, with yt-dlp |
+| `src/lyrics.rs`, `src/blur.rs` | Lyric services, and lyric lines drawn out of focus |
 | `src/services.rs` | Discord, Last.fm and Spotify |
-| `src/motion.rs` | Animated cover frames |
-| `src/media_keys.rs` | Windows media keys |
-| `src/store.rs` | Encrypted storage for secrets |
+| `src/canvas.rs`, `src/motion.rs` | Spotify Canvas clips and animated covers |
+| `src/offline.rs` | Offline songs and the song cache |
+| `src/history.rs`, `src/session.rs` | Listening history, and where you left off |
+| `src/media_keys.rs`, `src/taskbar.rs`, `src/shell.rs` | Media keys, taskbar buttons, tray and Start menu shortcut |
+| `src/update.rs` | In-app updates |
+| `src/store.rs` | Encrypted storage for settings and secrets |
+| `installer/tonearm.nsi` | The NSIS installer |
 
-## Licences
+## Contributing
 
-Slint is free for desktop apps under its royalty free licence, which asks
-for attribution, or under GPLv3. Pick the one that fits before you ship.
+Bug reports and pull requests are welcome. For anything large, please open
+an issue first so we can talk it through.
 
-The icons are from Phosphor (phosphoricons.com), under the MIT licence in
+## Licence
+
+Tonearm is free software under the GNU General Public License, version 3.
+See [LICENSE](LICENSE).
+
+Tonearm uses Slint under its GPLv3 licence. The icons are from
+[Phosphor](https://phosphoricons.com), under the MIT licence in
 `ui/icons-LICENSE.txt`.

@@ -1,9 +1,12 @@
 //! In-app updates from the GitHub releases page.
 //!
-//! We ask GitHub for the latest release, download its `tonearm.exe`, check
-//! its SHA-256 against the digest GitHub reports, then swap it in. Windows
-//! lets a running exe be renamed but not overwritten, so the running file
-//! moves aside to `tonearm.old` and the next start deletes it.
+//! We ask GitHub for the latest release, download its installer, check its
+//! SHA-256 against the digest GitHub reports, and save it. Once the app has
+//! closed and saved its session, `main` runs the installer silently. It waits
+//! for the exe to free up, puts the new one in place, and starts it again.
+//!
+//! Releases still carry a bare `tonearm.exe` for copies from 0.5 and before,
+//! whose updater swaps the exe in place. Their next update uses the installer.
 
 use sha2::{Digest, Sha256};
 use std::io::Read;
@@ -18,9 +21,9 @@ pub const VERSION: &str = match option_env!("TONEARM_VERSION") {
 };
 
 const REPO: &str = "Eli-Zac/tonearm";
-const ASSET: &str = "tonearm.exe";
+const ASSET: &str = "tonearm-setup.exe";
 
-/// Set once an update is in place. `main` starts the new exe on the way out.
+/// Set once the installer is saved. `main` runs it on the way out.
 static RESTART: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone)]
@@ -69,6 +72,7 @@ pub fn latest(http: &ureq::Agent, repo: &str, asset: &str) -> Result<Release, St
         .set("Accept", "application/vnd.github+json")
         .call()
         .map_err(|e| match e {
+            // GitHub also answers 404 for a private repository.
             ureq::Error::Status(404, _) => "No releases are published yet.".to_string(),
             ureq::Error::Status(code, _) => format!("GitHub answered with HTTP {code}"),
             e => format!("Could not reach GitHub: {e}"),
@@ -93,6 +97,11 @@ pub fn latest(http: &ureq::Agent, repo: &str, asset: &str) -> Result<Release, St
             .and_then(|d| d.strip_prefix("sha256:"))
             .map(str::to_ascii_lowercase),
     })
+}
+
+/// Where the downloaded installer waits to be run.
+fn installer_path() -> PathBuf {
+    std::env::temp_dir().join("tonearm-setup.exe")
 }
 
 fn paths() -> Result<(PathBuf, PathBuf, PathBuf), String> {
@@ -128,45 +137,35 @@ pub fn download(http: &ureq::Agent, release: &Release) -> Result<Vec<u8>, String
     Ok(bytes)
 }
 
-/// Downloads and verifies the release, then puts it where the running exe
-/// was. Takes effect after `restart`.
+/// Downloads and verifies the installer. It runs after `restart`.
 pub fn install(http: &ureq::Agent, release: &Release) -> Result<(), String> {
     let bytes = download(http, release)?;
-    let (new, old, exe) = paths()?;
-    let denied = |e: std::io::Error| format!("Cannot write next to the app: {e}");
-    std::fs::write(&new, &bytes).map_err(denied)?;
-    let _ = std::fs::remove_file(&old);
-    if let Err(e) = std::fs::rename(&exe, &old) {
-        let _ = std::fs::remove_file(&new);
-        return Err(denied(e));
-    }
-    if let Err(e) = std::fs::rename(&new, &exe) {
-        // Put the old exe back so the app still starts.
-        let _ = std::fs::rename(&old, &exe);
-        let _ = std::fs::remove_file(&new);
-        return Err(denied(e));
-    }
+    std::fs::write(installer_path(), &bytes)
+        .map_err(|e| format!("Cannot save the installer: {e}"))?;
     RESTART.store(true, Ordering::SeqCst);
     Ok(())
 }
 
-/// Closes the window. `main` then starts the new exe.
+/// Closes the window. `main` then runs the installer.
 pub fn restart() {
     let _ = slint::quit_event_loop();
 }
 
-/// Called by `main` after the event loop ends.
+/// Called by `main` after the event loop ends and the session is saved.
+/// The installer waits for this process to let go of the exe.
 pub fn relaunch_if_updated() {
     if !RESTART.load(Ordering::SeqCst) {
         return;
     }
-    if let Ok((_, _, exe)) = paths() {
-        let _ = std::process::Command::new(exe).spawn();
-    }
+    let _ = std::process::Command::new(installer_path())
+        .args(["/S", "/relaunch"])
+        .spawn();
 }
 
-/// Deletes the exe an earlier update moved aside.
+/// Deletes what an earlier update left behind: the exe moved aside by the
+/// old updater, and the installer once it has finished.
 pub fn clean_up() {
+    let _ = std::fs::remove_file(installer_path());
     if let Ok((new, old, _)) = paths() {
         let _ = std::fs::remove_file(old);
         let _ = std::fs::remove_file(new);

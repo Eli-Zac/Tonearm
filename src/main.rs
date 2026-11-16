@@ -15,6 +15,8 @@ mod media_keys;
 mod menu;
 #[cfg(windows)]
 mod shell;
+#[cfg(windows)]
+mod taskbar;
 mod motion;
 mod offline;
 mod pool;
@@ -38,6 +40,9 @@ use std::time::{Duration, Instant};
 
 const SLOW_TICK: Duration = Duration::from_millis(250);
 const FAST_TICK: Duration = Duration::from_millis(33);
+/// How often the playing bars move. Each move redraws the whole window,
+/// so they step like a level meter instead of running at the screen's rate.
+const BEAT_TICK: Duration = Duration::from_millis(66);
 /// Links got ahead of a click at once. More would only crowd yt-dlp.
 const WARM_AT_ONCE: usize = 2;
 /// How often the playback session is saved while a song plays, so a
@@ -277,6 +282,11 @@ struct FadeNext {
 const LEVELLING: [(f32, f32); 4] = [(0.0, 0.0), (-19.0, 0.0), (-14.0, 0.0), (-11.0, 4.0)];
 
 /// The volume levelling choice saved in Settings. Normal when none is.
+/// Whether closing the window keeps Tonearm playing in the tray.
+fn load_close_to_tray() -> bool {
+    store::load("close-to-tray").map_or(true, |text| text.trim() != "0")
+}
+
 fn load_levelling() -> i32 {
     store::load("levelling")
         .and_then(|text| text.trim().parse().ok())
@@ -377,6 +387,14 @@ struct App {
     sleep: Cell<Sleep>,
     timer: Timer,
     fast: Cell<bool>,
+    /// Moves the playing bars while a song plays and the window is seen.
+    beat_timer: Timer,
+    /// Whether closing the window sends Tonearm to the tray.
+    close_to_tray: Cell<bool>,
+    /// Whether the window is closed to the tray.
+    hidden: Cell<bool>,
+    /// Whether the taskbar buttons and tray are hooked up.
+    attached: Cell<bool>,
     /// Whether the window was minimised at the last tick.
     minimized: Cell<bool>,
     services: services::Services,
@@ -1843,7 +1861,10 @@ impl App {
             self.load_lyrics();
         }
         #[cfg(windows)]
-        self.update_keys(&item.title, &artist, seconds, &item.thumb);
+        {
+            self.update_keys(&item.title, &artist, seconds, &item.thumb);
+            taskbar::set_song(&item.title, &artist);
+        }
         self.show_now();
         Some((item, generation, near_end))
     }
@@ -2945,6 +2966,8 @@ impl App {
 
     fn tick(self: &Rc<Self>) {
         self.repaint_after_restore();
+        #[cfg(windows)]
+        self.attach_taskbar();
         // Shortcuts reach the window only while something holds focus.
         if !self.ui.get_typing() && !self.ui.get_hotkeys_focused() {
             self.ui.invoke_focus_hotkeys();
@@ -2958,7 +2981,8 @@ impl App {
         let state = status.state.load(Ordering::SeqCst);
         // The Canvas only shows in Now playing. It holds its frame while the
         // music is paused or no one can see it, and decodes nothing meanwhile.
-        let cover_seen = !self.minimized.get() && self.ui.get_panel() == 3;
+        let seen = !self.minimized.get() && !self.hidden.get();
+        let cover_seen = seen && self.ui.get_panel() == 3;
         if let Some((_, clip)) = self.canvas.borrow().as_ref() {
             clip.paused
                 .store(!cover_seen || state != audio::PLAYING, Ordering::SeqCst);
@@ -2979,12 +3003,16 @@ impl App {
             }
             let duration = if stated > 0.0 { stated } else { duration };
             let playing = state == audio::PLAYING;
+            self.beat(playing && seen);
             if ui.get_playing() != playing {
                 ui.set_playing(playing);
                 ui.global::<Now>().set_playing(playing);
                 #[cfg(windows)]
-                if let Some(keys) = self.keys.borrow_mut().as_mut() {
-                    keys.playing(playing);
+                {
+                    if let Some(keys) = self.keys.borrow_mut().as_mut() {
+                        keys.playing(playing);
+                    }
+                    taskbar::set_playing(playing);
                 }
             }
             ui.set_buffering(state == audio::LOADING);
@@ -3031,7 +3059,7 @@ impl App {
             });
         }
 
-        let lyrics_live = matches!(ui.get_panel(), 2 | 3) && self.lyrics.borrow().synced;
+        let lyrics_live = seen && matches!(ui.get_panel(), 2 | 3) && self.lyrics.borrow().synced;
         if lyrics_live {
             ui.set_lyrics_time(time as i32);
             let lyrics = self.lyrics.borrow();
@@ -3077,6 +3105,84 @@ impl App {
             self.timer
                 .set_interval(if fast { FAST_TICK } else { SLOW_TICK });
         }
+    }
+
+    /// Starts or stops the playing bars' clock.
+    fn beat(self: &Rc<Self>, on: bool) {
+        if on == self.beat_timer.running() {
+            return;
+        }
+        if !on {
+            self.beat_timer.stop();
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        let start = Instant::now();
+        self.beat_timer.start(TimerMode::Repeated, BEAT_TICK, move || {
+            if let Some(app) = weak.upgrade() {
+                // Wraps after an hour, which shows as one skipped step.
+                let ms = (start.elapsed().as_millis() % 3_600_000) as i32;
+                app.ui.global::<Now>().set_beat(ms);
+            }
+        });
+    }
+
+    /// What closing the window does: hide it in the tray, or quit.
+    fn close_window(self: &Rc<Self>) {
+        #[cfg(windows)]
+        if self.close_to_tray.get() && self.attached.get() {
+            self.hidden.set(true);
+            self.beat(false);
+            taskbar::set_in_tray(true);
+            return;
+        }
+        let _ = slint::quit_event_loop();
+    }
+
+    /// Hooks up the taskbar buttons and tray. The window only exists once
+    /// the event loop runs, so the tick tries until it does.
+    #[cfg(windows)]
+    fn attach_taskbar(&self) {
+        if self.attached.get() {
+            return;
+        }
+        let attached = taskbar::attach(self.ui.window(), |action| {
+            on_ui(move |app| match action {
+                taskbar::Action::Previous => app.previous(),
+                taskbar::Action::Toggle => app.toggle_play(),
+                taskbar::Action::Next => app.next(),
+                taskbar::Action::Show => app.show_window(),
+                taskbar::Action::Quit => {
+                    let _ = slint::quit_event_loop();
+                }
+            })
+        });
+        if attached {
+            self.attached.set(true);
+            taskbar::set_playing(self.ui.get_playing());
+            let player = self.player.borrow();
+            if let Some(item) = player.queue.get(player.index) {
+                taskbar::set_song(&item.title, &credits_with_album(item).0);
+            }
+        }
+    }
+
+    /// Brings the window back from the tray.
+    fn show_window(self: &Rc<Self>) {
+        let _ = self.ui.show();
+        self.hidden.set(false);
+        #[cfg(windows)]
+        {
+            taskbar::set_in_tray(false);
+            taskbar::raise(self.ui.window());
+        }
+    }
+
+    fn set_close_to_tray(&self, on: bool) {
+        self.close_to_tray.set(on);
+        self.disk.run(move || {
+            let _ = store::save("close-to-tray", if on { "1" } else { "0" });
+        });
     }
 
     /// Tells Discord and Last.fm what is going on. A track scrobbles once
@@ -3917,6 +4023,10 @@ fn main() -> Result<(), slint::PlatformError> {
         sleep: Cell::new(Sleep::Off),
         timer: Timer::default(),
         fast: Cell::new(false),
+        beat_timer: Timer::default(),
+        close_to_tray: Cell::new(load_close_to_tray()),
+        hidden: Cell::new(false),
+        attached: Cell::new(false),
         minimized: Cell::new(false),
         toast_timer: Timer::default(),
         release: RefCell::new(None),
@@ -3990,6 +4100,7 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     on!(on_sleep_chosen, |app, choice| app.set_sleep(choice));
     on!(on_levelling_choice_changed, |app, choice| app.set_levelling(choice));
+    on!(on_close_choice_changed, |app, choice| app.set_close_to_tray(choice == 0));
     on!(on_toggle_like, |app| app.toggle_like());
     on!(on_toggle_shuffle, |app| app.toggle_shuffle());
     on!(on_cycle_repeat, |app| app.cycle_repeat());
@@ -4041,6 +4152,16 @@ fn main() -> Result<(), slint::PlatformError> {
             .unwrap_or(0) as i32,
     );
     app.ui.set_levelling_choice(app.levelling.get());
+    app.ui.set_close_choice(if app.close_to_tray.get() { 0 } else { 1 });
+    {
+        let weak = Rc::downgrade(&app);
+        app.ui.window().on_close_requested(move || {
+            if let Some(app) = weak.upgrade() {
+                app.close_window();
+            }
+            slint::CloseRequestResponse::HideWindow
+        });
+    }
     app.ui
         .set_suggestions(ModelRc::from(app.suggest.borrow().rows.clone()));
     app.show_recent_searches();
@@ -4061,7 +4182,12 @@ fn main() -> Result<(), slint::PlatformError> {
     app.restore_session();
     app.repair_downloads();
     app.check_update(true);
-    let result = app.ui.run();
+    // Not `run`, which quits as soon as the window hides in the tray.
+    app.ui.show()?;
+    let result = slint::run_event_loop_until_quit();
+    let _ = app.ui.hide();
+    #[cfg(windows)]
+    taskbar::detach();
     // Save where we are, and wait for it behind any saves still queued.
     app.save_session();
     let (done, wait) = std::sync::mpsc::channel();

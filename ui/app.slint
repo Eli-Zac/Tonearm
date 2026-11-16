@@ -213,6 +213,9 @@ export global Now {
     // The key of the album, playlist or artist page that is open.
     in property <string> page;
     in property <bool> playing;
+    // A clock in ms for the playing bars, stepped from Rust while a song
+    // plays. animation-tick() would redraw at the screen's full rate.
+    in property <int> beat;
     // Whether the item keyed `key` is playing or paused right now.
     public pure function is-current(key: string) -> bool {
         return key != "" && (key == song || key == from);
@@ -266,7 +269,8 @@ component Bars inherits Rectangle {
     property <length> gap: 2px;
     width: bar * 3 + gap * 2;
     height: 14px;
-    property <float> t: running ? animation-tick() / 1ms : 0;
+    // Bars only run while music plays, when Rust steps Now.beat.
+    property <float> t: running ? Now.beat : 0;
     for i in 3: Rectangle {
         x: i * (root.bar + root.gap);
         width: root.bar;
@@ -2715,6 +2719,9 @@ export component AppWindow inherits Window {
     // Volume levelling: off, quiet, normal or loud.
     in-out property <int> levelling-choice: 2;
     callback levelling-choice-changed(int);
+    // Closing the window: 0 keeps playing in the tray, 1 quits.
+    in-out property <int> close-choice: 0;
+    callback close-choice-changed(int);
     callback lastfm-connect();
 
     property <length> gap: 8px;
@@ -3219,6 +3226,23 @@ export component AppWindow inherits Window {
                                     options: ["Off", "Quiet", "Normal", "Loud"];
                                     selected <=> root.levelling-choice;
                                     changed(i) => { root.levelling-choice-changed(i); }
+                                }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        max-width: 680px;
+                        border-radius: 12px;
+                        background: #ffffff0a;
+                        HorizontalLayout {
+                            padding: 20px;
+                            SettingRow {
+                                title: "Closing the window";
+                                subtitle: "Keep playing hides Tonearm in the tray by the clock. Click the icon to bring it back, or right click it to quit.";
+                                Dropdown {
+                                    options: ["Keep playing", "Quit"];
+                                    selected <=> root.close-choice;
+                                    changed(i) => { root.close-choice-changed(i); }
                                 }
                             }
                         }
