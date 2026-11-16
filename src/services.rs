@@ -13,9 +13,29 @@ use std::io::{Read, Write};
 use std::sync::mpsc::{channel, Sender};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+/// Tonearm's own keys, baked in at build time from the environment or from
+/// `keys.env`. A build without them has empty strings here, and Settings
+/// then asks for the user's own keys.
+pub const DISCORD_APP: &str = baked(option_env!("TONEARM_DISCORD_APP"));
+pub const LASTFM_KEY: &str = baked(option_env!("TONEARM_LASTFM_KEY"));
+pub const LASTFM_SECRET: &str = baked(option_env!("TONEARM_LASTFM_SECRET"));
+
+const fn baked(value: Option<&'static str>) -> &'static str {
+    match value {
+        Some(value) => value,
+        None => "",
+    }
+}
+
 #[derive(Clone, Default, PartialEq)]
 pub struct Settings {
+    /// "1" when the user turned Discord on with Tonearm's own application.
+    pub discord_on: String,
+    /// The user's own application ID. Overrides Tonearm's.
     pub discord_app: String,
+    /// What Discord shows after "Listening to" in the member list:
+    /// "artist" (also when empty), "song" or "app".
+    pub discord_status: String,
     pub lastfm_key: String,
     pub lastfm_secret: String,
     pub lastfm_session: String,
@@ -24,8 +44,10 @@ pub struct Settings {
     pub spotify_secret: String,
 }
 
-const FIELDS: [&str; 7] = [
+const FIELDS: [&str; 9] = [
+    "discord_on",
     "discord_app",
+    "discord_status",
     "lastfm_key",
     "lastfm_secret",
     "lastfm_session",
@@ -35,9 +57,32 @@ const FIELDS: [&str; 7] = [
 ];
 
 impl Settings {
-    fn slots(&mut self) -> [&mut String; 7] {
+    /// The Discord application to report as. Empty when Discord is off.
+    pub fn discord_id(&self) -> &str {
+        if !self.discord_app.is_empty() {
+            &self.discord_app
+        } else if self.discord_on == "1" {
+            DISCORD_APP
+        } else {
+            ""
+        }
+    }
+
+    /// The Last.fm API key and shared secret. The user's own when both are
+    /// set, otherwise Tonearm's.
+    pub fn lastfm_keys(&self) -> (&str, &str) {
+        if !self.lastfm_key.is_empty() && !self.lastfm_secret.is_empty() {
+            (&self.lastfm_key, &self.lastfm_secret)
+        } else {
+            (LASTFM_KEY, LASTFM_SECRET)
+        }
+    }
+
+    fn slots(&mut self) -> [&mut String; 9] {
         [
+            &mut self.discord_on,
             &mut self.discord_app,
+            &mut self.discord_status,
             &mut self.lastfm_key,
             &mut self.lastfm_secret,
             &mut self.lastfm_session,
@@ -79,6 +124,8 @@ impl Settings {
 pub struct Track {
     pub title: String,
     pub artist: String,
+    /// Empty when YouTube Music did not name one.
+    pub album: String,
     pub seconds: f32,
     pub art: String,
 }
@@ -118,6 +165,7 @@ impl Services {
                     settings,
                     spotify_token: None,
                     discord: None,
+                    showing: None,
                     current: None,
                     started: 0,
                 };
@@ -139,6 +187,9 @@ struct Worker {
     settings: Settings,
     spotify_token: Option<(String, Instant)>,
     discord: Option<Discord>,
+    /// When the track on Discord started, in Unix seconds. None while
+    /// Discord shows nothing.
+    showing: Option<u64>,
     current: Option<Meta>,
     started: u64,
 }
@@ -154,7 +205,10 @@ impl Worker {
     fn handle(&mut self, event: Event) {
         match event {
             Event::Configure(settings) => {
-                if settings.discord_app != self.settings.discord_app {
+                let discord_changed = settings.discord_id() != self.settings.discord_id();
+                let status_changed = settings.discord_status != self.settings.discord_status;
+                if discord_changed {
+                    // Closing the pipe also clears the status on Discord.
                     self.discord = None;
                 }
                 if settings.spotify_id != self.settings.spotify_id
@@ -163,33 +217,35 @@ impl Worker {
                     self.spotify_token = None;
                 }
                 self.settings = settings;
+                if (discord_changed || status_changed) && self.showing.is_some() {
+                    self.presence(self.showing);
+                }
             }
             Event::Started(track) => {
                 let meta = self.spotify(&track).unwrap_or(Meta {
                     title: track.title,
                     artist: track.artist,
-                    album: String::new(),
+                    album: track.album,
                     seconds: track.seconds,
                     art: track.art,
                 });
                 self.started = unix_now();
                 self.lastfm("track.updateNowPlaying", &meta, None);
-                self.presence(Some(&meta), 0.0);
                 self.current = Some(meta);
+                self.presence(Some(self.started));
             }
             Event::Scrobble => {
                 if let Some(meta) = self.current.clone() {
                     self.lastfm("track.scrobble", &meta, Some(self.started));
                 }
             }
-            Event::Paused => self.presence(None, 0.0),
+            Event::Paused => self.presence(None),
             Event::Resumed { position } => {
-                let meta = self.current.clone();
-                self.presence(meta.as_ref(), position);
+                self.presence(Some(unix_now().saturating_sub(position as u64)));
             }
             Event::Stopped => {
                 self.current = None;
-                self.presence(None, 0.0);
+                self.presence(None);
             }
         }
     }
@@ -260,12 +316,13 @@ impl Worker {
 
     fn lastfm(&self, method: &str, meta: &Meta, timestamp: Option<u64>) {
         let s = &self.settings;
-        if s.lastfm_key.is_empty() || s.lastfm_session.is_empty() {
+        let (key, secret) = s.lastfm_keys();
+        if key.is_empty() || s.lastfm_session.is_empty() {
             return;
         }
         let mut params = vec![
             ("method", method.to_string()),
-            ("api_key", s.lastfm_key.clone()),
+            ("api_key", key.to_string()),
             ("sk", s.lastfm_session.clone()),
             ("artist", meta.artist.clone()),
             ("track", meta.title.clone()),
@@ -279,25 +336,36 @@ impl Worker {
         if let Some(t) = timestamp {
             params.push(("timestamp", t.to_string()));
         }
-        let _ = lastfm_call(&self.http, &s.lastfm_secret, params);
+        let _ = lastfm_call(&self.http, secret, params);
     }
 
     // ------------------------------------------------------------ Discord
 
-    fn presence(&mut self, meta: Option<&Meta>, position: f32) {
-        if self.settings.discord_app.is_empty() {
+    /// Shows the current track on Discord as started at `start`, or clears
+    /// the status when `start` is None.
+    fn presence(&mut self, start: Option<u64>) {
+        self.showing = start.filter(|_| self.current.is_some());
+        let app = self.settings.discord_id();
+        if app.is_empty() {
             return;
         }
         if self.discord.is_none() {
-            self.discord = Discord::connect(&self.settings.discord_app);
+            self.discord = Discord::connect(app);
         }
         let Some(discord) = self.discord.as_mut() else {
             return;
         };
-        let activity = meta.map(|m| {
-            let start = unix_now().saturating_sub(position as u64);
+        // Which line Discord repeats in the member list: 0 is the
+        // application name, 1 is the state line, 2 is the details line.
+        let display = match self.settings.discord_status.as_str() {
+            "app" => 0,
+            "song" => 2,
+            _ => 1,
+        };
+        let activity = self.current.as_ref().zip(self.showing).map(|(m, start)| {
             let mut activity = json!({
                 "type": 2,
+                "status_display_type": display,
                 "details": pad(&m.title),
                 "state": pad(&m.artist),
                 "timestamps": {"start": start * 1000},
@@ -612,6 +680,7 @@ mod tests {
         let track = Track {
             title: "Daft Punk - Get Lucky (Official Audio)".into(),
             artist: "Daft Punk".into(),
+            album: String::new(),
             seconds: 369.0,
             art: String::new(),
         };

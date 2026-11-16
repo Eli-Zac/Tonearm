@@ -65,8 +65,84 @@ fn thumb(v: &Value) -> String {
         .to_string()
 }
 
+/// The biggest picture on offer, for the page header.
+fn thumb_best(v: &Value) -> String {
+    let Some(list) = find(v, "thumbnails").and_then(Value::as_array) else {
+        return String::new();
+    };
+    let width = |t: &Value| t.get("width").and_then(Value::as_u64).unwrap_or(0);
+    list.iter()
+        .max_by_key(|t| width(t))
+        .and_then(|t| t.get("url")?.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
 fn string(v: &Value, key: &str) -> Option<String> {
     v.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+/// The browse id a text run links to, with its page type when given.
+fn run_link(run: &Value) -> Option<(String, String)> {
+    let browse = run.get("navigationEndpoint")?.get("browseEndpoint")?;
+    let id = string(browse, "browseId")?;
+    let page_type = find(browse, "pageType")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    Some((id, page_type))
+}
+
+fn is_artist_link(id: &str, page_type: &str) -> bool {
+    matches!(
+        page_type,
+        "MUSIC_PAGE_TYPE_ARTIST" | "MUSIC_PAGE_TYPE_USER_CHANNEL"
+    ) || (page_type.is_empty() && id.starts_with("UC"))
+}
+
+fn is_album_link(id: &str, page_type: &str) -> bool {
+    matches!(
+        page_type,
+        "MUSIC_PAGE_TYPE_ALBUM" | "MUSIC_PAGE_TYPE_AUDIOBOOK"
+    ) || (page_type.is_empty() && id.starts_with("MPREb_"))
+}
+
+/// Keeps the artist and album links from subtitle runs, so the names can
+/// open their pages.
+fn take_links(v: &Value, item: &mut Item) {
+    let Some(runs) = v.get("runs").and_then(Value::as_array) else {
+        return;
+    };
+    for run in runs {
+        let Some((id, page_type)) = run_link(run) else {
+            continue;
+        };
+        let name = run
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if name.is_empty() {
+            continue;
+        }
+        if is_artist_link(&id, &page_type) {
+            if !item.artists.iter().any(|(n, _)| *n == name) {
+                item.artists.push((name, Some(id)));
+            }
+        } else if is_album_link(&id, &page_type) && item.album.is_none() {
+            item.album = Some((name, id));
+        }
+    }
+}
+
+/// The texts of runs split on the " • " separators.
+fn dot_parts(v: &Value) -> Vec<String> {
+    text(v)
+        .split('•')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 fn apply_endpoint(ep: &Value, item: &mut Item) {
@@ -131,6 +207,15 @@ fn list_item(r: &Value) -> Item {
         item.video_id = Some(id);
         item.kind = Kind::Song;
     }
+    let columns = r.get("flexColumns").and_then(Value::as_array);
+    for column in columns.into_iter().flatten().skip(1) {
+        if let Some(t) = column
+            .get("musicResponsiveListItemFlexColumnRenderer")
+            .and_then(|c| c.get("text"))
+        {
+            take_links(t, &mut item);
+        }
+    }
     item
 }
 
@@ -143,6 +228,9 @@ fn two_row_item(r: &Value) -> Item {
     };
     if let Some(ep) = r.get("navigationEndpoint") {
         apply_endpoint(ep, &mut item);
+    }
+    if let Some(subtitle) = r.get("subtitle") {
+        take_links(subtitle, &mut item);
     }
     item
 }
@@ -163,6 +251,9 @@ fn panel_item(r: &Value) -> Item {
     if let Some(id) = string(r, "videoId") {
         item.video_id = Some(id);
     }
+    if let Some(byline) = byline {
+        take_links(byline, &mut item);
+    }
     item
 }
 
@@ -179,7 +270,151 @@ fn card_item(r: &Value) -> Item {
     if let Some(ep) = endpoint {
         apply_endpoint(ep, &mut item);
     }
+    if let Some(subtitle) = r.get("subtitle") {
+        take_links(subtitle, &mut item);
+    }
     item
+}
+
+/// The item a header button starts, such as an artist's shuffle.
+fn button_item(button: Option<&Value>) -> Option<Item> {
+    let ep = find(button?, "navigationEndpoint")?;
+    let mut item = Item::default();
+    apply_endpoint(ep, &mut item);
+    if let Some(w) = ep.get("watchEndpoint") {
+        item.params = string(w, "params");
+    }
+    (item.video_id.is_some() || item.playlist_id.is_some()).then_some(item)
+}
+
+fn page_kind(label: &str) -> PageKind {
+    match label {
+        "Album" | "Audiobook" => PageKind::Album,
+        "Single" | "EP" => PageKind::Single,
+        "Playlist" | "Mix" => PageKind::Playlist,
+        "Podcast" | "Show" => PageKind::Podcast,
+        "Profile" => PageKind::Profile,
+        _ => PageKind::Other,
+    }
+}
+
+/// Builds the detail header from one of the header renderers. The generic
+/// headers of Home and the like give None, and keep the plain title strip.
+fn detail_header(key: &str, h: &Value) -> Option<Header> {
+    let description = h.get("description");
+    let about = description
+        .and_then(|d| d.get("musicDescriptionShelfRenderer"))
+        .and_then(|m| m.get("description"))
+        .or(description)
+        .map(text)
+        .unwrap_or_default();
+    // Wikipedia's credit line is long and says little.
+    let about = about
+        .split("\n\nFrom Wikipedia")
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let mut header = Header {
+        title: h.get("title").map(text).unwrap_or_default(),
+        about,
+        thumb: h.get("thumbnail").map(thumb_best).unwrap_or_default(),
+        ..Header::default()
+    };
+    match key {
+        "musicImmersiveHeaderRenderer" => {
+            header.kind = PageKind::Artist;
+            header.label = "Artist".into();
+            header.banner = !header.thumb.is_empty();
+            let subscribe = h
+                .get("subscriptionButton")
+                .and_then(|b| b.get("subscribeButtonRenderer"));
+            let mut meta = Vec::new();
+            if let Some(s) = subscribe {
+                let count = s
+                    .get("longSubscriberCountText")
+                    .map(text)
+                    .filter(|t| !t.is_empty())
+                    .or_else(|| {
+                        s.get("subscriberCountText")
+                            .map(text)
+                            .filter(|t| !t.is_empty())
+                            .map(|t| format!("{t} subscribers"))
+                    });
+                meta.extend(count);
+                header.subscribed = Some(s.get("subscribed").and_then(Value::as_bool) == Some(true));
+                header.channel_id = string(s, "channelId");
+            }
+            if let Some(monthly) = h.get("monthlyListenerCount").map(text) {
+                if !monthly.is_empty() {
+                    meta.push(monthly);
+                }
+            }
+            header.meta = meta.join(" • ");
+            header.shuffle = button_item(h.get("playButton"));
+            header.radio = button_item(h.get("startRadioButton"));
+        }
+        "musicResponsiveHeaderRenderer" | "musicDetailHeaderRenderer" => {
+            let subtitle = h.get("subtitle");
+            let parts = subtitle.map(dot_parts).unwrap_or_default();
+            header.label = parts.first().cloned().unwrap_or_default();
+            header.kind = page_kind(&header.label);
+            // The artist or owner: the strapline on albums, the avatar stack
+            // on playlists, a run of the subtitle on the older header.
+            let strapline = h.get("straplineTextOne");
+            let runs = strapline
+                .or(subtitle)
+                .and_then(|s| s.get("runs"))
+                .and_then(Value::as_array);
+            let linked = runs
+                .into_iter()
+                .flatten()
+                .find_map(|r| run_link(r).map(|(id, _)| (r, id)));
+            if let Some(strapline) = strapline {
+                header.byline = clean(text(strapline));
+                header.byline_browse_id = linked.map(|(_, id)| id);
+            } else if let Some((run, id)) = linked {
+                header.byline = run.get("text").map(|t| clean(t.as_str().unwrap_or("").into())).unwrap_or_default();
+                header.byline_browse_id = Some(id);
+            } else if let Some(stack) = h.get("facepile").and_then(|f| f.get("avatarStackViewModel")) {
+                header.byline = stack
+                    .get("text")
+                    .and_then(|t| string(t, "content"))
+                    .unwrap_or_default();
+                header.byline_browse_id = find(stack, "browseEndpoint").and_then(|b| string(b, "browseId"));
+            }
+            let year = parts
+                .iter()
+                .skip(1)
+                .find(|p| p.len() == 4 && p.chars().all(|c| c.is_ascii_digit()));
+            let mut meta: Vec<String> = year.cloned().into_iter().collect();
+            meta.extend(h.get("secondSubtitle").map(dot_parts).unwrap_or_default());
+            header.meta = meta.join(" • ");
+            // The bookmark button saves the album or playlist to the library.
+            let buttons = h.get("buttons").and_then(Value::as_array);
+            for button in buttons.into_iter().flatten() {
+                let Some(toggle) = button.get("toggleButtonRenderer") else {
+                    continue;
+                };
+                let Some(like) = find(toggle, "likeEndpoint") else {
+                    continue;
+                };
+                header.playlist_id = like.get("target").and_then(|t| string(t, "playlistId"));
+                header.liked = Some(toggle.get("isToggled").and_then(Value::as_bool) == Some(true));
+            }
+        }
+        _ => return None,
+    }
+    Some(header)
+}
+
+/// The browse endpoint behind a shelf's "Show all" or "More" button.
+fn shelf_more(v: &Value) -> Option<(String, Option<String>)> {
+    let endpoint = v
+        .get("bottomEndpoint")
+        .or_else(|| find(v.get("header")?, "moreContentButton"))?;
+    let browse = find(endpoint, "browseEndpoint")?;
+    Some((string(browse, "browseId")?, string(browse, "params")))
 }
 
 #[derive(Default)]
@@ -217,6 +452,7 @@ impl Walker {
             title,
             carousel,
             items: Vec::new(),
+            more: shelf_more(v),
         });
         let outer = self.current.replace(self.page.shelves.len() - 1);
         self.loose = None;
@@ -233,11 +469,12 @@ impl Walker {
         self.current = outer;
     }
 
-    fn header(&mut self, h: &Value) {
+    fn header(&mut self, key: &str, h: &Value) {
         if self.has_header {
             return;
         }
         self.has_header = true;
+        self.page.header = detail_header(key, h);
         self.page.title = h.get("title").map(text).unwrap_or_default();
         let lines = ["straplineTextOne", "subtitle", "secondSubtitle"];
         let parts: Vec<String> = lines
@@ -291,7 +528,7 @@ impl Walker {
                             }
                         }
                         "menu" | "frameworkUpdates" | "responseContext" => {}
-                        k if HEADERS.contains(&k) => self.header(child),
+                        k if HEADERS.contains(&k) => self.header(k, child),
                         _ => self.walk(child),
                     }
                 }
@@ -306,6 +543,20 @@ pub fn page(v: &Value) -> Page {
     walker.walk(v);
     let mut page = walker.page;
     page.shelves.retain(|s| !s.items.is_empty());
+    // An artist's top songs lead the page as "Popular", five of them, with
+    // the rest behind "Show all".
+    if page.header.as_ref().is_some_and(|h| h.kind == PageKind::Artist) {
+        if let Some(songs) = page
+            .shelves
+            .iter_mut()
+            .find(|s| !s.carousel && (s.title == "Songs" || s.title == "Top songs"))
+        {
+            songs.title = "Popular".into();
+            if songs.more.is_some() {
+                songs.items.truncate(5);
+            }
+        }
+    }
     // Album tracks carry no artwork of their own. Use the album cover.
     if !page.thumb.is_empty() {
         for item in page.shelves.iter_mut().flat_map(|s| s.items.iter_mut()) {
@@ -345,6 +596,36 @@ pub fn lyrics(v: &Value) -> Option<String> {
     })
 }
 
+/// Completed queries and items from a `get_search_suggestions` response.
+/// Past searches come back as history suggestions and count as queries.
+pub fn suggestions(v: &Value) -> (Vec<String>, Vec<Item>) {
+    fn queries(v: &Value, out: &mut Vec<String>) {
+        match v {
+            Value::Object(map) => {
+                for (key, child) in map {
+                    if key == "searchSuggestionRenderer" || key == "historySuggestionRenderer" {
+                        let query = find(child, "searchEndpoint")
+                            .and_then(|e| string(e, "query"))
+                            .or_else(|| child.get("suggestion").map(text))
+                            .unwrap_or_default();
+                        if !query.is_empty() && !out.contains(&query) {
+                            out.push(query);
+                        }
+                    } else {
+                        queries(child, out);
+                    }
+                }
+            }
+            Value::Array(list) => list.iter().for_each(|c| queries(c, out)),
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    queries(v, &mut found);
+    let items = page(v).shelves.into_iter().flat_map(|s| s.items).collect();
+    (found, items)
+}
+
 pub fn account_name(v: &Value) -> Option<String> {
     let header = find(v, "activeAccountHeaderRenderer")?;
     Some(text(header.get("accountName")?))
@@ -379,6 +660,103 @@ mod tests {
         assert_eq!(song.video_id.as_deref(), Some("abc"));
         assert_eq!(song.duration_secs(), 321.0);
         assert_eq!(page.continuation.as_deref(), Some("tok"));
+    }
+
+    fn artist_run(name: &str, id: &str) -> Value {
+        json!({"text": name, "navigationEndpoint": {"browseEndpoint": {"browseId": id,
+            "browseEndpointContextSupportedConfigs": {"browseEndpointContextMusicConfig":
+                {"pageType": "MUSIC_PAGE_TYPE_ARTIST"}}}}})
+    }
+
+    #[test]
+    fn reads_an_album_header() {
+        // The shape music.youtube.com sent for Random Access Memories.
+        let v = json!({"contents": [{"musicResponsiveHeaderRenderer": {
+            "title": {"runs": [{"text": "Random Access Memories"}]},
+            "subtitle": {"runs": [{"text": "Album"}, {"text": " • "}, {"text": "2013"}]},
+            "straplineTextOne": {"runs": [artist_run("Daft Punk", "UC1")]},
+            "secondSubtitle": {"runs": [{"text": "13 songs"}, {"text": " • "}, {"text": "1 hour, 14 minutes"}]},
+            "description": {"musicDescriptionShelfRenderer": {"description": {"runs": [
+                {"text": "The fourth album.\n\nFrom Wikipedia (link)"}]}}},
+            "thumbnail": {"musicThumbnailRenderer": {"thumbnail": {"thumbnails": [
+                {"url": "small", "width": 60}, {"url": "big", "width": 544}]}}},
+            "buttons": [{"toggleButtonRenderer": {"isToggled": false,
+                "defaultServiceEndpoint": {"likeEndpoint": {"status": "LIKE", "target": {"playlistId": "OLAK1"}}}}}]
+        }}]});
+        let header = page(&v).header.expect("a header");
+        assert_eq!(header.kind, PageKind::Album);
+        assert_eq!(header.label, "Album");
+        assert_eq!(header.byline, "Daft Punk");
+        assert_eq!(header.byline_browse_id.as_deref(), Some("UC1"));
+        assert_eq!(header.meta, "2013 • 13 songs • 1 hour, 14 minutes");
+        assert_eq!(header.about, "The fourth album.");
+        assert_eq!(header.thumb, "big");
+        assert_eq!(header.liked, Some(false));
+        assert_eq!(header.playlist_id.as_deref(), Some("OLAK1"));
+    }
+
+    #[test]
+    fn reads_an_artist_header() {
+        let v = json!({"header": {"musicImmersiveHeaderRenderer": {
+            "title": {"runs": [{"text": "Daft Punk"}]},
+            "thumbnail": {"musicThumbnailRenderer": {"thumbnail": {"thumbnails": [
+                {"url": "banner", "width": 1080}]}}},
+            "monthlyListenerCount": {"runs": [{"text": "65.9M monthly audience"}]},
+            "subscriptionButton": {"subscribeButtonRenderer": {"subscribed": true, "channelId": "UC2",
+                "longSubscriberCountText": {"runs": [{"text": "7.22M subscribers"}]}}},
+            "playButton": {"buttonRenderer": {"navigationEndpoint": {"watchEndpoint":
+                {"videoId": "v1", "playlistId": "RDAO1", "params": "shuffle"}}}}
+        }}, "contents": {"musicShelfRenderer": {
+            "title": {"runs": [{"text": "Top songs"}]},
+            "bottomEndpoint": {"browseEndpoint": {"browseId": "VLOLAK2", "params": "p"}},
+            "contents": (0..7).map(|i| json!({"musicResponsiveListItemRenderer": {
+                "flexColumns": [{"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": format!("song {i}")}]}}}],
+                "playlistItemData": {"videoId": format!("v{i}")}}})).collect::<Vec<_>>()
+        }}});
+        let page = page(&v);
+        let header = page.header.expect("a header");
+        assert_eq!(header.kind, PageKind::Artist);
+        assert!(header.banner);
+        assert_eq!(header.subscribed, Some(true));
+        assert_eq!(header.channel_id.as_deref(), Some("UC2"));
+        assert_eq!(header.meta, "7.22M subscribers • 65.9M monthly audience");
+        let shuffle = header.shuffle.expect("a shuffle button");
+        assert_eq!(shuffle.params.as_deref(), Some("shuffle"));
+        assert_eq!(page.shelves[0].title, "Popular");
+        assert_eq!(page.shelves[0].items.len(), 5);
+        assert_eq!(
+            page.shelves[0].more,
+            Some(("VLOLAK2".to_string(), Some("p".to_string())))
+        );
+    }
+
+    #[test]
+    fn keeps_artist_and_album_links_of_a_playlist_row() {
+        let v = json!({"musicPlaylistShelfRenderer": {"contents": [{"musicResponsiveListItemRenderer": {
+            "flexColumns": [
+                {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "Get Lucky"}]}}},
+                {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [
+                    artist_run("Daft Punk", "UC1"), {"text": " & "}, artist_run("Pharrell Williams", "UC3")]}}},
+                {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "Random Access Memories",
+                    "navigationEndpoint": {"browseEndpoint": {"browseId": "MPREb_1",
+                        "browseEndpointContextSupportedConfigs": {"browseEndpointContextMusicConfig":
+                            {"pageType": "MUSIC_PAGE_TYPE_ALBUM"}}}}}]}}}
+            ],
+            "playlistItemData": {"videoId": "v1"}
+        }}]}});
+        let song = &page(&v).shelves[0].items[0];
+        assert_eq!(song.subtitle, "Daft Punk & Pharrell Williams • Random Access Memories");
+        assert_eq!(
+            song.artists,
+            vec![
+                ("Daft Punk".to_string(), Some("UC1".to_string())),
+                ("Pharrell Williams".to_string(), Some("UC3".to_string()))
+            ]
+        );
+        assert_eq!(
+            song.album,
+            Some(("Random Access Memories".to_string(), "MPREb_1".to_string()))
+        );
     }
 
     #[test]

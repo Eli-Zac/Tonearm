@@ -10,6 +10,17 @@ pub enum Key {
     Previous,
 }
 
+/// The cover URL for souvlaki. It strips `file://` and opens the rest as a
+/// local path, so a file cover must be `file://C:/...` with no third slash.
+fn cover_url(thumb: &str) -> Option<String> {
+    if let Some(path) = thumb.strip_prefix("file:") {
+        return Some(format!("file://{}", path.replace('\\', "/")));
+    }
+    thumb
+        .starts_with("http")
+        .then(|| crate::images::sized(thumb, 544))
+}
+
 pub struct Keys(MediaControls);
 
 impl Keys {
@@ -38,12 +49,15 @@ impl Keys {
         Some(Keys(controls))
     }
 
-    pub fn track(&mut self, title: &str, artist: &str, seconds: f32) {
+    /// `thumb` is the cover: an https URL, or `file:<path>` for a download.
+    pub fn track(&mut self, title: &str, artist: &str, seconds: f32, thumb: &str) {
         let duration = (seconds > 0.0).then(|| Duration::from_secs_f32(seconds));
+        let cover = cover_url(thumb);
         let _ = self.0.set_metadata(MediaMetadata {
             title: Some(title),
             artist: Some(artist),
             duration,
+            cover_url: cover.as_deref(),
             ..Default::default()
         });
     }

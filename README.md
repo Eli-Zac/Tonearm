@@ -99,13 +99,29 @@ this, so Tonearm does not ask it yet.
 
 ## Discord, Last.fm and Spotify
 
-Each service needs keys that belong to you. Enter them in Settings.
+Open Settings, then Connections. Each service has its own card.
 
-| Service | What you need | Where to get it |
-| --- | --- | --- |
-| Discord | Application ID | discord.com/developers |
-| Last.fm | API key and shared secret | last.fm/api/account/create |
-| Spotify | Client ID and client secret | developer.spotify.com |
+Release builds carry Tonearm's own Discord application and Last.fm keys.
+Press Connect and you are done. Discord needs no sign in. Last.fm opens a
+page in your browser where you approve Tonearm.
+
+Spotify needs keys that belong to you: a client ID and client secret from
+developer.spotify.com.
+
+### Building with the keys
+
+The keys are not in this repository. The build reads them from the
+environment, or from a `keys.env` file next to `Cargo.toml` that git ignores:
+
+```
+TONEARM_DISCORD_APP=your application ID from discord.com/developers
+TONEARM_LASTFM_KEY=your API key from last.fm/api/account/create
+TONEARM_LASTFM_SECRET=the shared secret that comes with it
+```
+
+The release workflow reads the same three names from the repository secrets.
+A build without them still works. Connections then asks for your own
+Discord application ID and Last.fm keys.
 
 With Spotify keys set, Tonearm looks each track up on Spotify and reports
 Spotify's title, artist and album to Last.fm and Discord. Without a sure

@@ -32,6 +32,10 @@ jobs:
         env:
           # Baked into the exe so the in-app updater knows what it runs.
           TONEARM_VERSION: ${{ inputs.version || github.ref_name }}
+          # Tonearm's own service keys, from the repository secrets.
+          TONEARM_DISCORD_APP: ${{ secrets.TONEARM_DISCORD_APP }}
+          TONEARM_LASTFM_KEY: ${{ secrets.TONEARM_LASTFM_KEY }}
+          TONEARM_LASTFM_SECRET: ${{ secrets.TONEARM_LASTFM_SECRET }}
         run: cargo build --release --locked
 
       - name: Publish

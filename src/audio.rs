@@ -1,7 +1,9 @@
 //! Audio engine. One thread owns the output device and the decoder.
 //!
 //! Tracks stream over HTTP into memory while they play. A four minute AAC
-//! track is about 4 MB, and we free it as soon as the next track loads.
+//! track is about 4 MB, and we free it as soon as the next track loads. A
+//! track that finishes downloading is kept in the offline cache, and cached
+//! or downloaded tracks play straight from their file.
 
 use rodio::{OutputStream, OutputStreamHandle, Sink};
 use std::io::{self, Read, Seek, SeekFrom};
@@ -19,12 +21,21 @@ pub const PAUSED: u32 = 3;
 pub const ENDED: u32 = 4;
 pub const FAILED: u32 = 5;
 
-enum Command {
-    Load {
+/// Where a track's bytes come from.
+pub enum Input {
+    /// Streamed over HTTP. With a video id, a download that finishes is
+    /// kept in the offline cache.
+    Http {
         url: String,
         headers: Vec<(String, String)>,
-        generation: u64,
+        cache_as: Option<String>,
     },
+    /// A cached or downloaded file.
+    File(std::path::PathBuf),
+}
+
+enum Command {
+    Load { input: Input, generation: u64 },
     Play,
     Pause,
     Seek(f32),
@@ -36,6 +47,8 @@ enum Command {
 pub struct Status {
     pub state: AtomicU32,
     pub position_ms: AtomicU64,
+    /// Length of the loaded track as the file states it. Zero when unknown.
+    pub duration_ms: AtomicU64,
     /// Which `load` call the state belongs to.
     pub generation: AtomicU64,
     pub error: Mutex<String>,
@@ -58,15 +71,12 @@ impl Audio {
         Audio { tx, status }
     }
 
-    pub fn load(&self, url: String, headers: Vec<(String, String)>, generation: u64) {
+    pub fn load(&self, input: Input, generation: u64) {
         self.status.generation.store(generation, Ordering::SeqCst);
         self.status.state.store(LOADING, Ordering::SeqCst);
         self.status.position_ms.store(0, Ordering::SeqCst);
-        let _ = self.tx.send(Command::Load {
-            url,
-            headers,
-            generation,
-        });
+        self.status.duration_ms.store(0, Ordering::SeqCst);
+        let _ = self.tx.send(Command::Load { input, generation });
     }
     pub fn play(&self) {
         let _ = self.tx.send(Command::Play);
@@ -97,11 +107,7 @@ fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
     };
     loop {
         match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(Command::Load {
-                url,
-                headers,
-                generation,
-            }) => {
+            Ok(Command::Load { input, generation }) => {
                 sink = None;
                 if generation != status.generation.load(Ordering::SeqCst) {
                     continue; // A newer track was requested while we waited.
@@ -116,15 +122,36 @@ fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
                     }
                 }
                 let (_, handle, rate) = output.as_ref().unwrap();
-                let source = HttpSource::open(url, headers);
-                let shared = source.shared.clone();
-                let opened = crate::decode::Track::open(Box::new(source), *rate)
-                    .map_err(|e| {
-                        // A failed download looks like a broken file to the
-                        // decoder. Report the download error instead.
-                        shared.buffer.lock().unwrap().error.clone().unwrap_or(e)
-                    })
-                    .and_then(|source| {
+                let opened = match input {
+                    Input::Http {
+                        url,
+                        headers,
+                        cache_as,
+                    } => {
+                        let source = HttpSource::open(url, headers, cache_as);
+                        let shared = source.shared.clone();
+                        crate::decode::Track::open(Box::new(source), *rate).map_err(|e| {
+                            // A failed download looks like a broken file to
+                            // the decoder. Report the download error instead.
+                            shared.buffer.lock().unwrap().error.clone().unwrap_or(e)
+                        })
+                    }
+                    Input::File(path) => {
+                        let opened = std::fs::File::open(&path)
+                            .map_err(|e| format!("Cannot open the saved song: {e}"))
+                            .and_then(|file| crate::decode::Track::open(Box::new(file), *rate));
+                        if opened.is_err() {
+                            crate::offline::discard_broken(&path);
+                        }
+                        opened
+                    }
+                };
+                let opened = opened.and_then(|source| {
+                        if let Some(length) = rodio::Source::total_duration(&source) {
+                            status
+                                .duration_ms
+                                .store(length.as_millis() as u64, Ordering::SeqCst);
+                        }
                         let sink =
                             Sink::try_new(handle).map_err(|e| format!("No audio output: {e}"))?;
                         sink.set_volume(volume);
@@ -204,10 +231,22 @@ struct Buffer {
     error: Option<String>,
 }
 
+#[derive(Default)]
 struct Shared {
     buffer: Mutex<Buffer>,
     ready: Condvar,
     cancelled: AtomicBool,
+}
+
+/// Fetches a whole track into memory. Blocks, so run it on a worker.
+pub fn fetch_all(url: &str, headers: &[(String, String)]) -> Result<Vec<u8>, String> {
+    let shared = Shared::default();
+    download(url, headers, &shared)?;
+    let buffer = shared.buffer.into_inner().unwrap();
+    if buffer.data.is_empty() || buffer.total.is_some_and(|t| t != buffer.data.len() as u64) {
+        return Err("The download stopped early".into());
+    }
+    Ok(buffer.data)
 }
 
 /// A `Read + Seek` view over a download that is still running. Reads block
@@ -218,12 +257,8 @@ pub struct HttpSource {
 }
 
 impl HttpSource {
-    pub fn open(url: String, headers: Vec<(String, String)>) -> Self {
-        let shared = Arc::new(Shared {
-            buffer: Mutex::new(Buffer::default()),
-            ready: Condvar::new(),
-            cancelled: AtomicBool::new(false),
-        });
+    pub fn open(url: String, headers: Vec<(String, String)>, cache_as: Option<String>) -> Self {
+        let shared = Arc::new(Shared::default());
         let worker = shared.clone();
         std::thread::Builder::new()
             .name("download".into())
@@ -233,6 +268,16 @@ impl HttpSource {
                 buffer.done = true;
                 buffer.error = result.err();
                 worker.ready.notify_all();
+                // Keep a whole track for next time. A skipped track stops
+                // downloading and is not kept.
+                let whole = buffer.error.is_none()
+                    && !worker.cancelled.load(Ordering::SeqCst)
+                    && buffer.total.is_some_and(|t| t == buffer.data.len() as u64);
+                if let (true, Some(id)) = (whole, cache_as) {
+                    let bytes = buffer.data.clone();
+                    drop(buffer);
+                    crate::offline::store_cache(&id, &bytes);
+                }
             })
             .expect("cannot start the download thread");
         HttpSource {

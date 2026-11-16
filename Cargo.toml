@@ -1,6 +1,6 @@
-[package]
+﻿[package]
 name = "tonearm"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 description = "Native Windows client for YouTube Music. No web views."
 publish = false
@@ -23,6 +23,7 @@ md5 = "0.7"
 souvlaki = { version = "0.8", default-features = false }
 raw-window-handle = "0.6"
 windows-sys = { version = "0.59", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }
+windows = { version = "0.58", features = ["Win32_System_Com", "Win32_UI_Shell", "Win32_UI_Shell_PropertiesSystem", "Win32_Storage_EnhancedStorage", "Win32_Storage_FileSystem"] }
 
 [build-dependencies]
 slint-build = "1.18"

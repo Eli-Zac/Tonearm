@@ -45,12 +45,54 @@ impl Cache {
 
 /// Google's image hosts resize on request. Asking for the size we draw
 /// saves both download and decode work.
-fn sized(url: &str, px: u32) -> String {
+pub fn sized(url: &str, px: u32) -> String {
     let resizable = url.contains("googleusercontent.com") || url.contains("ggpht.com");
     match url.rfind('=') {
         Some(i) if resizable => format!("{}=w{px}-h{px}-l90-rj", &url[..i]),
         _ => url.to_string(),
     }
+}
+
+/// The cache key of a wide picture, kept apart from the squares.
+pub fn wide_key(url: &str, width: u32) -> String {
+    format!("{width}w{url}")
+}
+
+/// Downloads a wide picture, such as an artist banner, at `width` pixels
+/// across. It keeps its own shape. The page crops it to fit and covers
+/// the corners, so nothing is cut or rounded here.
+pub fn fetch_wide(http: &ureq::Agent, url: &str, width: u32) -> Option<Pixels> {
+    let resizable = url.contains("googleusercontent.com") || url.contains("ggpht.com");
+    let url = match url.rfind('=') {
+        // Banners come at 12 by 5. Asking for that shape keeps the whole picture.
+        Some(i) if resizable => format!("{}=w{width}-h{}-p-l90-rj", &url[..i], width * 5 / 12),
+        _ if url.starts_with("//") => format!("https:{url}"),
+        _ => url.to_string(),
+    };
+    let response = http
+        .get(&url)
+        .set("User-Agent", crate::innertube::USER_AGENT)
+        .call()
+        .ok()?;
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .take(MAX_DOWNLOAD)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    let decoded = image::load_from_memory(&bytes).ok()?;
+    let scaled = if decoded.width() > width {
+        let height = decoded.height() * width / decoded.width();
+        decoded.resize_exact(width, height.max(1), image::imageops::FilterType::Triangle)
+    } else {
+        decoded
+    };
+    let rgba = scaled.into_rgba8();
+    Some(Pixels::clone_from_slice(
+        rgba.as_raw(),
+        rgba.width(),
+        rgba.height(),
+    ))
 }
 
 /// Rounds the corners by fading alpha. The software renderer cannot clip
@@ -72,22 +114,28 @@ pub fn round_corners(rgba: &mut image::RgbaImage, radius: f32) {
 /// Downloads, decodes, center crops to a `px` square and rounds the
 /// corners. `round` makes a full circle, used for artists.
 pub fn fetch(http: &ureq::Agent, url: &str, px: u32, round: bool) -> Option<Pixels> {
-    let url = if url.starts_with("//") {
-        format!("https:{url}")
+    // Covers of downloaded songs live on disk, so they show offline.
+    let bytes = if let Some(path) = url.strip_prefix("file:") {
+        std::fs::read(path).ok()?
     } else {
-        sized(url, px)
+        let url = if url.starts_with("//") {
+            format!("https:{url}")
+        } else {
+            sized(url, px)
+        };
+        let response = http
+            .get(&url)
+            .set("User-Agent", crate::innertube::USER_AGENT)
+            .call()
+            .ok()?;
+        let mut bytes = Vec::new();
+        response
+            .into_reader()
+            .take(MAX_DOWNLOAD)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        bytes
     };
-    let response = http
-        .get(&url)
-        .set("User-Agent", crate::innertube::USER_AGENT)
-        .call()
-        .ok()?;
-    let mut bytes = Vec::new();
-    response
-        .into_reader()
-        .take(MAX_DOWNLOAD)
-        .read_to_end(&mut bytes)
-        .ok()?;
     let decoded = image::load_from_memory(&bytes).ok()?;
     let side = decoded.width().min(decoded.height());
     let (x, y) = ((decoded.width() - side) / 2, (decoded.height() - side) / 2);

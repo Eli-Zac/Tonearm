@@ -128,7 +128,31 @@ impl Client {
         if let Some(p) = params {
             body["params"] = json!(p);
         }
-        Ok(parse::page(&self.post("browse", body)?))
+        let mut page = parse::page(&self.post("browse", body)?);
+        // A podcast's header names no type, only its author. Its id does.
+        if let Some(h) = page.header.as_mut().filter(|h| h.kind == PageKind::Other) {
+            if id.starts_with("MPSP") {
+                h.kind = PageKind::Podcast;
+                h.label = "Podcast".into();
+            }
+        }
+        // Album tracks do not name their album, since the page is the
+        // album. Name it, so "Go to album" works on them in the queue.
+        let album = page
+            .header
+            .as_ref()
+            .filter(|h| matches!(h.kind, PageKind::Album | PageKind::Single))
+            .filter(|_| id.starts_with("MPREb_"))
+            .map(|h| (h.title.clone(), id.to_string()));
+        if let Some(album) = album {
+            let tracks = page.shelves.iter_mut().filter(|s| !s.carousel);
+            for item in tracks.flat_map(|s| s.items.iter_mut()) {
+                if item.album.is_none() && item.video_id.is_some() {
+                    item.album = Some(album.clone());
+                }
+            }
+        }
+        Ok(page)
     }
 
     pub fn more(&self, token: &str) -> Result<Page, String> {
@@ -143,12 +167,30 @@ impl Client {
         Ok(page)
     }
 
+    /// What YouTube Music suggests while a search is typed: completed
+    /// queries first, then a few songs, artists and albums.
+    pub fn suggest(&self, input: &str) -> Result<(Vec<String>, Vec<Item>), String> {
+        let response = self.post("music/get_search_suggestions", json!({"input": input}))?;
+        Ok(parse::suggestions(&response))
+    }
+
     /// The play queue for a song, a playlist, or both. With only a song we
     /// ask for its radio, which is what the web client does on a bare click.
     pub fn queue(
         &self,
         video_id: Option<&str>,
         playlist_id: Option<&str>,
+    ) -> Result<(Vec<Item>, Option<String>), String> {
+        self.queue_with(video_id, playlist_id, None)
+    }
+
+    /// As `queue`, with the params of a watch endpoint. They carry flags
+    /// such as shuffle for an artist's shuffle button.
+    pub fn queue_with(
+        &self,
+        video_id: Option<&str>,
+        playlist_id: Option<&str>,
+        params: Option<&str>,
     ) -> Result<(Vec<Item>, Option<String>), String> {
         let mut body = json!({
             "isAudioOnly": true,
@@ -157,6 +199,9 @@ impl Client {
         });
         if let Some(id) = video_id {
             body["videoId"] = json!(id);
+        }
+        if let Some(p) = params {
+            body["params"] = json!(p);
         }
         match (playlist_id, video_id) {
             (Some(list), _) => body["playlistId"] = json!(list),
@@ -188,6 +233,24 @@ impl Client {
     pub fn rate(&self, video_id: &str, like: bool) -> Result<(), String> {
         let endpoint = if like { "like/like" } else { "like/removelike" };
         self.post(endpoint, json!({"target": {"videoId": video_id}}))
+            .map(|_| ())
+    }
+
+    /// Saves an album or playlist to the library, or takes it out.
+    pub fn rate_playlist(&self, playlist_id: &str, like: bool) -> Result<(), String> {
+        let endpoint = if like { "like/like" } else { "like/removelike" };
+        self.post(endpoint, json!({"target": {"playlistId": playlist_id}}))
+            .map(|_| ())
+    }
+
+    /// Follows an artist's channel, or stops following it.
+    pub fn subscribe(&self, channel_id: &str, follow: bool) -> Result<(), String> {
+        let endpoint = if follow {
+            "subscription/subscribe"
+        } else {
+            "subscription/unsubscribe"
+        };
+        self.post(endpoint, json!({"channelIds": [channel_id]}))
             .map(|_| ())
     }
 

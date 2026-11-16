@@ -2,12 +2,18 @@
 
 mod audio;
 mod decode;
+mod detail;
+mod history;
 mod images;
 mod innertube;
 mod lyrics;
 #[cfg(windows)]
 mod media_keys;
+mod menu;
+#[cfg(windows)]
+mod shell;
 mod motion;
+mod offline;
 mod pool;
 mod resolver;
 mod services;
@@ -16,7 +22,7 @@ mod update;
 
 slint::include_modules!();
 
-use innertube::model::{Item, Kind, Page};
+use innertube::model::{Header, Item, Kind, Page, PageKind};
 use innertube::Client;
 use slint::{ComponentHandle, Image, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 use std::cell::{Cell, RefCell};
@@ -36,6 +42,8 @@ enum Route {
     Library,
     Browse { id: String, params: Option<String> },
     Search(String),
+    /// Songs saved on this computer. Opens with no connection.
+    Downloads,
 }
 
 /// Where a thumbnail goes once it has loaded.
@@ -44,7 +52,43 @@ enum Target {
     Page { generation: u64, id: usize },
     Queue { generation: u64, index: usize },
     Track { generation: u64 },
+    Suggest { generation: u64, row: usize },
+    /// The art at the top of a detail page.
+    Hero { generation: u64 },
 }
+
+/// What a row under the search bar does when picked.
+#[derive(Clone)]
+enum Pick {
+    Query(String),
+    Item(Item),
+}
+
+/// The list under the search bar.
+#[derive(Default)]
+struct Suggest {
+    /// Bumped on every keystroke. Replies for older ones only fill the cache.
+    generation: u64,
+    picks: Vec<Pick>,
+    rows: Rc<VecModel<SuggestData>>,
+    /// Replies by lowercased query, so deleting a letter shows results at once.
+    /// Each holds the suggested searches and the real search results, so
+    /// the list shows the same items as the results page, and pressing
+    /// Enter can open that page without asking again.
+    cache: HashMap<String, Suggested>,
+}
+
+#[derive(Clone)]
+struct Suggested {
+    queries: Vec<String>,
+    page: Page,
+    at: Instant,
+}
+
+/// How long typing has to pause before we ask for suggestions.
+const SUGGEST_DELAY: Duration = Duration::from_millis(140);
+/// How long fetched results stay good enough to show again.
+const SUGGEST_FRESH: Duration = Duration::from_secs(300);
 
 enum Place {
     Row(usize),
@@ -62,6 +106,15 @@ struct PageState {
     /// On search and home, a song click starts that song's radio. On an
     /// album or playlist it queues the page instead.
     radio_on_click: bool,
+    /// What was searched for, on a results page. Results get tailored to
+    /// the listening history.
+    query: Option<String>,
+    /// The hero of an artist, album or playlist page.
+    header: Option<Header>,
+    /// What the "Show all" buttons open, by `RowData.more_id`.
+    mores: Vec<(String, Option<String>)>,
+    /// Tracks numbered so far, so a playlist's next page counts on.
+    numbered: usize,
 }
 
 #[derive(Default)]
@@ -92,6 +145,8 @@ struct Listen {
     played: Duration,
     last: Option<Instant>,
     scrobbled: bool,
+    /// Whether this play has counted as a listen in the history yet.
+    counted: bool,
     was_playing: bool,
 }
 
@@ -114,18 +169,27 @@ struct App {
     pending: RefCell<HashMap<String, Vec<Target>>>,
     history: RefCell<Vec<Route>>,
     page: RefCell<PageState>,
+    taste: RefCell<history::History>,
+    /// One thread, so history saves land in the order they were made.
+    disk: pool::Pool,
     player: RefCell<Player>,
     lyrics: RefCell<LyricsState>,
     cover: RefCell<Option<Cover>>,
     clock: Cell<(u64, Instant)>,
     timer: Timer,
     fast: Cell<bool>,
+    /// Whether the window was minimised at the last tick.
+    minimized: Cell<bool>,
     services: services::Services,
     settings: RefCell<services::Settings>,
     lastfm_token: RefCell<String>,
     listen: RefCell<Listen>,
     toast_timer: Timer,
     release: RefCell<Option<update::Release>>,
+    suggest: RefCell<Suggest>,
+    suggest_timer: Timer,
+    /// What each line of the open right click menu does.
+    menu: RefCell<Vec<menu::Action>>,
     #[cfg(windows)]
     keys: RefCell<Option<media_keys::Keys>>,
 }
@@ -144,6 +208,30 @@ fn on_ui(f: impl FnOnce(&Rc<App>) + Send + 'static) {
     });
 }
 
+/// The average colour of a picture, scaled so its brightest channel is
+/// `peak`. Dark enough that white text on top stays readable.
+fn tint_of(image: &Image, peak: f32) -> Option<slint::Color> {
+    let pixels = image.to_rgba8()?;
+    let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
+    for pixel in pixels.as_slice().iter().step_by(7) {
+        // Faded corners would pull the colour toward black.
+        if pixel.a < 128 {
+            continue;
+        }
+        r += pixel.r as u32;
+        g += pixel.g as u32;
+        b += pixel.b as u32;
+        n += 1;
+    }
+    if n == 0 {
+        return None;
+    }
+    let (r, g, b) = ((r / n) as f32, (g / n) as f32, (b / n) as f32);
+    let scale = peak / r.max(g).max(b).max(1.0);
+    let channel = |v: f32| (v * scale).clamp(0.0, 255.0) as u8;
+    Some(slint::Color::from_rgb_u8(channel(r), channel(g), channel(b)))
+}
+
 fn clock_text(seconds: f32) -> SharedString {
     let total = seconds.max(0.0) as u32;
     format!("{}:{:02}", total / 60, total % 60).into()
@@ -152,12 +240,24 @@ fn clock_text(seconds: f32) -> SharedString {
 /// Search results put the kind first and the length last in the subtitle:
 /// "Song • Daft Punk • Discovery • 5:21". Returns the artist and the length.
 fn credits(item: &Item) -> (String, f32) {
+    let (artist, _, seconds) = credits_with_album(item);
+    (artist, seconds)
+}
+
+/// As `credits`, with the album in the middle. The album is empty when the
+/// subtitle has none, as for videos, which show a view count there.
+fn credits_with_album(item: &Item) -> (String, String, f32) {
     let parts: Vec<&str> = item.subtitle.split(" • ").map(str::trim).collect();
     let labels = ["Song", "Video", "Single", "Album", "EP", "Episode"];
-    let artist = parts
-        .iter()
-        .find(|p| !labels.contains(*p))
-        .copied()
+    let mut names = parts.iter().filter(|p| !labels.contains(*p)).copied();
+    let artist = names.next().unwrap_or("").to_string();
+    let album = names
+        .next()
+        .filter(|p| {
+            let count = [" views", " plays", " likes"].iter().any(|w| p.ends_with(w));
+            let year = p.len() == 4 && p.chars().all(|c| c.is_ascii_digit());
+            !count && !year && !p.contains(':')
+        })
         .unwrap_or("")
         .to_string();
     let mut seconds = item.duration_secs();
@@ -170,7 +270,62 @@ fn credits(item: &Item) -> (String, f32) {
             .duration_secs();
         }
     }
-    (artist, seconds)
+    (artist, album, seconds)
+}
+
+/// Splits a suggested search into the part that matches what was typed,
+/// shown in bold, and the rest. When it does not start with the typed
+/// text, nothing is bold.
+fn split_typed(suggestion: &str, typed: &str) -> (String, String) {
+    let mut end = 0;
+    let mut typed_chars = typed.chars();
+    for (index, c) in suggestion.char_indices() {
+        match typed_chars.next() {
+            Some(t) if t.to_lowercase().eq(c.to_lowercase()) => end = index + c.len_utf8(),
+            Some(_) => return (String::new(), suggestion.to_string()),
+            None => break,
+        }
+    }
+    if typed_chars.next().is_some() {
+        return (String::new(), suggestion.to_string());
+    }
+    (suggestion[..end].to_string(), suggestion[end..].to_string())
+}
+
+/// "Artist", "Song • Journey", "Album • Daft Punk": what an item is and
+/// who made it, without the play counts YouTube Music adds.
+fn suggestion_subtitle(item: &Item) -> String {
+    if item.kind == Kind::Artist {
+        return "Artist".into();
+    }
+    let labels = [
+        "Song", "Video", "Single", "Album", "EP", "Playlist", "Episode", "Podcast", "Profile",
+    ];
+    let counts = [" views", " plays", " likes", " audience", " subscribers", " songs"];
+    let parts: Vec<&str> = item
+        .subtitle
+        .split(" • ")
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
+    let label = parts
+        .first()
+        .filter(|p| labels.contains(p))
+        .copied()
+        .unwrap_or(match item.kind {
+            Kind::Song => "Song",
+            Kind::Album => "Album",
+            Kind::Playlist => "Playlist",
+            _ => "",
+        });
+    let by = parts
+        .iter()
+        .find(|p| !labels.contains(p) && !counts.iter().any(|c| p.ends_with(c)));
+    match by {
+        Some(by) if !label.is_empty() => format!("{label} • {by}"),
+        Some(by) => by.to_string(),
+        None => label.to_string(),
+    }
 }
 
 impl App {
@@ -187,11 +342,36 @@ impl App {
 
     // ---------------------------------------------------------- thumbnails
 
+    /// A square thumbnail from the cache, or None while it loads. `px` zero
+    /// means the row draws no art, so nothing is fetched.
     fn thumb(self: &Rc<Self>, url: &str, px: u32, round: bool, target: Target) -> Option<Image> {
-        if url.is_empty() {
+        if url.is_empty() || px == 0 {
             return None;
         }
         let key = images::Cache::key(url, px, round);
+        self.load_art(key, url, target, move |http, url| {
+            images::fetch(http, url, px, round)
+        })
+    }
+
+    /// A wide picture, such as an artist banner, `width` pixels across.
+    fn wide_thumb(self: &Rc<Self>, url: &str, width: u32, target: Target) -> Option<Image> {
+        if url.is_empty() {
+            return None;
+        }
+        let key = images::wide_key(url, width);
+        self.load_art(key, url, target, move |http, url| {
+            images::fetch_wide(http, url, width)
+        })
+    }
+
+    fn load_art(
+        self: &Rc<Self>,
+        key: String,
+        url: &str,
+        target: Target,
+        fetch: impl FnOnce(&ureq::Agent, &str) -> Option<images::Pixels> + Send + 'static,
+    ) -> Option<Image> {
         if let Some(pixels) = self.cache.borrow().get(&key) {
             return Some(Image::from_rgba8(pixels));
         }
@@ -203,7 +383,7 @@ impl App {
         pending.insert(key.clone(), vec![target]);
         let (http, url) = (self.http.clone(), url.to_string());
         self.art.run(move || {
-            let pixels = images::fetch(&http, &url, px, round);
+            let pixels = fetch(&http, &url);
             on_ui(move |app| {
                 let targets = app.pending.borrow_mut().remove(&key).unwrap_or_default();
                 let Some(pixels) = pixels else { return };
@@ -248,11 +428,27 @@ impl App {
                     set(&player.model, index);
                 }
             }
+            Target::Suggest { generation, row } => {
+                let suggest = self.suggest.borrow();
+                if suggest.generation != generation {
+                    return;
+                }
+                if let Some(mut data) = suggest.rows.row_data(row) {
+                    data.item.art = image;
+                    data.item.has_art = true;
+                    suggest.rows.set_row_data(row, data);
+                }
+            }
             Target::Track { generation } => {
                 if self.player.borrow().generation == generation && self.cover.borrow().is_none() {
                     self.set_tint(&image);
                     self.ui.set_track_art(image);
                     self.ui.set_track_has_art(true);
+                }
+            }
+            Target::Hero { generation } => {
+                if self.page.borrow().generation == generation {
+                    self.set_hero_art(image);
                 }
             }
         }
@@ -261,40 +457,31 @@ impl App {
     /// Tints the player and side panel with the cover's average colour,
     /// pulled toward a mid brightness so text stays readable on top.
     fn set_tint(&self, image: &Image) {
-        let Some(pixels) = image.to_rgba8() else {
-            return;
-        };
-        let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
-        for pixel in pixels.as_slice().iter().step_by(7) {
-            r += pixel.r as u32;
-            g += pixel.g as u32;
-            b += pixel.b as u32;
-            n += 1;
+        if let Some(colour) = tint_of(image, 150.0) {
+            self.ui.set_tint(colour);
         }
-        if n == 0 {
-            return;
-        }
-        let (r, g, b) = ((r / n) as f32, (g / n) as f32, (b / n) as f32);
-        let peak = r.max(g).max(b).max(1.0);
-        let scale = 150.0 / peak;
-        let channel = |v: f32| (v * scale).clamp(0.0, 255.0) as u8;
-        self.ui.set_tint(slint::Color::from_rgb_u8(
-            channel(r),
-            channel(g),
-            channel(b),
-        ));
     }
 
     fn item_data(self: &Rc<Self>, item: &Item, id: usize, px: u32, target: Target) -> ItemData {
         let art = self.thumb(&item.thumb, px, item.kind == Kind::Artist, target);
+        let (runs, short) = detail::link_runs(&item.subtitle, item);
+        let (album, album_browse) = item.album.clone().unwrap_or_default();
         ItemData {
             id: id as i32,
             title: item.title.as_str().into(),
             subtitle: item.subtitle.as_str().into(),
+            runs: ModelRc::new(VecModel::from(runs)),
+            short_runs: ModelRc::new(VecModel::from(short)),
+            album: album.into(),
+            album_browse: album_browse.into(),
             duration: item.duration.as_str().into(),
             has_art: art.is_some(),
             art: art.unwrap_or_default(),
             round: item.kind == Kind::Artist,
+            downloaded: item
+                .video_id
+                .as_deref()
+                .is_some_and(offline::is_downloaded),
         }
     }
 
@@ -314,7 +501,12 @@ impl App {
             let mut page = self.page.borrow_mut();
             *page = PageState {
                 generation: page.generation + 1,
-                radio_on_click: !matches!(route, Route::Browse { .. }),
+                // Downloads queue the page, so they keep playing offline.
+                radio_on_click: !matches!(route, Route::Browse { .. } | Route::Downloads),
+                query: match &route {
+                    Route::Search(query) => Some(query.clone()),
+                    _ => None,
+                },
                 ..PageState::default()
             };
             self.ui.set_rows(ModelRc::from(page.rows.clone()));
@@ -323,14 +515,41 @@ impl App {
         self.ui.set_page_title("".into());
         self.ui.set_page_subtitle("".into());
         self.ui.set_page_playable(false);
+        // The kind guessed from the link picks the skeleton until the page
+        // arrives. The last page's colour must not flash on this one.
+        let guess = detail::guess_kind(&route);
+        self.ui.set_header(PageHeader {
+            kind: guess,
+            banner: guess == 1,
+            round: guess == 1,
+            ..PageHeader::default()
+        });
+        self.ui.set_page_tint(slint::Color::from_rgb_u8(0x2b, 0x24, 0x40));
         self.ui.set_loading(true);
         self.ui.set_can_back(self.history.borrow().len() > 1);
         self.ui.set_nav(match route {
             Route::Home => 0,
             Route::Explore => 1,
             Route::Library => 2,
+            Route::Downloads => 4,
             _ => -1,
         });
+        if let Route::Downloads = route {
+            let mut page = offline::downloads_page();
+            page.header = Some(detail::downloads_header(&page));
+            self.show(generation, Ok(page));
+            return;
+        }
+        // The search list already fetched these results while typing.
+        if let Route::Search(query) = &route {
+            let cached = self.suggest.borrow().cache.get(&query.to_lowercase()).cloned();
+            if let Some(found) = cached.filter(|c| c.at.elapsed() < SUGGEST_FRESH) {
+                if !found.page.shelves.is_empty() {
+                    self.show(generation, Ok(found.page));
+                    return;
+                }
+            }
+        }
         let client = self.client.clone();
         self.api.run(move || {
             let result = match &route {
@@ -339,6 +558,7 @@ impl App {
                 Route::Library => client.browse("FEmusic_library_landing", None),
                 Route::Browse { id, params } => client.browse(id, params.as_deref()),
                 Route::Search(query) => client.search(query),
+                Route::Downloads => Ok(offline::downloads_page()),
             };
             on_ui(move |app| app.show(generation, result));
         });
@@ -351,18 +571,68 @@ impl App {
         self.ui.set_loading(false);
         self.page.borrow_mut().loading_more = false;
         match result {
-            Ok(page) => {
-                if !page.title.is_empty() {
+            Ok(mut page) => {
+                let (query, first) = {
+                    let state = self.page.borrow();
+                    (state.query.clone(), state.items.is_empty())
+                };
+                if let Some(query) = query {
+                    self.tailor_results(&query, &mut page, first);
+                }
+                // Only the first page of a detail page has the header.
+                if first {
+                    match page.header.take() {
+                        Some(header) => self.show_header(generation, header),
+                        None => self.ui.set_header(PageHeader::default()),
+                    }
+                }
+                let detail = self.page.borrow().header.is_some();
+                if !page.title.is_empty() && !detail {
                     self.ui.set_page_title(page.title.as_str().into());
                     self.ui.set_page_subtitle(page.subtitle.as_str().into());
                 }
-                if page.shelves.is_empty() && self.page.borrow().items.is_empty() {
+                if page.shelves.is_empty() && first && !detail {
                     self.toast("Nothing here yet");
                 }
                 self.append(page);
             }
-            Err(message) => self.toast(message),
+            Err(message) => {
+                // An empty page keeps no hero, or the skeleton would stay.
+                if self.page.borrow().items.is_empty() {
+                    self.ui.set_header(PageHeader::default());
+                }
+                self.toast(message)
+            }
         }
+    }
+
+    /// Puts a detail page's hero on screen and starts loading its art.
+    fn show_header(self: &Rc<Self>, generation: u64, header: Header) {
+        let mut data = detail::header_data(&header, self.client.signed_in());
+        if header.kind == PageKind::Artist && !header.banner {
+            data.round = true;
+        }
+        let art = if header.banner {
+            self.wide_thumb(&header.thumb, 1280, Target::Hero { generation })
+        } else {
+            let round = header.kind == PageKind::Artist;
+            self.thumb(&header.thumb, 440, round, Target::Hero { generation })
+        };
+        self.ui.set_header(data);
+        self.page.borrow_mut().header = Some(header);
+        if let Some(image) = art {
+            self.set_hero_art(image);
+        }
+    }
+
+    fn set_hero_art(&self, image: Image) {
+        let mut data = self.ui.get_header();
+        if let Some(colour) = tint_of(&image, 120.0) {
+            self.ui.set_page_tint(colour);
+        }
+        data.art = image;
+        data.has_art = true;
+        self.ui.set_header(data);
     }
 
     fn append(self: &Rc<Self>, new: Page) {
@@ -376,14 +646,66 @@ impl App {
         }
         let mut places = Vec::new();
         let mut items = Vec::new();
+        let (kind, byline, mut numbered, mut mores) = {
+            let page = self.page.borrow();
+            let header = page.header.as_ref();
+            (
+                header.map(|h| h.kind),
+                header.map(|h| h.byline.clone()).unwrap_or_default(),
+                page.numbered,
+                page.mores.len(),
+            )
+        };
+        let first = rows.row_count() == 0;
+        // How the track list of this kind of page looks: 1 numbered with
+        // no art for albums, 2 numbered with art for playlists.
+        let track_style = match kind {
+            Some(PageKind::Album | PageKind::Single) => 1,
+            Some(PageKind::Playlist | PageKind::Other) => 2,
+            _ => 0,
+        };
+        let mut new_mores = Vec::new();
+        if first && kind.is_some() {
+            rows.push(RowData {
+                kind: 4,
+                ..RowData::default()
+            });
+            // A single has a track or two, which need no column titles.
+            let listed = new.shelves.first().is_some_and(|s| !s.carousel);
+            if listed && matches!(kind, Some(PageKind::Album | PageKind::Playlist)) {
+                rows.push(RowData {
+                    kind: 6,
+                    style: track_style,
+                    ..RowData::default()
+                });
+            }
+        }
+        let about = new
+            .continuation
+            .is_none()
+            .then(|| self.page.borrow().header.as_ref().map(|h| h.about.clone()))
+            .flatten()
+            .filter(|a| first && !a.is_empty());
         for shelf in new.shelves {
             if !shelf.title.is_empty() {
                 rows.push(RowData {
                     kind: 0,
                     title: shelf.title.as_str().into(),
+                    more: shelf.more.is_some(),
+                    more_id: mores as i32,
                     ..RowData::default()
                 });
+                if let Some(more) = shelf.more.clone() {
+                    new_mores.push(more);
+                    mores += 1;
+                }
             }
+            // The artist's top songs are numbered like a chart.
+            let style = match kind {
+                Some(PageKind::Artist) if shelf.title == "Popular" => 2,
+                Some(PageKind::Artist) => 0,
+                _ => track_style,
+            };
             if shelf.carousel {
                 let cards = Rc::new(VecModel::default());
                 for (index, item) in shelf.items.into_iter().enumerate() {
@@ -406,26 +728,55 @@ impl App {
                     ..RowData::default()
                 });
             } else {
-                for item in shelf.items {
-                    let data = self.item_data(
+                for (index, item) in shelf.items.into_iter().enumerate() {
+                    // Numbered album rows draw no art, so fetch none.
+                    let px = if style == 1 { 0 } else { 64 };
+                    let mut data = self.item_data(
                         &item,
                         next_id,
-                        64,
+                        px,
                         Target::Page {
                             generation,
                             id: next_id,
                         },
                     );
+                    // On an album every track is by the album's artist.
+                    // Saying so on each row is noise, so only other artists show.
+                    if style == 1 && detail::only_by(&item, &byline) {
+                        data.subtitle = "".into();
+                    }
+                    let number = match style {
+                        0 => 0,
+                        _ if kind == Some(PageKind::Artist) => index + 1,
+                        _ => {
+                            numbered += 1;
+                            numbered
+                        }
+                    };
                     places.push(Place::Row(rows.row_count()));
                     rows.push(RowData {
                         kind: 1,
                         item: data,
+                        style,
+                        number: number as i32,
                         ..RowData::default()
                     });
                     items.push(item);
                     next_id += 1;
                 }
             }
+        }
+        if let Some(about) = about {
+            rows.push(RowData {
+                kind: 0,
+                title: "About".into(),
+                ..RowData::default()
+            });
+            rows.push(RowData {
+                kind: 5,
+                title: about.into(),
+                ..RowData::default()
+            });
         }
         if new.continuation.is_some() {
             rows.push(RowData {
@@ -437,14 +788,27 @@ impl App {
         page.places.extend(places);
         page.items.extend(items);
         page.continuation = new.continuation;
+        page.numbered = numbered;
+        page.mores.extend(new_mores);
         let playable = !page.radio_on_click
             && page
                 .items
                 .iter()
                 .zip(&page.places)
                 .any(|(i, p)| i.video_id.is_some() && matches!(p, Place::Row(_)));
+        // An artist page plays its top songs, or its shuffle when it has none.
+        let artist_shuffle = page.header.as_ref().is_some_and(|h| h.shuffle.is_some());
+        let artist = kind == Some(PageKind::Artist);
         drop(page);
         self.ui.set_page_playable(playable);
+        if kind.is_some() {
+            let mut data = self.ui.get_header();
+            data.can_play = playable || (artist && artist_shuffle);
+            // Episodes of a podcast make no sense shuffled.
+            let podcast = kind == Some(PageKind::Podcast);
+            data.can_shuffle = (playable && !podcast) || artist_shuffle;
+            self.ui.set_header(data);
+        }
     }
 
     fn load_more(self: &Rc<Self>) {
@@ -511,14 +875,25 @@ impl App {
                 page.radio_on_click || matches!(page.places[id], Place::Card(..)),
             )
         };
+        if item.video_id.is_some() && !radio {
+            let songs = self.page_songs();
+            let index = songs.iter().position(|(i, _)| *i == id).unwrap_or(0);
+            self.set_queue(songs.into_iter().map(|(_, item)| item).collect(), index);
+        } else {
+            self.open_item(item);
+        }
+    }
+
+    /// Plays a song as the start of its radio, or opens an album, artist or
+    /// playlist page, or plays a mix.
+    fn open_item(self: &Rc<Self>, item: Item) {
+        if item.video_id.is_none() {
+            // Opening an artist, album or playlist says something about
+            // taste. Songs are counted when they play.
+            self.remember(&item, 0.5);
+        }
         if item.video_id.is_some() {
-            if radio {
-                self.set_queue(vec![item], 0);
-            } else {
-                let songs = self.page_songs();
-                let index = songs.iter().position(|(i, _)| *i == id).unwrap_or(0);
-                self.set_queue(songs.into_iter().map(|(_, item)| item).collect(), index);
-            }
+            self.set_queue(vec![item], 0);
         } else if let Some(browse_id) = item.browse_id {
             self.open(
                 Route::Browse {
@@ -540,31 +915,239 @@ impl App {
         }
     }
 
+    /// Adds to the listening history and saves it in the background.
+    fn remember(&self, item: &Item, weight: f64) {
+        let text = {
+            let mut history = self.taste.borrow_mut();
+            history.record(item, weight);
+            history.serialize()
+        };
+        self.disk.run(move || history::History::save(text));
+    }
+
+    fn clear_history(self: &Rc<Self>) {
+        self.taste.borrow_mut().clear();
+        self.disk.run(history::History::delete_file);
+        self.toast("Listening history cleared");
+    }
+
+    /// Tailors a page of search results: lists put what you play first,
+    /// and a strong match from your history becomes the top result.
+    fn tailor_results(&self, query: &str, page: &mut Page, first: bool) {
+        let history = self.taste.borrow();
+        if history.is_empty() {
+            return;
+        }
+        for shelf in &mut page.shelves {
+            // The top result's first item is YouTube Music's pick. Keep it
+            // there and only reorder what follows it.
+            let skip = usize::from(shelf.title == "Top result");
+            if shelf.items.len() > skip + 1 {
+                let mut rest = shelf.items.split_off(skip);
+                history::rerank(&history, &mut rest);
+                shelf.items.extend(rest);
+            }
+        }
+        if !first {
+            return;
+        }
+        // A title match on something you play often, roughly: the title
+        // starts with what you typed and you have listened a few times.
+        let Some((best, rank)) = history.matches(query, 1).into_iter().next() else {
+            return;
+        };
+        if rank < 4.5 {
+            return;
+        }
+        let key = history::key_of(&best);
+        match page.shelves.iter_mut().find(|s| s.title == "Top result") {
+            Some(top) => {
+                if top.items.first().and_then(history::key_of) != key {
+                    top.items.retain(|i| history::key_of(i) != key);
+                    top.items.insert(0, best);
+                }
+            }
+            None => page.shelves.insert(
+                0,
+                innertube::model::Shelf {
+                    title: "Top result".into(),
+                    carousel: false,
+                    items: vec![best],
+                    more: None,
+                },
+            ),
+        }
+    }
+
+    // --------------------------------------------------------- suggestions
+
+    /// The search text changed. Shows cached suggestions at once, or
+    /// skeleton rows until a short pause in typing lets us ask for them.
+    fn suggest_edited(self: &Rc<Self>, text: &str) {
+        let query = text.trim().to_string();
+        let key = query.to_lowercase();
+        let (generation, cached) = {
+            let mut suggest = self.suggest.borrow_mut();
+            suggest.generation += 1;
+            (suggest.generation, suggest.cache.get(&key).cloned())
+        };
+        self.suggest_timer.stop();
+        if query.is_empty() {
+            self.show_suggestions(generation, "", Vec::new(), Page::default());
+            return;
+        }
+        if let Some(cached) = cached.filter(|c| c.at.elapsed() < SUGGEST_FRESH) {
+            self.show_suggestions(generation, &query, cached.queries, cached.page);
+            return;
+        }
+        {
+            let mut suggest = self.suggest.borrow_mut();
+            suggest.picks.clear();
+            suggest.rows.set_vec(Vec::new());
+        }
+        self.ui.set_suggest_loading(true);
+        let weak = Rc::downgrade(self);
+        self.suggest_timer
+            .start(TimerMode::SingleShot, SUGGEST_DELAY, move || {
+                let Some(app) = weak.upgrade() else { return };
+                let (client, query) = (app.client.clone(), query.clone());
+                app.api.run(move || {
+                    // The suggested searches and the real results, asked
+                    // for side by side. The suggestion call's own items
+                    // are YouTube Music's guesses and often differ from
+                    // what the search returns, so they are not used.
+                    let (queries, page) = std::thread::scope(|scope| {
+                        let queries = scope.spawn(|| client.suggest(&query));
+                        let page = client.search(&query);
+                        let queries = queries.join().unwrap_or_else(|_| Err(String::new()));
+                        (queries, page)
+                    });
+                    let result = match (queries, page) {
+                        (Err(e), Err(_)) => Err(e),
+                        (queries, page) => Ok(Suggested {
+                            queries: queries.map(|(q, _)| q).unwrap_or_default(),
+                            page: page.unwrap_or_default(),
+                            at: Instant::now(),
+                        }),
+                    };
+                    on_ui(move |app| app.got_suggestions(generation, &query, result));
+                });
+            });
+    }
+
+    fn got_suggestions(
+        self: &Rc<Self>,
+        generation: u64,
+        query: &str,
+        result: Result<Suggested, String>,
+    ) {
+        let current = self.suggest.borrow().generation == generation;
+        match result {
+            Ok(found) => {
+                {
+                    let mut suggest = self.suggest.borrow_mut();
+                    if suggest.cache.len() > 300 {
+                        suggest.cache.clear();
+                    }
+                    suggest.cache.insert(query.to_lowercase(), found.clone());
+                }
+                if current {
+                    self.show_suggestions(generation, query, found.queries, found.page);
+                }
+            }
+            // A failed suggestion is not worth a toast. Enter still searches.
+            Err(_) if current => self.ui.set_suggest_loading(false),
+            Err(_) => {}
+        }
+    }
+
+    fn show_suggestions(
+        self: &Rc<Self>,
+        generation: u64,
+        typed: &str,
+        queries: Vec<String>,
+        mut page: Page,
+    ) {
+        let mut rows = Vec::new();
+        let mut picks = Vec::new();
+        for query in queries.into_iter().take(5) {
+            let (head, tail) = split_typed(&query, typed);
+            rows.push(SuggestData {
+                kind: 0,
+                head: head.into(),
+                tail: tail.into(),
+                ..SuggestData::default()
+            });
+            picks.push(Pick::Query(query));
+        }
+        // The first results of the real search, tailored exactly as the
+        // results page will be, so the list is a preview of that page.
+        self.tailor_results(typed, &mut page, true);
+        let mut items: Vec<Item> = Vec::new();
+        for item in page.shelves.into_iter().flat_map(|s| s.items) {
+            let key = history::key_of(&item);
+            if key.is_some() && !items.iter().any(|i| history::key_of(i) == key) {
+                items.push(item);
+            }
+        }
+        for item in items.into_iter().take(4) {
+            let row = rows.len();
+            let mut data = self.item_data(&item, row, 64, Target::Suggest { generation, row });
+            let subtitle = suggestion_subtitle(&item);
+            // The artist named in the shorter line still links to its page.
+            let (runs, _) = detail::link_runs(&subtitle, &item);
+            data.subtitle = subtitle.into();
+            data.runs = ModelRc::new(VecModel::from(runs));
+            rows.push(SuggestData {
+                kind: 1,
+                item: data,
+                ..SuggestData::default()
+            });
+            picks.push(Pick::Item(item));
+        }
+        let mut suggest = self.suggest.borrow_mut();
+        suggest.picks = picks;
+        suggest.rows.set_vec(rows);
+        drop(suggest);
+        self.ui.set_suggest_loading(false);
+    }
+
+    fn suggestion_picked(self: &Rc<Self>, index: usize) {
+        let pick = self.suggest.borrow().picks.get(index).cloned();
+        match pick {
+            Some(Pick::Query(query)) => {
+                self.ui.set_search_text(query.as_str().into());
+                self.suggest_edited(&query);
+                self.open(Route::Search(query), true);
+            }
+            Some(Pick::Item(item)) => self.open_item(item),
+            None => {}
+        }
+    }
+
     fn play_page(self: &Rc<Self>, shuffle: bool) {
-        let mut songs: Vec<Item> = self
+        let songs: Vec<Item> = self
             .page_songs()
             .into_iter()
             .map(|(_, item)| item)
             .collect();
+        // An artist page lists only five songs. Its own shuffle draws from
+        // all of them, so shuffling, or playing with no list, uses that.
+        let artist_shuffle = self
+            .page
+            .borrow()
+            .header
+            .as_ref()
+            .filter(|h| h.kind == PageKind::Artist)
+            .and_then(|h| h.shuffle.clone());
+        if let Some(endpoint) = artist_shuffle.filter(|_| shuffle || songs.is_empty()) {
+            self.play_endpoint(endpoint);
+            return;
+        }
         if songs.is_empty() {
             return;
         }
-        if shuffle {
-            // Fisher Yates with a xorshift seeded from the clock. Good enough
-            // for a playlist and it saves a dependency.
-            let mut seed = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(1)
-                | 1;
-            for i in (1..songs.len()).rev() {
-                seed ^= seed << 13;
-                seed ^= seed >> 7;
-                seed ^= seed << 17;
-                songs.swap(i, (seed % (i as u64 + 1)) as usize);
-            }
-        }
-        self.set_queue(songs, 0);
+        self.set_queue(if shuffle { shuffled(songs) } else { songs }, 0);
     }
 
     // -------------------------------------------------------------- player
@@ -656,11 +1239,13 @@ impl App {
             player.duration = credits(&item).1;
             (item, player.generation, index + 2 >= player.queue.len())
         };
-        let (artist, seconds) = credits(&item);
+        let (artist, album, seconds) = credits_with_album(&item);
         let ui = &self.ui;
+        ui.set_track_album(album.into());
         ui.set_has_track(true);
         ui.set_track_title(item.title.as_str().into());
         ui.set_track_artist(artist.as_str().into());
+        self.show_track_links(&item, &artist);
         ui.set_queue_index(index as i32);
         ui.set_liked(false);
         ui.set_progress(0.0);
@@ -679,9 +1264,17 @@ impl App {
             self.load_lyrics();
         }
         #[cfg(windows)]
-        self.update_keys(&item.title, &artist, seconds);
+        self.update_keys(&item.title, &artist, seconds, &item.thumb);
         if near_end {
             self.extend_with_radio();
+        }
+        let video_id = item.video_id.unwrap_or_default();
+        // A downloaded or cached copy needs no yt-dlp and no network.
+        if let Some(path) = offline::local_file(&video_id) {
+            ui.set_buffering(true);
+            self.audio.load(audio::Input::File(path), generation);
+            self.prefetch_next();
+            return;
         }
         let Some(resolver) = self.resolver.clone() else {
             self.audio.stop();
@@ -691,7 +1284,6 @@ impl App {
             return;
         };
         ui.set_buffering(true);
-        let video_id = item.video_id.unwrap_or_default();
         self.api.run(move || {
             let result = resolver.resolve(&video_id);
             on_ui(move |app| {
@@ -704,7 +1296,14 @@ impl App {
                             app.player.borrow_mut().duration = stream.duration;
                             app.ui.set_duration_text(clock_text(stream.duration));
                         }
-                        app.audio.load(stream.url, stream.headers, generation);
+                        app.audio.load(
+                            audio::Input::Http {
+                                url: stream.url,
+                                headers: stream.headers,
+                                cache_as: Some(video_id),
+                            },
+                            generation,
+                        );
                         app.prefetch_next();
                     }
                     Err(message) => {
@@ -716,12 +1315,10 @@ impl App {
         });
     }
 
-    /// Resolves the next track in the background so skipping to it, or
-    /// reaching it, starts without the yt-dlp wait.
+    /// Fetches the next track into the offline cache in the background, so
+    /// skipping to it, or reaching it, starts at once. With the cache off,
+    /// it still resolves the stream link to skip the yt-dlp wait.
     fn prefetch_next(self: &Rc<Self>) {
-        let Some(resolver) = self.resolver.clone() else {
-            return;
-        };
         let next = {
             let player = self.player.borrow();
             player
@@ -729,7 +1326,12 @@ impl App {
                 .get(player.index + 1)
                 .and_then(|item| item.video_id.clone())
         };
-        if let Some(video_id) = next {
+        let Some(video_id) = next else {
+            return;
+        };
+        if offline::cache_limit_mb() > 0 {
+            self.cache_ahead(video_id);
+        } else if let Some(resolver) = self.resolver.clone() {
             self.api.run(move || resolver.prefetch(&video_id));
         }
     }
@@ -757,7 +1359,7 @@ impl App {
     }
 
     #[cfg(windows)]
-    fn update_keys(self: &Rc<Self>, title: &str, artist: &str, seconds: f32) {
+    fn update_keys(self: &Rc<Self>, title: &str, artist: &str, seconds: f32, thumb: &str) {
         let mut keys = self.keys.borrow_mut();
         if keys.is_none() {
             *keys = media_keys::Keys::new(self.ui.window(), |key| {
@@ -769,7 +1371,7 @@ impl App {
             });
         }
         if let Some(keys) = keys.as_mut() {
-            keys.track(title, artist, seconds);
+            keys.track(title, artist, seconds, thumb);
         }
     }
 
@@ -934,7 +1536,20 @@ impl App {
 
     // ---------------------------------------------------------------- tick
 
+    /// The software renderer only redraws what changed. After the window
+    /// comes back from the taskbar its old pixels are gone, so ask for a
+    /// full repaint by nudging the window background.
+    fn repaint_after_restore(&self) {
+        let window = self.ui.window();
+        let minimized = window.is_minimized() || window.size().width == 0;
+        if self.minimized.replace(minimized) && !minimized {
+            self.ui.set_repaint(!self.ui.get_repaint());
+            window.request_redraw();
+        }
+    }
+
     fn tick(self: &Rc<Self>) {
+        self.repaint_after_restore();
         let status = &self.audio.status;
         let state = status.state.load(Ordering::SeqCst);
         let (generation, duration) = {
@@ -944,6 +1559,14 @@ impl App {
         let ui = &self.ui;
         let mut time = 0u64;
         if status.generation.load(Ordering::SeqCst) == generation {
+            // A saved file states its own length, which beats the guess
+            // from the subtitle when there was no yt-dlp to ask.
+            let stated = status.duration_ms.load(Ordering::SeqCst) as f32 / 1000.0;
+            if stated > 0.0 && (stated - duration).abs() > 1.0 {
+                self.player.borrow_mut().duration = stated;
+                ui.set_duration_text(clock_text(stated));
+            }
+            let duration = if stated > 0.0 { stated } else { duration };
             let playing = state == audio::PLAYING;
             if ui.get_playing() != playing {
                 ui.set_playing(playing);
@@ -1054,11 +1677,13 @@ impl App {
             };
             let player = self.player.borrow();
             if let Some(item) = player.queue.get(player.index) {
-                let (artist, seconds) = credits(item);
+                self.remember(item, 0.25);
+                let (artist, album, seconds) = credits_with_album(item);
                 let seconds = if duration > 0.0 { duration } else { seconds };
                 self.services.send(Event::Started(services::Track {
                     title: item.title.clone(),
                     artist,
+                    album,
                     seconds,
                     art: item.thumb.clone(),
                 }));
@@ -1073,6 +1698,18 @@ impl App {
             if !listen.scrobbled && duration > 30.0 && listen.played.as_secs_f32() >= needed {
                 listen.scrobbled = true;
                 self.services.send(Event::Scrobble);
+            }
+            // Half a minute in, or half of a short song, a play counts as a
+            // listen. Skips only leave the small mark from the start.
+            if !listen.counted && listen.played.as_secs_f32() >= needed.min(30.0).max(5.0) {
+                listen.counted = true;
+                let item = {
+                    let player = self.player.borrow();
+                    player.queue.get(player.index).cloned()
+                };
+                if let Some(item) = item {
+                    self.remember(&item, 0.75);
+                }
             }
         }
         if playing != listen.was_playing {
@@ -1099,6 +1736,19 @@ impl App {
         self.ui
             .set_svc_spotify_secret(s.spotify_secret.as_str().into());
         self.ui.set_lastfm_user(s.lastfm_user.as_str().into());
+        self.ui
+            .set_spotify_linked(!s.spotify_id.is_empty() && !s.spotify_secret.is_empty());
+        self.ui.set_discord_on(!s.discord_id().is_empty());
+        self.ui.set_discord_status(match s.discord_status.as_str() {
+            "song" => 1,
+            "app" => 2,
+            _ => 0,
+        });
+        self.ui
+            .set_discord_builtin(!services::DISCORD_APP.is_empty());
+        self.ui.set_lastfm_builtin(
+            !services::LASTFM_KEY.is_empty() && !services::LASTFM_SECRET.is_empty(),
+        );
     }
 
     fn apply_services(self: &Rc<Self>, note: &str) {
@@ -1133,57 +1783,120 @@ impl App {
         self.apply_services("Saved");
     }
 
+    /// Turns Discord on or off. Discord asks for no sign in. It trusts
+    /// whatever runs on the same computer, so the application ID is enough.
+    fn discord_toggle(self: &Rc<Self>) {
+        self.save_services();
+        let on = {
+            let mut s = self.settings.borrow_mut();
+            let on = s.discord_id().is_empty();
+            s.discord_on = if on { "1".into() } else { String::new() };
+            if !on {
+                s.discord_app.clear();
+            }
+            on
+        };
+        self.apply_services(if on {
+            "Discord is connected. Your status shows from the next track."
+        } else {
+            "Discord is unlinked"
+        });
+    }
+
+    /// Forgets the Spotify client ID and secret.
+    fn spotify_unlink(self: &Rc<Self>) {
+        {
+            let mut s = self.settings.borrow_mut();
+            s.spotify_id.clear();
+            s.spotify_secret.clear();
+        }
+        self.apply_services("Spotify is unlinked");
+    }
+
+    /// Picks what Discord shows in the member list: 0 artist, 1 song, 2 app.
+    fn discord_status(self: &Rc<Self>, choice: i32) {
+        self.settings.borrow_mut().discord_status = match choice {
+            1 => "song",
+            2 => "app",
+            _ => "artist",
+        }
+        .to_string();
+        self.apply_services("");
+    }
+
+    /// Connects Last.fm, or disconnects it when it is connected. Connecting
+    /// opens the approval page and waits for the user to approve there.
     fn lastfm_connect(self: &Rc<Self>) {
         self.save_services();
+        if !self.settings.borrow().lastfm_session.is_empty() {
+            {
+                let mut s = self.settings.borrow_mut();
+                s.lastfm_session.clear();
+                s.lastfm_user.clear();
+            }
+            self.lastfm_token.borrow_mut().clear();
+            self.apply_services("Last.fm is unlinked");
+            return;
+        }
         let (key, secret) = {
             let s = self.settings.borrow();
-            (s.lastfm_key.clone(), s.lastfm_secret.clone())
+            let (key, secret) = s.lastfm_keys();
+            (key.to_string(), secret.to_string())
         };
         if key.is_empty() || secret.is_empty() {
             self.ui
                 .set_services_note("Enter your Last.fm API key and shared secret first.".into());
             return;
         }
-        self.api.run(move || {
-            let result = services::lastfm_begin(&key, &secret);
-            on_ui(move |app| match result {
-                Ok((token, url)) => {
+        self.ui.set_services_note("Opening Last.fm".into());
+        std::thread::spawn(move || {
+            let (token, url) = match services::lastfm_begin(&key, &secret) {
+                Ok(begun) => begun,
+                Err(message) => {
+                    on_ui(move |app| app.ui.set_services_note(message.into()));
+                    return;
+                }
+            };
+            services::open_browser(&url);
+            {
+                let token = token.clone();
+                on_ui(move |app| {
                     *app.lastfm_token.borrow_mut() = token;
-                    services::open_browser(&url);
                     app.ui.set_services_note(
-                        "Approve Tonearm in the browser page that opened, then press Finish."
+                        "Approve Tonearm in the browser page that opened. Tonearm connects by itself once you do."
                             .into(),
                     );
+                });
+            }
+            // Last.fm has no callback for desktop apps, so we ask until the
+            // user has approved.
+            let deadline = Instant::now() + Duration::from_secs(180);
+            let result = loop {
+                std::thread::sleep(Duration::from_secs(3));
+                match services::lastfm_finish(&key, &secret, &token) {
+                    Ok(session) => break Some(session),
+                    Err(_) if Instant::now() < deadline => {}
+                    Err(_) => break None,
                 }
-                Err(message) => app.ui.set_services_note(message.into()),
-            });
-        });
-    }
-
-    fn lastfm_finish(self: &Rc<Self>) {
-        let token = self.lastfm_token.borrow().clone();
-        if token.is_empty() {
-            self.ui
-                .set_services_note("Press Connect Last.fm first.".into());
-            return;
-        }
-        let (key, secret) = {
-            let s = self.settings.borrow();
-            (s.lastfm_key.clone(), s.lastfm_secret.clone())
-        };
-        self.api.run(move || {
-            let result = services::lastfm_finish(&key, &secret, &token);
-            on_ui(move |app| match result {
-                Ok((session, user)) => {
-                    {
-                        let mut s = app.settings.borrow_mut();
-                        s.lastfm_session = session;
-                        s.lastfm_user = user;
+            };
+            on_ui(move |app| {
+                if *app.lastfm_token.borrow() != token {
+                    return; // A newer attempt took over, or the user disconnected.
+                }
+                app.lastfm_token.borrow_mut().clear();
+                match result {
+                    Some((session, user)) => {
+                        {
+                            let mut s = app.settings.borrow_mut();
+                            s.lastfm_session = session;
+                            s.lastfm_user = user;
+                        }
+                        app.apply_services("Last.fm is connected");
                     }
-                    app.lastfm_token.borrow_mut().clear();
-                    app.apply_services("Last.fm is connected");
+                    None => app.ui.set_services_note(
+                        "Last.fm did not confirm in time. Press Connect to try again.".into(),
+                    ),
                 }
-                Err(message) => app.ui.set_services_note(message.into()),
             });
         });
     }
@@ -1309,6 +2022,23 @@ impl App {
     }
 }
 
+/// Fisher Yates with a xorshift seeded from the clock. Good enough for a
+/// playlist and it saves a dependency.
+fn shuffled(mut songs: Vec<Item>) -> Vec<Item> {
+    let mut seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(1)
+        | 1;
+    for i in (1..songs.len()).rev() {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        songs.swap(i, (seed % (i as u64 + 1)) as usize);
+    }
+    songs
+}
+
 /// Breaks a lyric line into rows of at most `columns` characters. Breaks
 /// fall only between words, so a syllable sweep never splits a word.
 fn wrap(line: &lyrics::Line, columns: usize) -> Vec<(String, Vec<lyrics::Syllable>)> {
@@ -1368,12 +2098,27 @@ fn probe(args: &[String]) {
     let arg = |i: usize| args.get(i).map(String::as_str).unwrap_or("");
     let page = match arg(0) {
         "search" => client.search(arg(1)),
+        "suggest" => client.suggest(arg(1)).map(|(queries, items)| {
+            for query in &queries {
+                println!("query {query:?}");
+            }
+            Page {
+                shelves: vec![innertube::model::Shelf {
+                    title: "Items".into(),
+                    carousel: false,
+                    items,
+                    more: None,
+                }],
+                ..Page::default()
+            }
+        }),
         "browse" => client.browse(arg(1), None),
         "queue" => client.queue(Some(arg(1)), None).map(|(items, _)| Page {
             shelves: vec![innertube::model::Shelf {
                 title: "Queue".into(),
                 carousel: false,
                 items,
+                more: None,
             }],
             ..Page::default()
         }),
@@ -1382,14 +2127,28 @@ fn probe(args: &[String]) {
                 return println!("error: no resolver");
             };
             let started = Instant::now();
-            let stream = match resolver.resolve(arg(1)) {
-                Ok(stream) => stream,
-                Err(message) => return println!("error: {message}"),
-            };
-            println!("resolved in {:?}", started.elapsed());
             let audio = audio::Audio::new();
             audio.volume(0.0);
-            audio.load(stream.url, stream.headers, 1);
+            // Plays from the offline cache when the track is there, and
+            // fills the cache when it is not, like the app does.
+            if let Some(path) = offline::local_file(arg(1)) {
+                println!("playing from {}", path.display());
+                audio.load(audio::Input::File(path), 1);
+            } else {
+                let stream = match resolver.resolve(arg(1)) {
+                    Ok(stream) => stream,
+                    Err(message) => return println!("error: {message}"),
+                };
+                println!("resolved in {:?}", started.elapsed());
+                audio.load(
+                    audio::Input::Http {
+                        url: stream.url,
+                        headers: stream.headers,
+                        cache_as: Some(arg(1).to_string()),
+                    },
+                    1,
+                );
+            }
             for _ in 0..16 {
                 std::thread::sleep(Duration::from_millis(500));
                 let status = &audio.status;
@@ -1408,6 +2167,25 @@ fn probe(args: &[String]) {
                 audio.status.state.load(Ordering::SeqCst),
                 audio.status.position_ms.load(Ordering::SeqCst)
             );
+            return;
+        }
+        "download" => {
+            // `--probe download <video id>` saves a song as the app does.
+            let resolver = resolver::default();
+            let item = Item {
+                kind: Kind::Song,
+                title: arg(1).to_string(),
+                video_id: Some(arg(1).to_string()),
+                ..Item::default()
+            };
+            let http = innertube::agent(Duration::from_secs(15));
+            let started = Instant::now();
+            match offline::download(resolver.as_deref(), &http, &item) {
+                Ok(()) => println!("downloaded in {:?}", started.elapsed()),
+                Err(message) => println!("error: {message}"),
+            }
+            println!("downloaded {} local {:?}", offline::is_downloaded(arg(1)), offline::local_file(arg(1)));
+            println!("{} songs on the Downloads page", offline::downloads().len());
             return;
         }
         "decode" => {
@@ -1498,7 +2276,11 @@ fn probe(args: &[String]) {
         "thumb" => {
             let http = innertube::agent(Duration::from_secs(15));
             let started = Instant::now();
-            match images::fetch(&http, arg(1), 192, false) {
+            let pixels = match arg(2).parse::<u32>() {
+                Ok(width) => images::fetch_wide(&http, arg(1), width),
+                Err(_) => images::fetch(&http, arg(1), 192, false),
+            };
+            match pixels {
                 Some(pixels) => println!(
                     "{}x{} in {:?}",
                     pixels.width(),
@@ -1519,12 +2301,33 @@ fn probe(args: &[String]) {
                 page.subtitle,
                 page.continuation.is_some()
             );
+            if let Some(h) = &page.header {
+                println!(
+                    "header {:?} label {:?} title {:?} byline {:?} {:?} meta {:?}",
+                    h.kind, h.label, h.title, h.byline, h.byline_browse_id, h.meta
+                );
+                println!(
+                    "   banner {} thumb {:?} subscribed {:?} channel {:?} liked {:?} playlist {:?}",
+                    h.banner, h.thumb, h.subscribed, h.channel_id, h.liked, h.playlist_id
+                );
+                let endpoint = |i: &Option<Item>| {
+                    i.as_ref()
+                        .map(|i| (i.video_id.clone(), i.playlist_id.clone(), i.params.clone()))
+                };
+                println!(
+                    "   shuffle {:?} radio {:?} about {} chars",
+                    endpoint(&h.shuffle),
+                    endpoint(&h.radio),
+                    h.about.chars().count()
+                );
+            }
             for shelf in &page.shelves {
                 println!(
-                    "== {} ({} items, carousel {})",
+                    "== {} ({} items, carousel {}) more {:?}",
                     shelf.title,
                     shelf.items.len(),
-                    shelf.carousel
+                    shelf.carousel,
+                    shelf.more
                 );
                 for item in shelf.items.iter().take(4) {
                     let id = item
@@ -1541,6 +2344,9 @@ fn probe(args: &[String]) {
                         id,
                         !item.thumb.is_empty()
                     );
+                    if !item.artists.is_empty() || item.album.is_some() {
+                        println!("      artists {:?} album {:?}", item.artists, item.album);
+                    }
                 }
             }
         }
@@ -1549,6 +2355,11 @@ fn probe(args: &[String]) {
 }
 
 fn main() -> Result<(), slint::PlatformError> {
+    #[cfg(windows)]
+    {
+        shell::set_process_id();
+        shell::ensure_shortcut();
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("--probe") {
         probe(&args[1..]);
@@ -1579,14 +2390,20 @@ fn main() -> Result<(), slint::PlatformError> {
         pending: RefCell::default(),
         history: RefCell::default(),
         page: RefCell::default(),
+        taste: RefCell::new(history::History::load()),
+        disk: pool::Pool::new("disk", 1),
         player: RefCell::default(),
         lyrics: RefCell::default(),
         cover: RefCell::new(None),
         clock: Cell::new((0, Instant::now())),
         timer: Timer::default(),
         fast: Cell::new(false),
+        minimized: Cell::new(false),
         toast_timer: Timer::default(),
         release: RefCell::new(None),
+        suggest: RefCell::default(),
+        suggest_timer: Timer::default(),
+        menu: RefCell::default(),
         #[cfg(windows)]
         keys: RefCell::new(None),
     });
@@ -1607,7 +2424,11 @@ fn main() -> Result<(), slint::PlatformError> {
         0 => app.open(Route::Home, true),
         1 => app.open(Route::Explore, true),
         2 => app.open(Route::Library, true),
-        _ => app.ui.set_nav(3),
+        4 => app.open(Route::Downloads, true),
+        _ => {
+            app.ui.set_nav(3);
+            app.show_storage();
+        }
     });
     on!(on_back, |app| app.back());
     on!(on_search, |app, query| {
@@ -1616,6 +2437,10 @@ fn main() -> Result<(), slint::PlatformError> {
             app.open(Route::Search(query), true);
         }
     });
+    on!(on_search_edited, |app, text| app.suggest_edited(&text));
+    on!(on_suggestion_picked, |app, index| app
+        .suggestion_picked(index as usize));
+    on!(on_clear_history, |app| app.clear_history());
     on!(on_item_activated, |app, id| app.activate(id as usize));
     on!(on_queue_activated, |app, index| app
         .play_index(index as usize));
@@ -1642,11 +2467,25 @@ fn main() -> Result<(), slint::PlatformError> {
     on!(on_save_cookie, |app, text| app.save_cookie(&text));
     on!(on_sign_out, |app| app.sign_out());
     on!(on_save_services, |app| app.save_services());
+    on!(on_spotify_unlink, |app| app.spotify_unlink());
     on!(on_lastfm_connect, |app| app.lastfm_connect());
-    on!(on_lastfm_finish, |app| app.lastfm_finish());
+    on!(on_discord_toggle, |app| app.discord_toggle());
+    on!(on_discord_status_changed, |app, choice| app.discord_status(choice));
     on!(on_check_update, |app| app.check_update(false));
     on!(on_install_update, |app| app.install_update());
+    on!(on_cache_choice_changed, |app, choice| app.set_cache_choice(choice));
+    on!(on_clear_cache, |app| app.clear_cache());
+    // detail pages, links and the right click menu
+    on!(on_show_all, |app, id| app.show_all(id as usize));
+    on!(on_byline_clicked, |app| app.byline_clicked());
+    on!(on_toggle_follow, |app| app.toggle_follow());
+    on!(on_toggle_like_page, |app| app.toggle_like_page());
+    on!(on_open_browse, |app, id| app.open_browse(&id));
+    on!(on_item_menu, |app, source, id| app.item_menu(source, id));
+    on!(on_menu_picked, |app, index| app.menu_picked(index as usize));
     app.show_services();
+    app.ui
+        .set_suggestions(ModelRc::from(app.suggest.borrow().rows.clone()));
 
     let weak = Rc::downgrade(&app);
     app.timer.start(TimerMode::Repeated, SLOW_TICK, move || {
