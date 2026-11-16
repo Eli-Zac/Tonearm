@@ -149,6 +149,9 @@ struct PageState {
     mores: Vec<(String, Option<String>)>,
     /// Tracks numbered so far, so a playlist's next page counts on.
     numbered: usize,
+    /// What the track list is sorted by, from its column titles: 0 its own
+    /// order, 1 title, 2 album; and whether it runs backwards.
+    sort: (i32, bool),
 }
 
 #[derive(Default)]
@@ -780,6 +783,8 @@ impl App {
                 ..PageState::default()
             };
             self.ui.set_rows(ModelRc::from(page.rows.clone()));
+            self.ui.set_sort_column(0);
+            self.ui.set_sort_descending(false);
             page.generation
         };
         // A search keeps its title while it loads, so the tabs under it
@@ -1092,7 +1097,13 @@ impl App {
         // An artist page plays its top songs, or its shuffle when it has none.
         let artist_shuffle = page.header.as_ref().is_some_and(|h| h.shuffle.is_some());
         let artist = kind == Some(PageKind::Artist);
+        let sorted = page.sort != (0, false);
         drop(page);
+        if sorted {
+            // A sorted list is only right once all of it is here.
+            self.apply_sort();
+            self.load_more();
+        }
         self.ui.set_page_playable(playable);
         if kind.is_some() {
             let mut data = self.ui.get_header();
@@ -1149,16 +1160,97 @@ impl App {
         }
     }
 
-    /// Songs on the current page that sit in a vertical list.
+    /// A click on a track list's column title. A first click sorts by
+    /// the column, a second turns it around, and a third goes back to the
+    /// list's own order. "#" just turns the list's own order around.
+    fn sort_by(self: &Rc<Self>, column: i32) {
+        let (current, descending) = self.page.borrow().sort;
+        let next = match (column, current == column, descending) {
+            (0, true, false) => (0, true),
+            (0, ..) | (_, true, true) => (0, false),
+            (_, true, false) => (column, true),
+            (_, false, _) => (column, false),
+        };
+        self.page.borrow_mut().sort = next;
+        self.ui.set_sort_column(next.0);
+        self.ui.set_sort_descending(next.1);
+        self.apply_sort();
+        if next != (0, false) {
+            self.load_more();
+        }
+    }
+
+    /// Puts the songs under the column titles in the order picked.
+    fn apply_sort(&self) {
+        let mut page = self.page.borrow_mut();
+        let rows = page.rows.clone();
+        let count = rows.row_count();
+        let Some(start) = (0..count).position(|i| rows.row_data(i).is_some_and(|r| r.kind == 6))
+        else {
+            return;
+        };
+        let start = start + 1;
+        let mut end = start;
+        while end < count && rows.row_data(end).is_some_and(|r| r.kind == 1) {
+            end += 1;
+        }
+        // Which item each row shows.
+        let mut ids = vec![None; end - start];
+        for (id, place) in page.places.iter().enumerate() {
+            if let Place::Row(row) = place {
+                if (start..end).contains(row) {
+                    ids[row - start] = Some(id);
+                }
+            }
+        }
+        let (column, descending) = page.sort;
+        let mut list = Vec::with_capacity(ids.len());
+        for (offset, id) in ids.into_iter().enumerate() {
+            let (Some(id), Some(data)) = (id, rows.row_data(start + offset)) else {
+                return;
+            };
+            let key = match column {
+                1 => data.item.title.to_lowercase(),
+                2 => data.item.album.to_lowercase(),
+                _ => String::new(),
+            };
+            list.push((id, key, data));
+        }
+        list.sort_by(|a, b| {
+            let order = if column == 0 { a.0.cmp(&b.0) } else { a.1.cmp(&b.1) };
+            let order = if descending { order.reverse() } else { order };
+            // Songs with no album (or title) go last either way.
+            let blank = if column == 0 {
+                std::cmp::Ordering::Equal
+            } else {
+                a.1.is_empty().cmp(&b.1.is_empty())
+            };
+            blank.then(order).then(a.0.cmp(&b.0))
+        });
+        for (offset, (id, _, data)) in list.into_iter().enumerate() {
+            let row = start + offset;
+            if !matches!(page.places[id], Place::Row(r) if r == row) {
+                page.places[id] = Place::Row(row);
+                rows.set_row_data(row, data);
+            }
+        }
+    }
+
+    /// Songs on the current page that sit in a vertical list, top to bottom.
     fn page_songs(&self) -> Vec<(usize, Item)> {
         let page = self.page.borrow();
-        page.items
+        let mut songs: Vec<_> = page
+            .items
             .iter()
             .zip(&page.places)
             .enumerate()
-            .filter(|(_, (item, place))| item.video_id.is_some() && matches!(place, Place::Row(_)))
-            .map(|(id, (item, _))| (id, item.clone()))
-            .collect()
+            .filter_map(|(id, (item, place))| match place {
+                Place::Row(row) if item.video_id.is_some() => Some((*row, id, item.clone())),
+                _ => None,
+            })
+            .collect();
+        songs.sort_by_key(|(row, ..)| *row);
+        songs.into_iter().map(|(_, id, item)| (id, item)).collect()
     }
 
     fn activate(self: &Rc<Self>, id: usize) {
@@ -4081,6 +4173,7 @@ fn main() -> Result<(), slint::PlatformError> {
     on!(on_queue_activated, |app, index| app
         .play_index(index as usize));
     on!(on_load_more, |app| app.load_more());
+    on!(on_sort_by, |app, column| app.sort_by(column));
     on!(on_play_page, |app, shuffle| app.play_page(shuffle));
     on!(on_toggle_play, |app| app.toggle_play());
     on!(on_next, |app| app.next());

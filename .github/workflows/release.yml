@@ -39,13 +39,18 @@ jobs:
           TONEARM_LASTFM_SECRET: ${{ secrets.TONEARM_LASTFM_SECRET }}
         run: cargo build --release --locked
 
-      # NSIS comes with the Windows runner image.
+      # NSIS is not on the runner's PATH (and newer images may not ship it),
+      # so install it when missing and call it by its full path.
       - name: Installer
         shell: bash
         env:
           VERSION: ${{ inputs.version || github.ref_name }}
         run: |
-          makensis -V3 "-DVERSION=${VERSION#v}" installer/tonearm.nsi
+          NSIS="/c/Program Files (x86)/NSIS/makensis.exe"
+          if [ ! -f "$NSIS" ]; then
+            choco install nsis -y --no-progress
+          fi
+          "$NSIS" -V3 "-DVERSION=${VERSION#v}" installer/tonearm.nsi
 
       - name: Publish
         shell: bash

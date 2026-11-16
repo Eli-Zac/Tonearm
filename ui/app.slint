@@ -1122,6 +1122,9 @@ component LinkText inherits Text {
     in property <color> hover-color: Theme.text;
     callback open(string);
     callback menu(length, length);
+    // The link is under the mouse. A row it sits in no longer sees the mouse
+    // then, so the row asks this to stay lit.
+    out property <bool> hovered: link.has-hover;
     color: root.browse != "" && link.has-hover ? root.hover-color : root.rest-color;
     font-size: 14px;
     overflow: elide;
@@ -1159,6 +1162,8 @@ component RunLine inherits Rectangle {
     out property <length> line-width: base.preferred-width;
     // How many of the links are under the mouse: zero or one.
     property <int> hot;
+    // A link is under the mouse, which the row around it no longer sees.
+    out property <bool> hovered: root.hot > 0;
     // A link removed while under the mouse never says it left. New text
     // means new links, so start the count again.
     changed line => { root.hot = 0; }
@@ -1231,14 +1236,30 @@ component SongRow inherits Rectangle {
     // A right click, at window coordinates.
     callback menu(length, length);
     property <bool> is-now: Now.is-current(item.key);
+    // The mouse over a button or link inside the row leaves the row's own
+    // touch area, so each of those says when it has the mouse too.
+    property <bool> num-hot;
+    property <bool> art-hot;
+    property <bool> sub-hot;
+    property <bool> album-hot;
+    property <bool> hovered: touch.has-hover || root.num-hot || root.art-hot || root.sub-hot || root.album-hot;
+    // A row reused for another song starts clean: a part removed while under
+    // the mouse never says it left.
+    property <string> key: item.key;
+    changed key => {
+        root.num-hot = false;
+        root.art-hot = false;
+        root.sub-hot = false;
+        root.album-hot = false;
+    }
     height: number > 0 && !show-art ? 52px : 60px;
     Timer {
         interval: 350ms;
-        running: touch.has-hover;
+        running: root.hovered;
         triggered => { root.rested(); }
     }
     border-radius: 10px;
-    background: current ? #ffffff14 : touch.has-hover ? Theme.hover : transparent;
+    background: current ? #ffffff14 : root.hovered ? Theme.hover : transparent;
     animate background { duration: 120ms; }
     touch := TouchArea {
         mouse-cursor: pointer;
@@ -1256,24 +1277,28 @@ component SongRow inherits Rectangle {
         if root.number > 0: Rectangle {
             width: 28px;
             Text {
-                text: touch.has-hover || root.is-now ? "" : root.number;
+                text: root.hovered || root.is-now ? "" : root.number;
                 color: root.current ? Theme.accent : Theme.dim;
                 font-size: 16px;
                 horizontal-alignment: center;
                 vertical-alignment: center;
             }
-            if root.is-now && !touch.has-hover: Bars {
+            if root.is-now && !root.hovered: Bars {
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
                 running: Now.playing;
             }
-            if touch.has-hover: Icon {
+            if root.hovered: Icon {
                 text: root.is-now && Now.playing ? Icons.pause : Icons.play;
                 fill: true;
                 font-size: 15px;
             }
-            if touch.has-hover: TouchArea {
+            // Always there: made only while the row had the mouse, it took
+            // the mouse from the row, vanished, and came back, so it
+            // flickered and could not be clicked.
+            TouchArea {
                 mouse-cursor: pointer;
+                changed has-hover => { root.num-hot = self.has-hover; }
                 clicked => { root.play(); }
             }
         }
@@ -1291,7 +1316,7 @@ component SongRow inherits Rectangle {
                     round: item.round;
                 }
                 // With no number column, the play button sits on the art.
-                if root.number == 0 && (touch.has-hover || root.is-now): Rectangle {
+                if root.number == 0 && (root.hovered || root.is-now): Rectangle {
                     border-radius: item.round ? 22px : 6px;
                     background: #000000a0;
                     if root.is-now && !art-touch.has-hover: Bars {
@@ -1308,6 +1333,7 @@ component SongRow inherits Rectangle {
                 art-touch := TouchArea {
                     enabled: root.number == 0;
                     mouse-cursor: pointer;
+                    changed has-hover => { root.art-hot = self.has-hover; }
                     clicked => { root.play(); }
                 }
             }
@@ -1327,6 +1353,7 @@ component SongRow inherits Rectangle {
                 height: 18px;
                 text: item.subtitle;
                 runs: root.show-album ? item.short-runs : item.runs;
+                changed hovered => { root.sub-hot = self.hovered; }
                 open(b) => { root.open(b); }
                 menu(x, y) => { root.menu(x, y); }
             }
@@ -1335,6 +1362,7 @@ component SongRow inherits Rectangle {
             width: root.width * 0.24;
             text: item.album;
             browse: item.album-browse;
+            changed hovered => { root.album-hot = self.hovered; }
             open(b) => { root.open(b); }
             menu(x, y) => { root.menu(x, y); }
         }
@@ -2009,40 +2037,69 @@ component SectionHeader inherits Rectangle {
 }
 
 // "# Title  Album" above a track list. The offsets match SongRow's columns.
+// One column title in a track list. A click sorts the list by it.
+component ColumnTitle inherits Rectangle {
+    in property <string> text;
+    in property <bool> centred;
+    // 0 not sorted by this column, 1 rising, 2 falling.
+    in property <int> order;
+    callback clicked;
+    HorizontalLayout {
+        alignment: root.centred ? center : start;
+        spacing: 4px;
+        label := Text {
+            text: root.text;
+            color: root.order > 0 ? Theme.accent : touch.has-hover ? Theme.text : Theme.faint;
+            font-size: 14px;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+        if root.order > 0: Icon {
+            text: root.order == 1 ? Icons.arrow-up : Icons.arrow-down;
+            color: Theme.accent;
+            font-size: 12px;
+        }
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
 component TrackColumns inherits Rectangle {
     in property <bool> show-art;
     in property <bool> show-album;
+    // The column the list is sorted by: 0 #, 1 title, 2 album.
+    in property <int> sort-column;
+    in property <bool> sort-descending;
+    callback sort(int);
     height: 32px;
-    Text {
+    ColumnTitle {
         x: 8px;
         width: 28px;
         height: parent.height;
         text: "#";
-        color: Theme.faint;
-        font-size: 14px;
-        font-weight: 600;
-        horizontal-alignment: center;
-        vertical-alignment: center;
+        centred: true;
+        // The list's own order is the usual one, so it is not marked.
+        order: root.sort-column == 0 && root.sort-descending ? 2 : 0;
+        clicked => { root.sort(0); }
     }
-    Text {
+    ColumnTitle {
         x: root.show-art ? 8px + 28px + 12px + 44px + 12px : 8px + 28px + 12px;
+        width: 160px;
         height: parent.height;
         text: "Title";
-        color: Theme.faint;
-        font-size: 14px;
-        font-weight: 600;
-        vertical-alignment: center;
+        order: root.sort-column == 1 ? (root.sort-descending ? 2 : 1) : 0;
+        clicked => { root.sort(1); }
     }
-    if root.show-album: Text {
+    if root.show-album: ColumnTitle {
         // padding, length, the download slot and the gaps between them.
         x: parent.width - 14px - 40px - 12px - 14px - 12px - parent.width * 0.24;
-        width: parent.width * 0.24;
+        width: 160px;
         height: parent.height;
         text: "Album";
-        color: Theme.faint;
-        font-size: 14px;
-        font-weight: 600;
-        vertical-alignment: center;
+        order: root.sort-column == 2 ? (root.sort-descending ? 2 : 1) : 0;
+        clicked => { root.sort(2); }
     }
     Rectangle {
         y: parent.height - 1px;
@@ -2642,6 +2699,10 @@ export component AppWindow inherits Window {
     callback item-play(int);
     callback queue-activated(int);
     callback load-more();
+    // A click on a track list's column title.
+    callback sort-by(int);
+    in property <int> sort-column;
+    in property <bool> sort-descending;
     callback play-page(bool);
     callback toggle-play();
     callback toggle-shuffle();
@@ -3136,6 +3197,9 @@ export component AppWindow inherits Window {
                             width: parent.width - 10px;
                             show-art: row.style == 2;
                             show-album: row.style == 2 && root.show-album;
+                            sort-column: root.sort-column;
+                            sort-descending: root.sort-descending;
+                            sort(c) => { root.sort-by(c); }
                         }
                         if row.kind == 3: Appear {
                             appeared => { root.load-more(); }
