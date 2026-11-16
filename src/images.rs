@@ -4,7 +4,8 @@ use slint::{Rgba8Pixel, SharedPixelBuffer};
 use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 
-const BUDGET: usize = 12 * 1024 * 1024;
+// Art is fetched at screen pixels, so a scaled display needs more room.
+const BUDGET: usize = 64 * 1024 * 1024;
 const MAX_DOWNLOAD: u64 = 4 * 1024 * 1024;
 
 pub type Pixels = SharedPixelBuffer<Rgba8Pixel>;
@@ -17,8 +18,8 @@ pub struct Cache {
 }
 
 impl Cache {
-    pub fn key(url: &str, px: u32, round: bool) -> String {
-        format!("{px}{}{url}", if round { 'o' } else { ':' })
+    pub fn key(url: &str, px: u32) -> String {
+        format!("{px}:{url}")
     }
 
     pub fn get(&self, key: &str) -> Option<Pixels> {
@@ -95,44 +96,9 @@ pub fn fetch_wide(http: &ureq::Agent, url: &str, width: u32) -> Option<Pixels> {
     ))
 }
 
-/// `round_corners` for raw RGBA bytes, `side` pixels square. Only the four
-/// corner squares are touched, so it is cheap enough for every video frame.
-pub fn round_corners_square(bytes: &mut [u8], side: u32, radius: f32) {
-    let r = radius.ceil() as u32;
-    let s = side as f32;
-    for y in (0..r).chain(side.saturating_sub(r)..side) {
-        for x in (0..r).chain(side.saturating_sub(r)..side) {
-            let cx = (x as f32 + 0.5).clamp(radius, s - radius);
-            let cy = (y as f32 + 0.5).clamp(radius, s - radius);
-            let distance = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
-            let cover = (radius - distance + 0.5).clamp(0.0, 1.0);
-            if cover < 1.0 {
-                let i = (y * side + x) as usize * 4 + 3;
-                bytes[i] = (bytes[i] as f32 * cover) as u8;
-            }
-        }
-    }
-}
-
-/// Rounds the corners by fading alpha. The software renderer cannot clip
-/// an image to a rounded shape, so we bake the shape into the pixels.
-pub fn round_corners(rgba: &mut image::RgbaImage, radius: f32) {
-    let (w, h) = (rgba.width() as f32, rgba.height() as f32);
-    for (x, y, pixel) in rgba.enumerate_pixels_mut() {
-        // Distance from the pixel centre to the nearest corner circle.
-        let cx = (x as f32 + 0.5).clamp(radius, w - radius);
-        let cy = (y as f32 + 0.5).clamp(radius, h - radius);
-        let distance = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
-        let cover = (radius - distance + 0.5).clamp(0.0, 1.0);
-        if cover < 1.0 {
-            pixel.0[3] = (pixel.0[3] as f32 * cover) as u8;
-        }
-    }
-}
-
-/// Downloads, decodes, center crops to a `px` square and rounds the
-/// corners. `round` makes a full circle, used for artists.
-pub fn fetch(http: &ureq::Agent, url: &str, px: u32, round: bool) -> Option<Pixels> {
+/// Downloads, decodes and center crops to a `px` square. The page clips
+/// it to its rounded shape, so the pixels stay square.
+pub fn fetch(http: &ureq::Agent, url: &str, px: u32) -> Option<Pixels> {
     // Covers of downloaded songs live on disk, so they show offline.
     let bytes = if let Some(path) = url.strip_prefix("file:") {
         std::fs::read(path).ok()?
@@ -164,9 +130,7 @@ pub fn fetch(http: &ureq::Agent, url: &str, px: u32, round: bool) -> Option<Pixe
     } else {
         square
     };
-    let mut rgba = scaled.into_rgba8();
-    let side = rgba.width() as f32;
-    round_corners(&mut rgba, if round { side / 2.0 } else { side * 0.065 });
+    let rgba = scaled.into_rgba8();
     Some(Pixels::clone_from_slice(
         rgba.as_raw(),
         rgba.width(),

@@ -623,9 +623,8 @@ mod video {
         Ok(())
     }
 
-    /// Copies the middle square of a sample's BGRX rows into RGBA, with the
-    /// corners rounded like the still covers. The software renderer cannot
-    /// round an image itself, and a cover is square.
+    /// Copies the middle square of a sample's BGRX rows into RGBA. A cover
+    /// is square, and the page rounds its corners.
     unsafe fn frame(
         sample: &IMFSample,
         width: u32,
@@ -672,7 +671,6 @@ mod video {
             copy(base, stride as isize);
             buffer.Unlock()?;
         }
-        crate::images::round_corners_square(pixels.make_mut_bytes(), side, side as f32 * 0.065);
         Ok(pixels)
     }
 }

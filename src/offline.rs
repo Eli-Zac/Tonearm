@@ -353,6 +353,7 @@ fn load_index(state: &mut State) {
             params: s(e, "params"),
             artists: Item::artists_from_json(e.get("artist_links")),
             album: Item::album_from_json(e.get("album")),
+            ..Item::default()
         };
         state.downloads.insert(
             id,

@@ -15,6 +15,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const ORIGIN: &str = "https://music.youtube.com";
 const BASE: &str = "https://music.youtube.com/youtubei/v1/";
 const CLIENT_VERSION: &str = "1.20261101.01.00";
+/// The iOS YouTube app version the loudness lookup speaks as.
+const IOS_VERSION: &str = "20.10.4";
 pub const USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0";
 
@@ -169,6 +171,13 @@ impl Client {
                 h.label = "Podcast".into();
             }
         }
+        // The user's own playlists have no save button to name their
+        // playlist. The browse id is the playlist id with "VL" in front.
+        if let Some(h) = page.header.as_mut().filter(|h| h.playlist_id.is_none()) {
+            if let Some(list) = id.strip_prefix("VL") {
+                h.playlist_id = Some(list.to_string());
+            }
+        }
         // Album tracks do not name their album, since the page is the
         // album. Name it, so "Go to album" works on them in the queue.
         let album = page
@@ -243,6 +252,32 @@ impl Client {
         Ok(page)
     }
 
+    /// Search results of one kind, for the tabs on the results page: 1
+    /// songs, 2 albums, 3 artists, 4 playlists, 5 podcasts. 0 is all.
+    pub fn search_in(&self, query: &str, tab: usize) -> Result<Page, String> {
+        // YouTube Music's filter codes, as its own search page sends them.
+        let filter = match tab {
+            1 => "II",
+            2 => "IY",
+            3 => "Ig",
+            4 => "Io",
+            5 => "JQ",
+            _ => return self.search(query),
+        };
+        let params = format!("EgWKAQ{filter}AWoMEA4QChADEAQQCRAF");
+        let mut page = parse::page(&self.post("search", json!({"query": query, "params": params}))?);
+        page.title = format!("Results for \u{201c}{query}\u{201d}");
+        Ok(page)
+    }
+
+    /// The next page of search results. Search pages continue through the
+    /// search endpoint, not browse.
+    pub fn search_more(&self, token: &str) -> Result<Page, String> {
+        Ok(parse::page(
+            &self.post("search", json!({"continuation": token}))?,
+        ))
+    }
+
     /// What YouTube Music suggests while a search is typed: completed
     /// queries first, then a few songs, artists and albums.
     pub fn suggest(&self, input: &str) -> Result<(Vec<String>, Vec<Item>), String> {
@@ -306,6 +341,60 @@ impl Client {
         ))
     }
 
+    /// The song's measured loudness in LKFS, for volume levelling. Asked of
+    /// YouTube's iOS player, the one client that states it without a sign
+    /// in or a proof of being a browser. None when it gives no figure.
+    pub fn loudness(&self, video_id: &str) -> Result<Option<f32>, String> {
+        let body = json!({
+            "videoId": video_id,
+            "context": {"client": {
+                "clientName": "IOS", "clientVersion": IOS_VERSION, "hl": "en"
+            }},
+        });
+        let response: Value = self
+            .agent
+            .post("https://www.youtube.com/youtubei/v1/player?prettyPrint=false")
+            .send_json(body)
+            .map_err(|e| format!("Network error: {e}"))?
+            .into_json()
+            .map_err(|e| format!("Bad response: {e}"))?;
+        let config = &response["playerConfig"]["audioConfig"];
+        Ok(config["trackAbsoluteLoudnessLkfs"]
+            .as_f64()
+            .or(config["perceptualLoudnessDb"].as_f64())
+            .map(|v| v as f32))
+    }
+
+    /// A song's credits: each role, such as "Written by", with its names
+    /// joined. Empty when YouTube Music has none for it.
+    pub fn credits(&self, video_id: &str) -> Result<Vec<(String, String)>, String> {
+        let response = self.post("browse", json!({"browseId": format!("MPTC{video_id}")}))?;
+        let text = |v: &Value| -> String {
+            v["runs"]
+                .as_array()
+                .map(|runs| {
+                    runs.iter()
+                        .filter_map(|r| r["text"].as_str())
+                        .map(str::trim)
+                        .filter(|t| !t.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default()
+        };
+        let sections = response["onResponseReceivedActions"][0]["openPopupAction"]["popup"]
+            ["dismissableDialogRenderer"]["sections"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        Ok(sections
+            .iter()
+            .map(|s| &s["dismissableDialogContentSectionRenderer"])
+            .map(|s| (text(&s["title"]), text(&s["subtitle"])))
+            .filter(|(role, names)| !role.is_empty() && !names.is_empty())
+            .collect())
+    }
+
     pub fn rate(&self, video_id: &str, like: bool) -> Result<(), String> {
         let endpoint = if like { "like/like" } else { "like/removelike" };
         self.post(endpoint, json!({"target": {"videoId": video_id}}))
@@ -328,6 +417,88 @@ impl Client {
         };
         self.post(endpoint, json!({"channelIds": [channel_id]}))
             .map(|_| ())
+    }
+
+    /// The playlists in the library, for "Add to playlist": title and
+    /// playlist id. Liked Music and the episodes list are left out, as
+    /// songs cannot be added to them by hand.
+    pub fn my_playlists(&self) -> Result<Vec<(String, String)>, String> {
+        let page = self.browse("FEmusic_liked_playlists", None)?;
+        Ok(page
+            .shelves
+            .iter()
+            .flat_map(|s| s.items.iter())
+            .filter_map(|i| {
+                let list = i.browse_id.as_deref()?.strip_prefix("VL")?;
+                (list != "LM" && list != "SE").then(|| (i.title.clone(), list.to_string()))
+            })
+            .collect())
+    }
+
+    /// Makes a playlist, private, with these songs in it. Gives its id.
+    pub fn create_playlist(&self, title: &str, video_ids: &[String]) -> Result<String, String> {
+        let mut body = json!({"title": title, "description": "", "privacyStatus": "PRIVATE"});
+        if !video_ids.is_empty() {
+            body["videoIds"] = json!(video_ids);
+        }
+        let response = self.post("playlist/create", body)?;
+        response
+            .get("playlistId")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| "YouTube Music did not make the playlist".into())
+    }
+
+    pub fn delete_playlist(&self, playlist_id: &str) -> Result<(), String> {
+        self.post("playlist/delete", json!({"playlistId": playlist_id}))
+            .map(|_| ())
+    }
+
+    pub fn rename_playlist(&self, playlist_id: &str, title: &str) -> Result<(), String> {
+        self.edit_playlist(
+            playlist_id,
+            json!([{"action": "ACTION_SET_PLAYLIST_NAME", "playlistName": title}]),
+        )
+    }
+
+    /// Adds a song to a playlist. A song already in it is not added twice.
+    pub fn add_to_playlist(&self, playlist_id: &str, video_id: &str) -> Result<(), String> {
+        self.edit_playlist(
+            playlist_id,
+            json!([{
+                "action": "ACTION_ADD_VIDEO",
+                "addedVideoId": video_id,
+                "dedupeOption": "DEDUPE_OPTION_SKIP"
+            }]),
+        )
+    }
+
+    /// Takes a song out of a playlist. `set_video_id` says which copy.
+    pub fn remove_from_playlist(
+        &self,
+        playlist_id: &str,
+        video_id: &str,
+        set_video_id: &str,
+    ) -> Result<(), String> {
+        self.edit_playlist(
+            playlist_id,
+            json!([{
+                "action": "ACTION_REMOVE_VIDEO",
+                "removedVideoId": video_id,
+                "setVideoId": set_video_id
+            }]),
+        )
+    }
+
+    fn edit_playlist(&self, playlist_id: &str, actions: Value) -> Result<(), String> {
+        let response = self.post(
+            "browse/edit_playlist",
+            json!({"playlistId": playlist_id, "actions": actions}),
+        )?;
+        match response.get("status").and_then(Value::as_str) {
+            Some("STATUS_SUCCEEDED") | None => Ok(()),
+            Some(_) => Err("YouTube Music did not change the playlist".into()),
+        }
     }
 
     pub fn account_name(&self) -> Result<Option<String>, String> {

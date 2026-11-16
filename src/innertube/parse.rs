@@ -203,9 +203,12 @@ fn list_item(r: &Value) -> Item {
     if let Some(ep) = r.get("navigationEndpoint").or(title_endpoint) {
         apply_endpoint(ep, &mut item);
     }
-    if let Some(id) = r.get("playlistItemData").and_then(|d| string(d, "videoId")) {
-        item.video_id = Some(id);
-        item.kind = Kind::Song;
+    if let Some(data) = r.get("playlistItemData") {
+        if let Some(id) = string(data, "videoId") {
+            item.video_id = Some(id);
+            item.kind = Kind::Song;
+        }
+        item.set_video_id = string(data, "playlistSetVideoId");
     }
     let columns = r.get("flexColumns").and_then(Value::as_array);
     for column in columns.into_iter().flatten().skip(1) {
@@ -216,7 +219,26 @@ fn list_item(r: &Value) -> Item {
             take_links(t, &mut item);
         }
     }
+    if item.video_id.is_none() {
+        item.library = library_toggle(r);
+    }
     item
+}
+
+/// The library toggle in an album's or playlist's menu: the playlist it
+/// saves, and whether it is saved already. Songs use another kind of
+/// toggle, so they give None.
+fn library_toggle(r: &Value) -> Option<(String, bool)> {
+    let entries = r.get("menu")?.get("menuRenderer")?.get("items")?.as_array()?;
+    entries.iter().find_map(|entry| {
+        let toggle = entry.get("toggleMenuServiceItemRenderer")?;
+        let like = find(toggle.get("defaultServiceEndpoint")?, "likeEndpoint")?;
+        let id = like.get("target").and_then(|t| string(t, "playlistId"))?;
+        // A saved one's first action takes it out.
+        let saved = like.get("status").and_then(Value::as_str) == Some("INDIFFERENT")
+            || toggle.get("defaultText").map(text).is_some_and(|t| t.contains("Remove"));
+        Some((id, saved))
+    })
 }
 
 fn two_row_item(r: &Value) -> Item {
@@ -231,6 +253,9 @@ fn two_row_item(r: &Value) -> Item {
     }
     if let Some(subtitle) = r.get("subtitle") {
         take_links(subtitle, &mut item);
+    }
+    if item.video_id.is_none() {
+        item.library = library_toggle(r);
     }
     item
 }
@@ -499,6 +524,13 @@ impl Walker {
                         "playlistPanelVideoWrapperRenderer" => {
                             if let Some(primary) = child.get("primaryRenderer") {
                                 self.walk(primary);
+                            }
+                        }
+                        // The user's own playlist wraps the usual header.
+                        "musicEditablePlaylistDetailHeaderRenderer" => {
+                            self.walk(child);
+                            if let Some(h) = self.page.header.as_mut() {
+                                h.editable = true;
                             }
                         }
                         "musicCarouselShelfRenderer" => self.shelf(child, true),

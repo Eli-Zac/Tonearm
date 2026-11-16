@@ -1,12 +1,12 @@
 [package]
 name = "tonearm"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 description = "Native Windows client for YouTube Music. No web views."
 publish = false
 
 [dependencies]
-slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-software", "raw-window-handle-06"] }
+slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-skia", "raw-window-handle-06"] }
 ureq = { version = "2.12", default-features = false, features = ["json", "gzip", "native-tls", "proxy-from-env"] }
 native-tls = "0.2"
 serde_json = "1"

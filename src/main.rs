@@ -6,6 +6,7 @@ mod canvas;
 mod decode;
 mod detail;
 mod history;
+mod home;
 mod images;
 mod innertube;
 mod lyrics;
@@ -49,7 +50,9 @@ enum Route {
     Explore,
     Library,
     Browse { id: String, params: Option<String> },
-    Search(String),
+    /// A search and its results tab: 0 all, then songs, albums, artists,
+    /// playlists and podcasts.
+    Search(String, usize),
     /// Songs saved on this computer. Opens with no connection.
     Downloads,
 }
@@ -91,6 +94,24 @@ struct Suggested {
     queries: Vec<String>,
     page: Page,
     at: Instant,
+}
+
+/// Where recent searches are kept, and how many.
+const RECENT_SEARCHES: &str = "searches";
+const RECENT_SEARCHES_KEPT: usize = 8;
+
+/// The recent searches saved on this computer, newest first.
+fn load_recent_searches() -> Vec<String> {
+    store::load(RECENT_SEARCHES)
+        .map(|text| {
+            text.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .take(RECENT_SEARCHES_KEPT)
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// How long typing has to pause before we ask for suggestions.
@@ -145,6 +166,10 @@ struct Player {
     /// The queue as it was before shuffle, to put back when shuffle ends.
     unshuffled: Option<Vec<Item>>,
     repeat: Repeat,
+    /// Smart shuffle: shuffle that mixes in suggested songs.
+    smart: bool,
+    /// Video ids of the songs smart shuffle mixed in, to take out again.
+    suggested: HashSet<String>,
 }
 
 /// The repeat button: off, the whole queue, or the one song.
@@ -242,7 +267,43 @@ struct FadeNext {
     video_id: String,
     /// Its length as yt-dlp gave it, in seconds. Zero when unknown.
     duration: f32,
+    /// With crossfade off: the engine was told to start it the moment
+    /// the playing song ends.
+    armed: bool,
 }
+
+/// Volume levelling choices in Settings: the loudness each aims for, in
+/// LKFS, and how far it may lift a quiet song, in dB. Off is first.
+const LEVELLING: [(f32, f32); 4] = [(0.0, 0.0), (-19.0, 0.0), (-14.0, 0.0), (-11.0, 4.0)];
+
+/// The volume levelling choice saved in Settings. Normal when none is.
+fn load_levelling() -> i32 {
+    store::load("levelling")
+        .and_then(|text| text.trim().parse().ok())
+        .filter(|choice: &i32| (0..LEVELLING.len() as i32).contains(choice))
+        .unwrap_or(2)
+}
+
+/// Sleep timer choices, in minutes, after Off. The last is the end of
+/// the playing song.
+const SLEEP_MINUTES: [u64; 5] = [5, 15, 30, 45, 60];
+const SLEEP_END_OF_SONG: i32 = 6;
+
+/// The sleep timer.
+#[derive(Clone, Copy, Default, PartialEq)]
+enum Sleep {
+    #[default]
+    Off,
+    /// Pauses at this time.
+    At(Instant),
+    /// Stops once the playing song ends.
+    EndOfSong,
+}
+
+/// Smart shuffle mixes in one suggested song after every this many.
+const SMART_EVERY: usize = 3;
+/// And no more than this many at a time.
+const SMART_MOST: usize = 12;
 
 /// Crossfade lengths offered in Settings, in seconds. Zero is off.
 const CROSSFADE_CHOICES: [u32; 9] = [0, 1, 2, 3, 4, 6, 8, 10, 12];
@@ -307,6 +368,13 @@ struct App {
     fade_next: RefCell<Option<FadeNext>>,
     /// Counts the songs opened ahead, so each gets its own token.
     fade_token: Cell<u64>,
+    /// Volume levelling: an index into `LEVELLING`.
+    levelling: Cell<i32>,
+    /// Each song's loudness in LKFS, by video id, as YouTube measured it.
+    loudness: RefCell<HashMap<String, f32>>,
+    /// Video ids whose loudness is being looked up.
+    loudness_asked: RefCell<HashSet<String>>,
+    sleep: Cell<Sleep>,
     timer: Timer,
     fast: Cell<bool>,
     /// Whether the window was minimised at the last tick.
@@ -319,8 +387,12 @@ struct App {
     release: RefCell<Option<update::Release>>,
     suggest: RefCell<Suggest>,
     suggest_timer: Timer,
+    /// What was searched for lately, newest first.
+    recent_searches: RefCell<Vec<String>>,
     /// What each line of the open right click menu does.
     menu: RefCell<Vec<menu::Action>>,
+    /// What the name prompt open now is for.
+    prompt: RefCell<Option<menu::Prompt>>,
     #[cfg(windows)]
     keys: RefCell<Option<media_keys::Keys>>,
 }
@@ -505,16 +577,21 @@ impl App {
 
     // ---------------------------------------------------------- thumbnails
 
-    /// A square thumbnail from the cache, or None while it loads. `px` zero
-    /// means the row draws no art, so nothing is fetched.
-    fn thumb(self: &Rc<Self>, url: &str, px: u32, round: bool, target: Target) -> Option<Image> {
+    /// Screen pixels for `logical` pixels of the UI. Art is fetched at this
+    /// size so it stays sharp on a scaled display.
+    fn physical(&self, logical: u32) -> u32 {
+        (logical as f32 * self.ui.window().scale_factor()).round() as u32
+    }
+
+    /// A square thumbnail from the cache, or None while it loads. `px` is in
+    /// logical pixels; zero means the row draws no art, so nothing is fetched.
+    fn thumb(self: &Rc<Self>, url: &str, px: u32, target: Target) -> Option<Image> {
         if url.is_empty() || px == 0 {
             return None;
         }
-        let key = images::Cache::key(url, px, round);
-        self.load_art(key, url, target, move |http, url| {
-            images::fetch(http, url, px, round)
-        })
+        let px = self.physical(px);
+        let key = images::Cache::key(url, px);
+        self.load_art(key, url, target, move |http, url| images::fetch(http, url, px))
     }
 
     /// A wide picture, such as an artist banner, `width` pixels across.
@@ -522,6 +599,8 @@ impl App {
         if url.is_empty() {
             return None;
         }
+        // Banners are wide already, so a big display gets no more than this.
+        let width = self.physical(width).min(2048);
         let key = images::wide_key(url, width);
         self.load_art(key, url, target, move |http, url| {
             images::fetch_wide(http, url, width)
@@ -631,7 +710,7 @@ impl App {
     }
 
     fn item_data(self: &Rc<Self>, item: &Item, id: usize, px: u32, target: Target) -> ItemData {
-        let art = self.thumb(&item.thumb, px, item.kind == Kind::Artist, target);
+        let art = self.thumb(&item.thumb, px, target);
         let (runs, short) = detail::link_runs(&item.subtitle, item);
         let (album, album_browse) = item.album.clone().unwrap_or_default();
         ItemData {
@@ -677,7 +756,7 @@ impl App {
                 // Downloads queue the page, so they keep playing offline.
                 radio_on_click: !matches!(route, Route::Browse { .. } | Route::Downloads),
                 query: match &route {
-                    Route::Search(query) => Some(query.clone()),
+                    Route::Search(query, _) => Some(query.clone()),
                     _ => None,
                 },
                 ..PageState::default()
@@ -685,7 +764,13 @@ impl App {
             self.ui.set_rows(ModelRc::from(page.rows.clone()));
             page.generation
         };
-        self.ui.set_page_title("".into());
+        // A search keeps its title while it loads, so the tabs under it
+        // stay put when another one is picked.
+        let title = match &route {
+            Route::Search(query, _) => format!("Results for \u{201c}{query}\u{201d}"),
+            _ => String::new(),
+        };
+        self.ui.set_page_title(title.into());
         self.ui.set_page_subtitle("".into());
         self.ui.set_page_playable(false);
         // The kind guessed from the link picks the skeleton until the page
@@ -708,6 +793,10 @@ impl App {
             Route::Downloads => 4,
             _ => -1,
         });
+        self.ui.set_search_tab(match &route {
+            Route::Search(_, tab) => *tab as i32,
+            _ => -1,
+        });
         if let Route::Downloads = route {
             let mut page = offline::downloads_page();
             page.header = Some(detail::downloads_header(&page));
@@ -715,7 +804,7 @@ impl App {
             return;
         }
         // The search list already fetched these results while typing.
-        if let Route::Search(query) = &route {
+        if let Route::Search(query, 0) = &route {
             let cached = self.suggest.borrow().cache.get(&query.to_lowercase()).cloned();
             if let Some(found) = cached.filter(|c| c.at.elapsed() < SUGGEST_FRESH) {
                 if !found.page.shelves.is_empty() {
@@ -725,13 +814,24 @@ impl App {
             }
         }
         let client = self.client.clone();
+        // Home is put together from several pages and the listening history.
+        if let Route::Home = route {
+            self.api.run(move || {
+                let parts = home::fetch(&client);
+                on_ui(move |app| {
+                    let page = home::compose(parts, &app.taste.borrow());
+                    app.show(generation, page);
+                });
+            });
+            return;
+        }
         self.api.run(move || {
             let result = match &route {
                 Route::Home => client.browse("FEmusic_home", None),
                 Route::Explore => client.browse("FEmusic_explore", None),
                 Route::Library => client.browse("FEmusic_library_landing", None),
                 Route::Browse { id, params } => client.browse(id, params.as_deref()),
-                Route::Search(query) => client.search(query),
+                Route::Search(query, tab) => client.search_in(query, *tab),
                 Route::Downloads => Ok(offline::downloads_page()),
             };
             on_ui(move |app| app.show(generation, result));
@@ -789,8 +889,7 @@ impl App {
         let art = if header.banner {
             self.wide_thumb(&header.thumb, 1280, Target::Hero { generation })
         } else {
-            let round = header.kind == PageKind::Artist;
-            self.thumb(&header.thumb, 440, round, Target::Hero { generation })
+            self.thumb(&header.thumb, 440, Target::Hero { generation })
         };
         self.ui.set_header(data);
         self.page.borrow_mut().header = Some(header);
@@ -903,8 +1002,10 @@ impl App {
                 });
             } else {
                 for (index, item) in shelf.items.into_iter().enumerate() {
+                    // YouTube Music's pick gets a card of its own, with big art.
+                    let top = shelf.title == "Top result" && index == 0;
                     // Numbered album rows draw no art, so fetch none.
-                    let px = if style == 1 { 0 } else { 64 };
+                    let px = if top { 128 } else if style == 1 { 0 } else { 64 };
                     let mut data = self.item_data(
                         &item,
                         next_id,
@@ -929,7 +1030,7 @@ impl App {
                     };
                     places.push(Place::Row(rows.row_count()));
                     rows.push(RowData {
-                        kind: 1,
+                        kind: if top { 7 } else { 1 },
                         item: data,
                         style,
                         number: number as i32,
@@ -986,7 +1087,7 @@ impl App {
     }
 
     fn load_more(self: &Rc<Self>) {
-        let (generation, token) = {
+        let (generation, token, search) = {
             let mut page = self.page.borrow_mut();
             if page.loading_more {
                 return;
@@ -995,11 +1096,15 @@ impl App {
                 return;
             };
             page.loading_more = true;
-            (page.generation, token)
+            (page.generation, token, page.query.is_some())
         };
         let client = self.client.clone();
         self.api.run(move || {
-            let result = client.more(&token);
+            let result = if search {
+                client.search_more(&token)
+            } else {
+                client.more(&token)
+            };
             on_ui(move |app| app.show(generation, result));
         });
     }
@@ -1111,6 +1216,11 @@ impl App {
     fn clear_history(self: &Rc<Self>) {
         self.taste.borrow_mut().clear();
         self.disk.run(history::History::delete_file);
+        self.recent_searches.borrow_mut().clear();
+        self.disk.run(|| {
+            let _ = store::save(RECENT_SEARCHES, "");
+        });
+        self.show_recent_searches();
         self.toast("Listening history cleared");
     }
 
@@ -1176,7 +1286,7 @@ impl App {
         };
         self.suggest_timer.stop();
         if query.is_empty() {
-            self.show_suggestions(generation, "", Vec::new(), Page::default());
+            self.show_recent_searches();
             return;
         }
         if let Some(cached) = cached.filter(|c| c.at.elapsed() < SUGGEST_FRESH) {
@@ -1301,11 +1411,58 @@ impl App {
             Some(Pick::Query(query)) => {
                 self.ui.set_search_text(query.as_str().into());
                 self.suggest_edited(&query);
-                self.open(Route::Search(query), true);
+                self.remember_search(&query);
+                self.open(Route::Search(query, 0), true);
             }
             Some(Pick::Item(item)) => self.open_item(item),
             None => {}
         }
+    }
+
+    /// Keeps a search at the top of the recent ones.
+    fn remember_search(&self, query: &str) {
+        let text = {
+            let mut recent = self.recent_searches.borrow_mut();
+            recent.retain(|q| !q.eq_ignore_ascii_case(query));
+            recent.insert(0, query.to_string());
+            recent.truncate(RECENT_SEARCHES_KEPT);
+            recent.join("\n")
+        };
+        self.disk.run(move || {
+            let _ = store::save(RECENT_SEARCHES, &text);
+        });
+    }
+
+    /// Lists the recent searches under an empty search box.
+    fn show_recent_searches(&self) {
+        let recent = self.recent_searches.borrow().clone();
+        let rows: Vec<SuggestData> = recent
+            .iter()
+            .map(|query| SuggestData {
+                kind: 2,
+                head: query.as_str().into(),
+                ..SuggestData::default()
+            })
+            .collect();
+        let mut suggest = self.suggest.borrow_mut();
+        suggest.picks = recent.into_iter().map(Pick::Query).collect();
+        suggest.rows.set_vec(rows);
+        drop(suggest);
+        self.ui.set_suggest_loading(false);
+    }
+
+    /// A tab on the search results page. It replaces the page in the
+    /// history, so Back leaves the search rather than stepping through tabs.
+    fn pick_search_tab(self: &Rc<Self>, tab: usize) {
+        let current = self.history.borrow().last().cloned();
+        let Some(Route::Search(query, _)) = current else {
+            return;
+        };
+        let route = Route::Search(query, tab);
+        if let Some(last) = self.history.borrow_mut().last_mut() {
+            *last = route.clone();
+        }
+        self.open(route, false);
     }
 
     fn play_page(self: &Rc<Self>, shuffle: bool) {
@@ -1636,6 +1793,7 @@ impl App {
         // Loading drops whatever was opened ahead for a crossfade.
         self.fade_next.borrow_mut().take();
         self.audio.load(input, generation);
+        self.apply_gain(generation);
         // Commands run in order, so the seek lands once the track is loaded.
         if let Some(seconds) = start.filter(|s| *s > 0.0) {
             self.audio.seek(seconds);
@@ -1671,7 +1829,7 @@ impl App {
         ui.set_playing(false);
         *self.cover.borrow_mut() = None;
         // Large enough for the Now playing panel. The player scales it down.
-        let art = self.thumb(&item.thumb, 544, false, Target::Track { generation });
+        let art = self.thumb(&item.thumb, 544, Target::Track { generation });
         if let Some(image) = &art {
             self.set_tint(image);
         }
@@ -1680,6 +1838,7 @@ impl App {
         self.load_cover(&item.title, &artist, generation);
         self.stop_canvas();
         self.load_canvas(&item.title, &artist, generation);
+        self.load_credits(item.video_id.clone(), generation);
         if matches!(ui.get_panel(), 2 | 3) {
             self.load_lyrics();
         }
@@ -1687,6 +1846,32 @@ impl App {
         self.update_keys(&item.title, &artist, seconds, &item.thumb);
         self.show_now();
         Some((item, generation, near_end))
+    }
+
+    /// Fetches the song's credits for Now playing. They clear at once, so
+    /// the last song's never show under this one.
+    fn load_credits(&self, video_id: Option<String>, generation: u64) {
+        self.ui.set_track_credits(ModelRc::default());
+        let Some(video_id) = video_id else {
+            return;
+        };
+        let client = self.client.clone();
+        self.api.run(move || {
+            let credits = client.credits(&video_id).unwrap_or_default();
+            on_ui(move |app| {
+                if app.player.borrow().generation != generation {
+                    return;
+                }
+                let rows: Vec<CreditData> = credits
+                    .into_iter()
+                    .map(|(role, names)| CreditData {
+                        role: role.into(),
+                        names: names.into(),
+                    })
+                    .collect();
+                app.ui.set_track_credits(ModelRc::new(VecModel::from(rows)));
+            });
+        });
     }
 
     // ------------------------------------------------------------- session
@@ -1792,6 +1977,23 @@ impl App {
     /// Shuffles the songs after the playing one, or puts the queue back in
     /// its old order.
     fn toggle_shuffle(self: &Rc<Self>) {
+        // Off, then shuffle, then smart shuffle, then off again.
+        let smart = {
+            let mut player = self.player.borrow_mut();
+            if player.shuffle && !player.smart {
+                player.smart = true;
+                true
+            } else {
+                player.smart = false;
+                false
+            }
+        };
+        self.ui.set_smart_shuffle(smart);
+        if smart {
+            self.mix_in_suggestions();
+            return;
+        }
+        self.take_out_suggestions();
         {
             let mut player = self.player.borrow_mut();
             player.shuffle = !player.shuffle;
@@ -1836,6 +2038,10 @@ impl App {
     /// A song played to its end: again under repeat one, the next one
     /// otherwise.
     fn track_ended(self: &Rc<Self>) {
+        if self.sleep.get() == Sleep::EndOfSong {
+            self.sleep_done();
+            return;
+        }
         let (index, repeat) = {
             let player = self.player.borrow();
             (player.index, player.repeat)
@@ -1845,6 +2051,238 @@ impl App {
         } else {
             self.next();
         }
+    }
+
+    // ---------------------------------------------------- smart shuffle
+
+    /// Mixes songs like the queue into what is still to come, one after
+    /// every few, the way smart shuffle does.
+    fn mix_in_suggestions(self: &Rc<Self>) {
+        let (seed, generation) = {
+            let player = self.player.borrow();
+            let seed = player.queue.get(player.index).cloned();
+            (seed, player.queue_generation)
+        };
+        let Some(seed) = seed.filter(|s| s.video_id.is_some()) else {
+            return;
+        };
+        let client = self.client.clone();
+        self.api.run(move || {
+            // A video's radio is videos. Seed it with the song instead.
+            let id = client
+                .song_for(&seed)
+                .and_then(|s| s.video_id)
+                .or(seed.video_id)
+                .unwrap_or_default();
+            let result = client.queue(Some(&id), None);
+            on_ui(move |app| {
+                let Ok((items, _)) = result else {
+                    app.toast("Smart shuffle found no songs to add");
+                    return;
+                };
+                {
+                    let mut player = app.player.borrow_mut();
+                    if player.queue_generation != generation || !player.smart {
+                        return;
+                    }
+                    let known: HashSet<String> =
+                        player.queue.iter().filter_map(|i| i.video_id.clone()).collect();
+                    let picks: Vec<Item> = items
+                        .into_iter()
+                        .filter(|i| i.video_id.as_ref().is_some_and(|v| !known.contains(v)))
+                        .take(SMART_MOST)
+                        .collect();
+                    let mut at = player.index + 1;
+                    for item in picks {
+                        at = (at + SMART_EVERY).min(player.queue.len());
+                        if let Some(id) = item.video_id.clone() {
+                            player.suggested.insert(id);
+                        }
+                        player.queue.insert(at, item);
+                        at += 1;
+                    }
+                }
+                app.rebuild_queue_model();
+                app.prefetch_next();
+            });
+        });
+    }
+
+    /// Takes out the songs smart shuffle mixed in that are still to come.
+    fn take_out_suggestions(self: &Rc<Self>) {
+        let changed = {
+            let mut player = self.player.borrow_mut();
+            let suggested = std::mem::take(&mut player.suggested);
+            if suggested.is_empty() {
+                false
+            } else {
+                let index = player.index;
+                let mut position = 0;
+                let before = player.queue.len();
+                player.queue.retain(|item| {
+                    let keep = position <= index
+                        || !item.video_id.as_ref().is_some_and(|v| suggested.contains(v));
+                    position += 1;
+                    keep
+                });
+                before != player.queue.len()
+            }
+        };
+        if changed {
+            self.rebuild_queue_model();
+        }
+    }
+
+    // ------------------------------------------------------- shortcuts
+
+    fn set_volume(&self, volume: f32) {
+        let volume = volume.clamp(0.0, 1.0);
+        self.ui.set_volume(volume);
+        self.audio.volume(volume * volume);
+    }
+
+    /// A key pressed with no text box focused. Returns whether it was one
+    /// of the shortcuts, the same ones Spotify uses.
+    fn hotkey(self: &Rc<Self>, text: &str, control: bool, shift: bool, alt: bool) -> bool {
+        use slint::platform::Key;
+        let key = |k: Key| text == SharedString::from(k).as_str();
+        match (control, shift, alt) {
+            (false, false, false) if text == " " => self.toggle_play(),
+            (false, false, false) if key(Key::Escape) => {
+                if self.ui.get_prompt_open() {
+                    self.ui.set_prompt_open(false);
+                } else if self.ui.get_np_expanded() {
+                    self.ui.set_np_expanded(false);
+                } else {
+                    return false;
+                }
+            }
+            (true, false, false) if key(Key::RightArrow) => self.next(),
+            (true, false, false) if key(Key::LeftArrow) => self.previous(),
+            (true, false, false) if key(Key::UpArrow) => self.set_volume(self.ui.get_volume() + 0.1),
+            (true, false, false) if key(Key::DownArrow) => self.set_volume(self.ui.get_volume() - 0.1),
+            (true, false, false) if text.eq_ignore_ascii_case("s") => self.toggle_shuffle(),
+            (true, false, false) if text.eq_ignore_ascii_case("r") => self.cycle_repeat(),
+            (true, false, false) if text.eq_ignore_ascii_case("l") || text.eq_ignore_ascii_case("k") => {
+                self.ui.invoke_focus_search();
+            }
+            (false, true, true) if text.eq_ignore_ascii_case("b") => self.toggle_like(),
+            _ => return false,
+        }
+        true
+    }
+
+    // ------------------------------------------------------ sleep timer
+
+    /// A sleep timer choice from the player: 0 is off, then the minutes in
+    /// `SLEEP_MINUTES`, then the end of the song.
+    fn set_sleep(self: &Rc<Self>, choice: i32) {
+        let sleep = match choice {
+            SLEEP_END_OF_SONG => Sleep::EndOfSong,
+            n if n >= 1 => SLEEP_MINUTES
+                .get(n as usize - 1)
+                .map_or(Sleep::Off, |m| Sleep::At(Instant::now() + Duration::from_secs(m * 60))),
+            _ => Sleep::Off,
+        };
+        self.sleep.set(sleep);
+        self.ui.set_sleep_choice(if sleep == Sleep::Off { 0 } else { choice });
+        // A song armed to follow this one is called off by the next tick.
+        self.sleep_tick();
+    }
+
+    /// Shows the time left, and pauses once it is up.
+    fn sleep_tick(self: &Rc<Self>) {
+        let text = match self.sleep.get() {
+            Sleep::Off => String::new(),
+            Sleep::EndOfSong => "End of song".into(),
+            Sleep::At(at) => {
+                let left = at.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    self.audio.pause();
+                    self.sleep_done();
+                    return;
+                }
+                format!("{} min left", (left.as_secs() + 59) / 60)
+            }
+        };
+        if self.ui.get_sleep_text().as_str() != text {
+            self.ui.set_sleep_text(text.into());
+        }
+    }
+
+    /// The sleep timer ran out. The music has stopped or is pausing.
+    fn sleep_done(self: &Rc<Self>) {
+        self.sleep.set(Sleep::Off);
+        self.ui.set_sleep_choice(0);
+        self.ui.set_sleep_text("".into());
+        self.ui.set_playing(false);
+        self.toast("Sleep timer stopped the music");
+    }
+
+    // ------------------------------------------------------ levelling
+
+    fn set_levelling(&self, choice: i32) {
+        let choice = choice.clamp(0, LEVELLING.len() as i32 - 1);
+        self.levelling.set(choice);
+        self.disk.run(move || {
+            let _ = store::save("levelling", &choice.to_string());
+        });
+        let generation = self.player.borrow().generation;
+        self.apply_gain(generation);
+    }
+
+    /// The gain that brings `video_id` to the chosen loudness. One while
+    /// levelling is off or its loudness is not known yet.
+    fn gain_for(&self, video_id: &str) -> f32 {
+        let choice = self.levelling.get();
+        let Some(&(target, lift)) = LEVELLING.get(choice as usize).filter(|_| choice > 0) else {
+            return 1.0;
+        };
+        let Some(lkfs) = self.loudness.borrow().get(video_id).copied() else {
+            return 1.0;
+        };
+        let db = (target - lkfs).clamp(-20.0, lift);
+        10f32.powf(db / 20.0)
+    }
+
+    /// Sends the playing song's levelling gain to the engine, and looks its
+    /// loudness up when that is not known yet.
+    fn apply_gain(&self, generation: u64) {
+        let video_id = {
+            let player = self.player.borrow();
+            if player.generation != generation {
+                return;
+            }
+            player.queue.get(player.index).and_then(|i| i.video_id.clone())
+        };
+        let Some(video_id) = video_id else {
+            return;
+        };
+        self.look_up_loudness(&video_id);
+        self.audio.gain(generation, self.gain_for(&video_id));
+    }
+
+    /// Asks YouTube for a song's loudness in the background, once. When the
+    /// answer is for the playing song, its gain is set at once.
+    fn look_up_loudness(&self, video_id: &str) {
+        if self.loudness.borrow().contains_key(video_id)
+            || !self.loudness_asked.borrow_mut().insert(video_id.to_string())
+        {
+            return;
+        }
+        let client = self.client.clone();
+        let video_id = video_id.to_string();
+        self.warm.run(move || {
+            let found = client.loudness(&video_id).ok().flatten();
+            on_ui(move |app| {
+                let Some(lkfs) = found else {
+                    return;
+                };
+                app.loudness.borrow_mut().insert(video_id, lkfs);
+                let generation = app.player.borrow().generation;
+                app.apply_gain(generation);
+            });
+        });
     }
 
     // ------------------------------------------------------------ crossfade
@@ -1865,7 +2303,8 @@ impl App {
     /// one, where the song plays again.
     fn crossfade_target(&self) -> Option<(usize, String)> {
         let player = self.player.borrow();
-        if player.repeat == Repeat::One {
+        // The sleep timer stops after this song, so nothing follows it.
+        if player.repeat == Repeat::One || self.sleep.get() == Sleep::EndOfSong {
             return None;
         }
         // The same choice `next` makes.
@@ -1891,10 +2330,14 @@ impl App {
     /// song ends and the next one starts the usual way.
     fn crossfade_check(self: &Rc<Self>, generation: u64, duration: f32) -> bool {
         let fade = self.crossfade.get() as f32;
-        if fade == 0.0 || duration <= 0.0 {
+        if duration <= 0.0 {
             return false;
         }
         let Some((index, video_id)) = self.crossfade_target() else {
+            // Nothing should follow any more, as under repeat one.
+            if self.fade_next.borrow_mut().take().is_some_and(|n| n.armed) {
+                self.audio.unfollow();
+            }
             return false;
         };
         let status = &self.audio.status;
@@ -1904,14 +2347,26 @@ impl App {
             .borrow()
             .as_ref()
             .filter(|n| n.generation == generation && n.index == index && n.video_id == video_id)
-            .map(|n| (n.token, n.duration));
-        let Some((token, next_duration)) = opened else {
+            .map(|n| (n.token, n.duration, n.armed));
+        let Some((token, next_duration, armed)) = opened else {
             // Also opens it again when the queue changed underneath.
             if left <= fade + PREPARE_AHEAD {
                 self.prepare_next(generation, index, video_id);
             }
             return false;
         };
+        // Crossfade off: gapless. The engine starts the next song the
+        // moment this one ends, and `tick` catches up when it has.
+        if fade == 0.0 {
+            if !armed && status.prepared.load(Ordering::SeqCst) == token {
+                self.look_up_loudness(&video_id);
+                self.audio.follow(token, self.gain_for(&video_id));
+                if let Some(next) = self.fade_next.borrow_mut().as_mut() {
+                    next.armed = true;
+                }
+            }
+            return false;
+        }
         if left > fade || status.prepared.load(Ordering::SeqCst) != token {
             return false;
         }
@@ -1934,6 +2389,7 @@ impl App {
             index,
             video_id: video_id.clone(),
             duration: 0.0,
+            armed: false,
         });
         if let Some(path) = offline::local_file(&video_id) {
             self.audio.prepare(audio::Input::File(path), token);
@@ -1974,11 +2430,30 @@ impl App {
     /// Now playing, lyrics and media keys switch to it as the fade starts,
     /// the same way as when a song starts.
     fn crossfade_into(self: &Rc<Self>, index: usize, token: u64, seconds: f32, duration: f32) {
+        self.moved_on(index, duration, |app, generation| {
+            app.audio.crossfade(token, generation, seconds);
+        });
+    }
+
+    /// The engine started the armed next song gaplessly. Moves the player
+    /// on to it, as a crossfade would.
+    fn followed(self: &Rc<Self>, token: u64) {
+        let next = self.fade_next.borrow().as_ref().filter(|n| n.token == token).map(|n| (n.index, n.duration));
+        let Some((index, duration)) = next else {
+            return;
+        };
+        self.moved_on(index, duration, |app, generation| app.audio.adopt(generation));
+    }
+
+    /// Shows the song at `index`, which `start` has just begun playing
+    /// under its new generation, and gets the one after it ready.
+    fn moved_on(self: &Rc<Self>, index: usize, duration: f32, start: impl FnOnce(&Rc<Self>, u64)) {
         self.fade_next.borrow_mut().take();
         let Some((_, generation, near_end)) = self.show_track(index) else {
             return;
         };
-        self.audio.crossfade(token, generation, seconds);
+        start(self, generation);
+        self.apply_gain(generation);
         if duration > 0.0 {
             self.player.borrow_mut().duration = duration;
             self.ui.set_duration_text(clock_text(duration));
@@ -2044,6 +2519,7 @@ impl App {
         let Some(video_id) = next else {
             return;
         };
+        self.look_up_loudness(&video_id);
         if offline::cache_limit_mb() > 0 {
             self.cache_ahead(video_id);
         } else if let Some(resolver) = self.resolver.clone() {
@@ -2142,7 +2618,7 @@ impl App {
             let Some(item) = player.queue.get(player.index) else { return };
             (item.thumb.clone(), player.generation)
         };
-        if let Some(image) = self.thumb(&thumb, 544, false, Target::Track { generation }) {
+        if let Some(image) = self.thumb(&thumb, 544, Target::Track { generation }) {
             self.ui.set_track_art(image);
             self.ui.set_track_has_art(true);
         }
@@ -2469,6 +2945,15 @@ impl App {
 
     fn tick(self: &Rc<Self>) {
         self.repaint_after_restore();
+        // Shortcuts reach the window only while something holds focus.
+        if !self.ui.get_typing() && !self.ui.get_hotkeys_focused() {
+            self.ui.invoke_focus_hotkeys();
+        }
+        self.sleep_tick();
+        let followed = self.audio.status.followed.swap(0, Ordering::SeqCst);
+        if followed != 0 {
+            self.followed(followed);
+        }
         let status = &self.audio.status;
         let state = status.state.load(Ordering::SeqCst);
         // The Canvas only shows in Now playing. It holds its frame while the
@@ -3294,7 +3779,7 @@ fn probe(args: &[String]) {
             let started = Instant::now();
             let pixels = match arg(2).parse::<u32>() {
                 Ok(width) => images::fetch_wide(&http, arg(1), width),
-                Err(_) => images::fetch(&http, arg(1), 192, false),
+                Err(_) => images::fetch(&http, arg(1), 192),
             };
             match pixels {
                 Some(pixels) => println!(
@@ -3426,6 +3911,10 @@ fn main() -> Result<(), slint::PlatformError> {
         crossfade: Cell::new(load_crossfade()),
         fade_next: RefCell::new(None),
         fade_token: Cell::new(0),
+        levelling: Cell::new(load_levelling()),
+        loudness: RefCell::new(HashMap::new()),
+        loudness_asked: RefCell::new(HashSet::new()),
+        sleep: Cell::new(Sleep::Off),
         timer: Timer::default(),
         fast: Cell::new(false),
         minimized: Cell::new(false),
@@ -3433,7 +3922,9 @@ fn main() -> Result<(), slint::PlatformError> {
         release: RefCell::new(None),
         suggest: RefCell::default(),
         suggest_timer: Timer::default(),
+        recent_searches: RefCell::new(load_recent_searches()),
         menu: RefCell::default(),
+        prompt: RefCell::default(),
         #[cfg(windows)]
         keys: RefCell::new(None),
     });
@@ -3464,10 +3955,12 @@ fn main() -> Result<(), slint::PlatformError> {
     on!(on_search, |app, query| {
         let query = query.trim().to_string();
         if !query.is_empty() {
-            app.open(Route::Search(query), true);
+            app.remember_search(&query);
+            app.open(Route::Search(query, 0), true);
         }
     });
     on!(on_search_edited, |app, text| app.suggest_edited(&text));
+    on!(on_search_tab_picked, |app, tab| app.pick_search_tab(tab.max(0) as usize));
     on!(on_suggestion_picked, |app, index| app
         .suggestion_picked(index as usize));
     on!(on_clear_history, |app| app.clear_history());
@@ -3486,16 +3979,33 @@ fn main() -> Result<(), slint::PlatformError> {
         let duration = app.player.borrow().duration;
         app.seek_to(fraction * duration);
     });
-    on!(on_set_volume, |app, volume| {
-        app.ui.set_volume(volume);
-        app.audio.volume(volume * volume);
-    });
+    on!(on_set_volume, |app, volume| app.set_volume(volume));
+    {
+        // Returns a value, which `on!` cannot.
+        let weak = Rc::downgrade(&app);
+        app.ui.on_hotkey(move |text, control, shift, alt| {
+            weak.upgrade()
+                .is_some_and(|app| app.hotkey(&text, control, shift, alt))
+        });
+    }
+    on!(on_sleep_chosen, |app, choice| app.set_sleep(choice));
+    on!(on_levelling_choice_changed, |app, choice| app.set_levelling(choice));
     on!(on_toggle_like, |app| app.toggle_like());
     on!(on_toggle_shuffle, |app| app.toggle_shuffle());
     on!(on_cycle_repeat, |app| app.cycle_repeat());
     on!(on_canvas_unlink, |app| app.canvas_unlink());
-    on!(on_queue_moved, |app, from, to| app
-        .move_queued(from as usize, to as usize));
+    // The drop comes from inside the dragged row's own event, and moving
+    // rebuilds every row, that one too. Wait until the event is over.
+    on!(on_queue_moved, |app, from, to| {
+        let weak = Rc::downgrade(&app);
+        slint::Timer::single_shot(Duration::ZERO, move || {
+            if let Some(app) = weak.upgrade() {
+                app.move_queued(from as usize, to as usize);
+            }
+        });
+    });
+    on!(on_prompt_done, |app, text| app.prompt_done(text.to_string()));
+    on!(on_new_playlist, |app| app.ask_new_playlist(None));
     on!(on_panel_changed, |app, panel| {
         // Now playing previews the lyrics, so it needs them too.
         if panel == 2 || panel == 3 {
@@ -3530,8 +4040,10 @@ fn main() -> Result<(), slint::PlatformError> {
             .position(|&c| c == app.crossfade.get())
             .unwrap_or(0) as i32,
     );
+    app.ui.set_levelling_choice(app.levelling.get());
     app.ui
         .set_suggestions(ModelRc::from(app.suggest.borrow().rows.clone()));
+    app.show_recent_searches();
 
     let weak = Rc::downgrade(&app);
     app.timer.start(TimerMode::Repeated, SLOW_TICK, move || {

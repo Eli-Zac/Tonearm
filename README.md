@@ -2,8 +2,8 @@
 
 A native Windows client for YouTube Music, written in Rust.
 
-Tonearm has no web view and no browser engine. It draws its own UI with a
-software renderer and talks to YouTube Music over plain HTTPS, so it starts
+Tonearm has no web view and no browser engine. It draws its own UI with
+Skia on the GPU and talks to YouTube Music over plain HTTPS, so it starts
 fast and stays small in memory.
 
 Tonearm is unofficial. Google does not endorse it.

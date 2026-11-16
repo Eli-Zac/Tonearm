@@ -37,7 +37,7 @@ fn decayed(score: f64, at: u64, now: u64) -> f64 {
     score * 0.5f64.powf(days / HALF_LIFE_DAYS)
 }
 
-fn fold(s: &str) -> String {
+pub fn fold(s: &str) -> String {
     s.to_lowercase()
 }
 
@@ -204,6 +204,31 @@ impl History {
             .get(&fold(name))
             .map(|(s, at)| decayed(*s, *at, now))
             .unwrap_or(0.0)
+    }
+
+    /// What was played or opened last, newest first. Songs when `songs`
+    /// is true, otherwise albums, playlists and artists.
+    pub fn recent(&self, songs: bool, limit: usize) -> Vec<Item> {
+        let mut entries: Vec<&Entry> = self
+            .entries
+            .values()
+            .filter(|e| e.item.video_id.is_some() == songs)
+            .filter(|e| songs || e.item.browse_id.is_some())
+            .collect();
+        entries.sort_by(|a, b| b.at.cmp(&a.at));
+        entries.into_iter().take(limit).map(|e| e.item.clone()).collect()
+    }
+
+    /// The artists you play most, best first, as folded names.
+    pub fn top_artists(&self, limit: usize) -> Vec<String> {
+        let now = now();
+        let mut artists: Vec<(&String, f64)> = self
+            .artists
+            .iter()
+            .map(|(name, (score, at))| (name, decayed(*score, *at, now)))
+            .collect();
+        artists.sort_by(|a, b| b.1.total_cmp(&a.1));
+        artists.into_iter().take(limit).map(|(name, _)| name.clone()).collect()
     }
 
     /// How much an item from YouTube Music matches your taste: its own

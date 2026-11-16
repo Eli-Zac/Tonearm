@@ -54,6 +54,11 @@ enum Command {
     Prepare { input: Input, token: u64 },
     /// Fades from the playing song into the prepared one.
     Crossfade { token: u64, seconds: f32 },
+    /// Starts the prepared song the moment the playing one ends, with no
+    /// gap. Token zero calls it off.
+    Follow { token: u64, gain: f32 },
+    /// The levelling gain for the song under `generation`.
+    Gain { generation: u64, gain: f32 },
     Play,
     Pause,
     Seek(f32),
@@ -72,6 +77,9 @@ pub struct Status {
     /// Which `prepare` call has its song open and ready to fade in. Zero
     /// when none is.
     pub prepared: AtomicU64,
+    /// The `follow` token of a song that just started gaplessly. The app
+    /// takes it, moves the queue on, and reports the song's generation.
+    pub followed: AtomicU64,
     pub error: Mutex<String>,
 }
 
@@ -115,6 +123,24 @@ impl Audio {
         self.status.duration_ms.store(0, Ordering::SeqCst);
         let _ = self.tx.send(Command::Crossfade { token, seconds });
     }
+    /// Plays the prepared song straight after this one ends. `gain` is its
+    /// levelling gain. Call only once `prepared` shows `token`.
+    pub fn follow(&self, token: u64, gain: f32) {
+        let _ = self.tx.send(Command::Follow { token, gain });
+    }
+    /// Calls off a `follow`, as when the queue changes.
+    pub fn unfollow(&self) {
+        let _ = self.tx.send(Command::Follow { token: 0, gain: 1.0 });
+    }
+    /// A song that started through `follow` now belongs to `generation`.
+    pub fn adopt(&self, generation: u64) {
+        self.status.generation.store(generation, Ordering::SeqCst);
+    }
+    /// Sets the levelling gain of the song under `generation`, on top of
+    /// the volume. Ignored once another song has started.
+    pub fn gain(&self, generation: u64, gain: f32) {
+        let _ = self.tx.send(Command::Gain { generation, gain });
+    }
     pub fn play(&self) {
         let _ = self.tx.send(Command::Play);
     }
@@ -150,17 +176,25 @@ fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
     // start, and hand themselves back here.
     let (opened_tx, opened_rx) = mpsc::channel::<(u64, Result<crate::decode::Track, String>)>();
     let mut volume = 1.0f32;
+    // Levelling gains of the playing and the fading song.
+    let (mut gain, mut fading_gain) = (1.0f32, 1.0f32);
+    // The prepared song to start once the playing one ends, and its gain.
+    let mut follow: Option<(u64, f32)> = None;
     let fail = |status: &Status, message: String| {
         *status.error.lock().unwrap() = message;
         status.state.store(FAILED, Ordering::SeqCst);
     };
     loop {
-        match rx.recv_timeout(Duration::from_millis(100)) {
+        // Waiting to follow, the loop looks in often, so the gap stays tiny.
+        let wait = if follow.is_some() { 4 } else { 100 };
+        match rx.recv_timeout(Duration::from_millis(wait)) {
             Ok(Command::Load { input, generation }) => {
                 sink = None;
                 fading = None;
                 next = None;
                 wanted = 0;
+                follow = None;
+                gain = 1.0;
                 if generation != status.generation.load(Ordering::SeqCst) {
                     continue; // A newer track was requested while we waited.
                 }
@@ -194,6 +228,7 @@ fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
             Ok(Command::Prepare { input, token }) => {
                 wanted = token;
                 next = None;
+                follow = None;
                 // Only asked for while a song plays, so the device is open.
                 if let Some((_, _, rate)) = &output {
                     let (rate, opened) = (*rate, opened_tx.clone());
@@ -207,6 +242,7 @@ fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
             }
             Ok(Command::Crossfade { token, seconds }) => {
                 status.prepared.store(0, Ordering::SeqCst);
+                follow = None;
                 let ready = next.take().filter(|(t, _)| *t == token);
                 let started = match (ready, &output) {
                     (Some((_, track)), Some((_, handle, _))) => {
@@ -232,6 +268,9 @@ fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
                         // the new one, and then ends.
                         fade_out.store((seconds * 1000.0) as u32, Ordering::SeqCst);
                         fading = sink.replace(new);
+                        fading_gain = gain;
+                        // The app sends the new song's gain straight after.
+                        gain = 1.0;
                         fade_out = control;
                         status
                             .state
@@ -270,11 +309,25 @@ fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
                     let _ = s.try_seek(Duration::from_secs_f32(seconds.max(0.0)));
                 }
             }
+            Ok(Command::Follow { token, gain: next_gain }) => {
+                follow = (token != 0).then_some((token, next_gain));
+            }
+            Ok(Command::Gain { generation, gain: g }) => {
+                if generation == status.generation.load(Ordering::SeqCst) {
+                    gain = g;
+                    if let Some(s) = &sink {
+                        s.set_volume(volume * gain);
+                    }
+                }
+            }
             Ok(Command::Volume(v)) => {
                 volume = v.clamp(0.0, 1.0);
                 // Fades scale the samples, so both songs follow the slider.
-                for s in sink.iter().chain(fading.iter()) {
-                    s.set_volume(volume);
+                if let Some(s) = &sink {
+                    s.set_volume(volume * gain);
+                }
+                if let Some(s) = &fading {
+                    s.set_volume(volume * fading_gain);
                 }
             }
             Ok(Command::Stop) => {
@@ -282,6 +335,7 @@ fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
                 fading = None;
                 next = None;
                 wanted = 0;
+                follow = None;
                 status.state.store(IDLE, Ordering::SeqCst);
             }
             Err(RecvTimeoutError::Timeout) => {}
@@ -304,6 +358,29 @@ fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
         }
         if fading.as_ref().is_some_and(|s| s.empty()) {
             fading = None;
+        }
+        // The playing song ran out with the next one open: start it now.
+        let ended = sink.as_ref().is_some_and(|s| s.empty())
+            && status.state.load(Ordering::SeqCst) == PLAYING;
+        if let (true, Some((token, next_gain))) = (ended, follow) {
+            follow = None;
+            let ready = next.take().filter(|(t, _)| *t == token);
+            if let (Some((_, track)), Some((_, handle, _))) = (ready, &output) {
+                let length = rodio::Source::total_duration(&track);
+                if let Ok((new, control)) = start(handle, track, volume * next_gain, 0.0) {
+                    status.prepared.store(0, Ordering::SeqCst);
+                    status.position_ms.store(0, Ordering::SeqCst);
+                    status.duration_ms.store(
+                        length.map_or(0, |l| l.as_millis() as u64),
+                        Ordering::SeqCst,
+                    );
+                    sink = Some(new);
+                    fade_out = control;
+                    gain = next_gain;
+                    status.followed.store(token, Ordering::SeqCst);
+                    continue;
+                }
+            }
         }
         if let Some(s) = &sink {
             status

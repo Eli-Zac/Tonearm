@@ -60,10 +60,9 @@ pub fn decode(bytes: &[u8]) -> Option<Vec<Frame>> {
             side,
             side,
         );
-        let mut rgba = square
+        let rgba = square
             .resize_exact(SIDE, SIDE, image::imageops::FilterType::Triangle)
             .into_rgba8();
-        crate::images::round_corners(&mut rgba, SIDE as f32 * 0.065);
         out.push(Frame {
             pixels: Pixels::clone_from_slice(rgba.as_raw(), SIDE, SIDE),
             delay,

@@ -38,6 +38,31 @@ pub enum Action {
     Endpoint(Item),
     PlayPage(bool),
     DownloadPage,
+    /// Lists the user's playlists in the menu, to add a song to one.
+    AddToPlaylist(Item),
+    /// Adds a song to a playlist: playlist id, its title, the song.
+    IntoPlaylist(String, String, Item),
+    /// Asks for a name, then makes a playlist, with this song in it.
+    NewPlaylist(Option<Item>),
+    /// Takes a song out of the playlist on this page.
+    OutOfPlaylist(String, Item),
+    /// Saves an album or playlist to the library, or takes it out: its
+    /// playlist id, true to save, and its title.
+    Library(String, bool, String),
+    /// Follows an artist, or stops: channel id, true to follow, the name.
+    Follow(String, bool, String),
+    RenamePlaylist(String, String),
+    DeletePlaylist(String, String),
+}
+
+/// What the name prompt is asking for.
+pub enum Prompt {
+    /// A name for a new playlist, which this song goes in.
+    NewPlaylist(Option<Item>),
+    /// A new name for this playlist.
+    Rename(String),
+    /// Yes to delete this playlist, with its title.
+    Delete(String, String),
 }
 
 /// Where a right click came from, as the window numbers it.
@@ -135,6 +160,18 @@ impl App {
                 let item = self.page.borrow().items.get(id).cloned();
                 if let Some(item) = item {
                     self.item_lines(&mut lines, &item, false);
+                    // A song on the user's own playlist can come out of it.
+                    let own = self
+                        .page
+                        .borrow()
+                        .header
+                        .as_ref()
+                        .filter(|h| h.editable)
+                        .and_then(|h| h.playlist_id.clone());
+                    if let Some(playlist) = own.filter(|_| item.set_video_id.is_some()) {
+                        let trash = lines.icons.get_trash();
+                        lines.glyph("Remove from playlist", trash, Action::OutOfPlaylist(playlist, item));
+                    }
                 }
             }
             QUEUE_ITEM | PLAYING => {
@@ -176,7 +213,18 @@ impl App {
             if let Some((_, id)) = &item.album {
                 lines.glyph("Go to album", album, Action::Browse(id.clone()));
             }
-            lines.glyph("Start radio", radio, Action::Radio(item.clone()));
+            lines.glyph("Song radio", radio.clone(), Action::Radio(item.clone()));
+            // Each linked artist's own radio, as Spotify offers.
+            let linked: Vec<(String, String)> = item
+                .artists
+                .iter()
+                .filter_map(|(name, id)| Some((name.clone(), id.clone()?)))
+                .collect();
+            let several = linked.len() > 1;
+            for (name, id) in linked {
+                let label = if several { format!("{name} radio") } else { "Artist radio".into() };
+                lines.glyph(label, radio.clone(), Action::Artist(id, false));
+            }
             if offline::is_downloaded(&video_id) {
                 lines.glyph("Remove download", trash, Action::ToggleDownload(item.clone()));
             } else if !offline::is_downloading(&video_id) {
@@ -189,12 +237,23 @@ impl App {
                 } else {
                     lines.glyph("Like", heart, Action::Like(item.clone()));
                 }
+                let add = lines.icons.get_add_queue();
+                lines.glyph("Add to playlist", add, Action::AddToPlaylist(item.clone()));
             }
         } else if item.kind == Kind::Artist {
             if let Some(id) = &item.browse_id {
                 lines.glyph("Open", open, Action::Browse(id.clone()));
                 lines.glyph("Shuffle", shuffle, Action::Artist(id.clone(), true));
                 lines.glyph("Start radio", radio, Action::Artist(id.clone(), false));
+                // An artist's page id is their channel. The menu does not
+                // say whether they are followed, but the library only lists
+                // artists that are.
+                if self.client.signed_in() && id.starts_with("UC") {
+                    let follow = !self.on_library_page();
+                    let label = if follow { "Follow" } else { "Unfollow" };
+                    let icon = lines.icons.get_artist();
+                    lines.glyph(label, icon, Action::Follow(id.clone(), follow, item.title.clone()));
+                }
             }
         } else if is_collection(item) {
             lines.glyph("Play", play, Action::Collection(item.clone(), Then::Play));
@@ -203,6 +262,14 @@ impl App {
             lines.artists(item);
             if let Some(id) = &item.browse_id {
                 lines.glyph("Open", open, Action::Browse(id.clone()));
+            }
+            if let Some((playlist, saved)) = item.library.clone().filter(|_| self.client.signed_in()) {
+                let (label, icon) = if saved {
+                    ("Remove from library", lines.icons.get_trash())
+                } else {
+                    ("Save to library", lines.icons.get_library())
+                };
+                lines.glyph(label, icon, Action::Library(playlist, !saved, item.title.clone()));
             }
         } else if let Some(id) = &item.browse_id {
             lines.glyph("Open", open, Action::Browse(id.clone()));
@@ -247,6 +314,30 @@ impl App {
         if let Some(id) = header.byline_browse_id.clone() {
             lines.glyph("Go to artist", artist, Action::Browse(id));
         }
+        if let Some(playlist) = header.playlist_id.clone().filter(|_| header.editable) {
+            let (settings, trash) = (lines.icons.get_settings(), lines.icons.get_trash());
+            lines.glyph("Rename playlist", settings, Action::RenamePlaylist(playlist.clone(), header.title.clone()));
+            lines.glyph("Delete playlist", trash, Action::DeletePlaylist(playlist, header.title.clone()));
+        }
+    }
+
+    /// The library or one of its lists, where everything shown is saved.
+    fn on_library_page(&self) -> bool {
+        match self.history.borrow().last() {
+            Some(crate::Route::Library) => true,
+            Some(crate::Route::Browse { id, .. }) => {
+                id.starts_with("FEmusic_library") || id.starts_with("FEmusic_liked")
+            }
+            _ => false,
+        }
+    }
+
+    /// Opens the page shown now again, so it shows what just changed.
+    fn reload_page(self: &Rc<Self>) {
+        let current = self.history.borrow().last().cloned();
+        if let Some(route) = current {
+            self.open(route, false);
+        }
     }
 
     pub fn menu_picked(self: &Rc<Self>, index: usize) {
@@ -282,6 +373,191 @@ impl App {
             Action::DownloadPage => {
                 let songs = self.page_songs().into_iter().map(|(_, s)| s).collect();
                 self.download_items(songs);
+            }
+            Action::AddToPlaylist(item) => self.playlist_menu(item),
+            Action::IntoPlaylist(playlist, title, item) => {
+                let Some(video_id) = item.video_id.clone() else { return };
+                let client = self.client.clone();
+                self.api.run(move || {
+                    let result = client.add_to_playlist(&playlist, &video_id);
+                    on_ui(move |app| match result {
+                        Ok(()) => app.toast(format!("Added {} to {title}", item.title)),
+                        Err(message) => app.toast(message),
+                    });
+                });
+            }
+            Action::NewPlaylist(item) => self.ask_new_playlist(item),
+            Action::OutOfPlaylist(playlist, item) => {
+                let (Some(video_id), Some(set)) = (item.video_id.clone(), item.set_video_id.clone()) else {
+                    return;
+                };
+                let client = self.client.clone();
+                self.api.run(move || {
+                    let result = client.remove_from_playlist(&playlist, &video_id, &set);
+                    on_ui(move |app| match result {
+                        Ok(()) => {
+                            app.toast(format!("Removed {} from the playlist", item.title));
+                            app.reload_page();
+                        }
+                        Err(message) => app.toast(message),
+                    });
+                });
+            }
+            Action::Library(playlist, save, title) => {
+                let client = self.client.clone();
+                self.api.run(move || {
+                    let result = client.rate_playlist(&playlist, save);
+                    on_ui(move |app| match result {
+                        Ok(()) => {
+                            app.toast(if save {
+                                format!("Saved {title} to your library")
+                            } else {
+                                format!("Removed {title} from your library")
+                            });
+                            if app.on_library_page() {
+                                app.reload_page();
+                            }
+                        }
+                        Err(message) => app.toast(message),
+                    });
+                });
+            }
+            Action::Follow(channel, follow, name) => {
+                let client = self.client.clone();
+                self.api.run(move || {
+                    let result = client.subscribe(&channel, follow);
+                    on_ui(move |app| match result {
+                        Ok(()) => {
+                            app.toast(if follow {
+                                format!("Following {name}")
+                            } else {
+                                format!("Stopped following {name}")
+                            });
+                            if !follow && app.on_library_page() {
+                                app.reload_page();
+                            }
+                        }
+                        Err(message) => app.toast(message),
+                    });
+                });
+            }
+            Action::RenamePlaylist(playlist, title) => {
+                self.ask(Prompt::Rename(playlist), "Rename playlist", "Save", &title, false);
+            }
+            Action::DeletePlaylist(playlist, title) => {
+                let question = format!("Delete {title}?");
+                self.ask(Prompt::Delete(playlist, title), &question, "Delete", "", true);
+            }
+        }
+    }
+
+    /// Fetches the user's playlists, then opens the menu again listing
+    /// them, with a line for a new one first.
+    fn playlist_menu(self: &Rc<Self>, item: Item) {
+        let client = self.client.clone();
+        self.api.run(move || {
+            let result = client.my_playlists();
+            on_ui(move |app| {
+                let playlists = match result {
+                    Ok(playlists) => playlists,
+                    Err(message) => {
+                        app.toast(message);
+                        return;
+                    }
+                };
+                let mut lines = Lines {
+                    icons: app.ui.global::<Icons>(),
+                    entries: Vec::new(),
+                    actions: Vec::new(),
+                };
+                let library = lines.icons.get_library();
+                lines.glyph("New playlist", library.clone(), Action::NewPlaylist(Some(item.clone())));
+                // The menu grows down the window, so keep it to a screenful.
+                for (title, id) in playlists.into_iter().take(14) {
+                    let action = Action::IntoPlaylist(id, title.clone(), item.clone());
+                    lines.glyph(title, library.clone(), action);
+                }
+                let Lines { entries, actions, .. } = lines;
+                *app.menu.borrow_mut() = actions;
+                app.ui.set_menu_entries(ModelRc::new(VecModel::from(entries)));
+                app.ui.invoke_reopen_menu();
+            });
+        });
+    }
+
+    pub fn ask_new_playlist(self: &Rc<Self>, item: Option<Item>) {
+        self.ask(Prompt::NewPlaylist(item), "New playlist", "Create", "", false);
+    }
+
+    /// Opens the name prompt for `prompt`, filled with `text`.
+    fn ask(&self, prompt: Prompt, title: &str, action: &str, text: &str, confirm: bool) {
+        *self.prompt.borrow_mut() = Some(prompt);
+        self.ui.set_prompt_title(title.into());
+        self.ui.set_prompt_action(action.into());
+        self.ui.set_prompt_text(text.into());
+        self.ui.set_prompt_confirm(confirm);
+        self.ui.set_prompt_open(true);
+    }
+
+    /// The prompt was answered: `text` is the name typed, if it asked one.
+    pub fn prompt_done(self: &Rc<Self>, text: String) {
+        let Some(prompt) = self.prompt.borrow_mut().take() else { return };
+        let name = text.trim().to_string();
+        let client = self.client.clone();
+        match prompt {
+            Prompt::NewPlaylist(item) => {
+                if name.is_empty() {
+                    return;
+                }
+                self.api.run(move || {
+                    let songs: Vec<String> = item.iter().filter_map(|i| i.video_id.clone()).collect();
+                    let result = client.create_playlist(&name, &songs);
+                    on_ui(move |app| match result {
+                        Ok(_) => {
+                            app.toast(match &item {
+                                Some(song) => format!("Added {} to {name}", song.title),
+                                None => format!("Made {name}"),
+                            });
+                            if app.on_library_page() {
+                                app.reload_page();
+                            }
+                        }
+                        Err(message) => app.toast(message),
+                    });
+                });
+            }
+            Prompt::Rename(playlist) => {
+                if name.is_empty() {
+                    return;
+                }
+                self.api.run(move || {
+                    let result = client.rename_playlist(&playlist, &name);
+                    on_ui(move |app| match result {
+                        Ok(()) => {
+                            app.toast(format!("Renamed to {name}"));
+                            app.reload_page();
+                        }
+                        Err(message) => app.toast(message),
+                    });
+                });
+            }
+            Prompt::Delete(playlist, title) => {
+                self.api.run(move || {
+                    let result = client.delete_playlist(&playlist);
+                    on_ui(move |app| match result {
+                        // The page of a deleted playlist has nothing left
+                        // to show, so go back to where it was opened from.
+                        Ok(()) => {
+                            app.toast(format!("Deleted {title}"));
+                            if app.history.borrow().len() > 1 {
+                                app.back();
+                            } else {
+                                app.open(crate::Route::Library, true);
+                            }
+                        }
+                        Err(message) => app.toast(message),
+                    });
+                });
             }
         }
     }
@@ -353,6 +629,12 @@ impl App {
             if player.queue.get(current).is_some_and(same) {
                 drop(player);
                 self.toast("That is playing now");
+                return;
+            }
+            // Already next: moving it would rebuild the queue for nothing.
+            if player.queue.get(current + 1).is_some_and(same) {
+                drop(player);
+                self.toast(format!("{title} already plays next"));
                 return;
             }
             if let Some(at) = player.queue.iter().position(same) {

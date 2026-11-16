@@ -28,6 +28,11 @@ pub struct Item {
     pub artists: Vec<(String, Option<String>)>,
     /// The album named in the subtitle: its name and browse id.
     pub album: Option<(String, String)>,
+    /// A song's place in a playlist, which removing it from there needs.
+    pub set_video_id: Option<String>,
+    /// An album or playlist that can be saved to the library: the playlist
+    /// behind it, and whether it is saved already.
+    pub library: Option<(String, bool)>,
 }
 
 impl Item {
@@ -107,6 +112,7 @@ impl Item {
             params: s("params"),
             artists: Item::artists_from_json(e.get("artist_links")),
             album: Item::album_from_json(e.get("album")),
+            ..Item::default()
         }
     }
 }
@@ -169,6 +175,9 @@ pub struct Header {
     pub liked: Option<bool>,
     /// The playlist behind an album or playlist, for saving it.
     pub playlist_id: Option<String>,
+    /// A playlist of the user's own, which they can rename, delete and
+    /// take songs out of.
+    pub editable: bool,
     /// The artist's shuffle and radio, as YouTube Music starts them.
     pub shuffle: Option<Item>,
     pub radio: Option<Item>,
