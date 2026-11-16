@@ -1,27 +1,41 @@
 name: Release
 
-# Builds tonearm.exe and its installer on Windows and attaches both to a
-# GitHub release.
-# Start it from the Actions tab with a version, or push a tag like v0.1.0.
+# Builds the Windows binary and installer and publishes them as a GitHub
+# release. Triggered by pushing a version tag (v*) or manually from the
+# Actions tab.
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: Version tag to release, for example v0.1.0
+        description: Release version tag (e.g. v1.2.0)
         required: true
+      reuse_run:
+        description: >-
+          Run ID to reuse the binary from, skipping compilation. Use only to
+          retry a failed packaging or publishing step with the same version.
+        required: false
+        default: ""
   push:
     tags: ["v*"]
 
 permissions:
   contents: write
+  actions: read
+
+env:
+  VERSION: ${{ inputs.version || github.ref_name }}
 
 jobs:
-  windows:
+  release:
+    name: Build and publish
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@v4
 
-      - uses: actions/cache@v4
+      - name: Restore Cargo cache
+        if: ${{ !inputs.reuse_run }}
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
@@ -29,36 +43,53 @@ jobs:
             target
           key: release-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
-      - name: Build
+      - name: Build release binary
+        if: ${{ !inputs.reuse_run }}
         env:
-          # Baked into the exe so the in-app updater knows what it runs.
-          TONEARM_VERSION: ${{ inputs.version || github.ref_name }}
-          # Tonearm's own service keys, from the repository secrets.
+          # Embedded in the binary for the in-app updater.
+          TONEARM_VERSION: ${{ env.VERSION }}
           TONEARM_DISCORD_APP: ${{ secrets.TONEARM_DISCORD_APP }}
           TONEARM_LASTFM_KEY: ${{ secrets.TONEARM_LASTFM_KEY }}
           TONEARM_LASTFM_SECRET: ${{ secrets.TONEARM_LASTFM_SECRET }}
         run: cargo build --release --locked
 
-      # NSIS is not on the runner's PATH (and newer images may not ship it),
-      # so install it when missing and call it by its full path.
-      - name: Installer
+      # Retained so a failed run can be retried via reuse_run without
+      # recompiling.
+      - name: Upload binary artifact
+        if: ${{ !inputs.reuse_run }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: tonearm-exe
+          path: target/release/tonearm.exe
+          retention-days: 7
+
+      - name: Download binary from run ${{ inputs.reuse_run }}
+        if: ${{ inputs.reuse_run }}
+        uses: actions/download-artifact@v4
+        with:
+          name: tonearm-exe
+          path: target/release
+          run-id: ${{ inputs.reuse_run }}
+          github-token: ${{ github.token }}
+
+      - name: Install NSIS
         shell: bash
-        env:
-          VERSION: ${{ inputs.version || github.ref_name }}
         run: |
-          NSIS="/c/Program Files (x86)/NSIS/makensis.exe"
-          if [ ! -f "$NSIS" ]; then
+          if [ ! -f "/c/Program Files (x86)/NSIS/makensis.exe" ]; then
             choco install nsis -y --no-progress
           fi
-          "$NSIS" -V3 "-DVERSION=${VERSION#v}" installer/tonearm.nsi
 
-      - name: Publish
+      - name: Build installer
+        shell: bash
+        run: |
+          "/c/Program Files (x86)/NSIS/makensis.exe" -V3 "-DVERSION=${VERSION#v}" installer/tonearm.nsi
+
+      - name: Publish GitHub release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version || github.ref_name }}
         run: |
-          # The bare exe is for 0.5 and older, whose updater looks for it.
+          # The standalone binary is kept for the updater in v0.5.0 and earlier.
           cp target/release/tonearm.exe tonearm.exe
           gh release create "$VERSION" tonearm-setup.exe tonearm.exe \
             --target "$GITHUB_SHA" \
