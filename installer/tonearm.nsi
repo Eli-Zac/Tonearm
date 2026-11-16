@@ -1,7 +1,10 @@
 ; Tonearm's installer. Installs for the current user only, so it needs no
 ; admin rights and the in-app updater can run it silently.
 ;
-;   makensis /DVERSION=0.6.0 /DEXE=target\release\tonearm.exe installer\tonearm.nsi
+;   makensis /DVERSION=0.6.0 installer\tonearm.nsi
+;
+; Paths are relative to this folder. The pictures come from
+; assets/render_installer.py.
 ;
 ; The updater runs it as `tonearm-setup.exe /S /relaunch`. /S installs with
 ; no pages, and /relaunch starts Tonearm again once it is done.
@@ -39,14 +42,25 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 !define MUI_ICON "..\assets\tonearm.ico"
 !define MUI_UNICON "..\assets\tonearm.ico"
 !define MUI_ABORTWARNING
+!define MUI_WELCOMEFINISHPAGE_BITMAP "..\assets\installer-side.bmp"
+!define MUI_UNWELCOMEFINISHPAGE_BITMAP "..\assets\installer-side.bmp"
+!define MUI_HEADERIMAGE
+!define MUI_HEADERIMAGE_BITMAP "..\assets\installer-header.bmp"
+!define MUI_HEADERIMAGE_UNBITMAP "..\assets\installer-header.bmp"
+!define MUI_WELCOMEPAGE_TITLE "Welcome to Tonearm"
+!define MUI_WELCOMEPAGE_TEXT "A native Windows player for YouTube Music.$\r$\n$\r$\nTonearm installs just for you, so it needs no admin rights. Your settings and songs stay if you install over an older version.$\r$\n$\r$\nTonearm is unofficial and not affiliated with Google or YouTube.$\r$\n$\r$\nClick Next to continue."
+!define MUI_FINISHPAGE_TITLE "Tonearm is installed"
+!define MUI_FINISHPAGE_TEXT "You can find Tonearm in the Start menu. Closing its window keeps the music playing in the tray, which Settings can change."
 !define MUI_FINISHPAGE_RUN "$INSTDIR\tonearm.exe"
 !define MUI_FINISHPAGE_RUN_TEXT "Start Tonearm"
 
+!insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
+!insertmacro MUI_UNPAGE_FINISH
 !insertmacro MUI_LANGUAGE "English"
 
 ; Waits up to about 15 seconds for a running Tonearm to let go of its exe.

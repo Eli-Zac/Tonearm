@@ -45,7 +45,7 @@ jobs:
         env:
           VERSION: ${{ inputs.version || github.ref_name }}
         run: |
-          makensis -V3 "-DVERSION=${VERSION#v}" "-DEXE=..	argetelease	onearm.exe" installer/tonearm.nsi
+          makensis -V3 "-DVERSION=${VERSION#v}" installer/tonearm.nsi
 
       - name: Publish
         shell: bash
