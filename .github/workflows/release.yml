@@ -33,15 +33,14 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      # Falls back to the most recent cache when Cargo.lock changes, and
+      # saves even if a later step fails.
       - name: Restore Cargo cache
         if: ${{ !inputs.reuse_run }}
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: release-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          shared-key: release
+          cache-on-failure: true
 
       - name: Build release binary
         if: ${{ !inputs.reuse_run }}
