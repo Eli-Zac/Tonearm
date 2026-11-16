@@ -57,16 +57,6 @@ impl Lines<'_> {
         self.entries.push(MenuEntry {
             label: label.into(),
             icon,
-            path: "".into(),
-        });
-        self.actions.push(action);
-    }
-
-    fn path(&mut self, label: impl Into<slint::SharedString>, path: slint::SharedString, action: Action) {
-        self.entries.push(MenuEntry {
-            label: label.into(),
-            icon: "".into(),
-            path,
         });
         self.actions.push(action);
     }
@@ -85,8 +75,8 @@ impl Lines<'_> {
             } else {
                 "Go to artist".into()
             };
-            let path = self.icons.get_artist();
-            self.path(label, path, Action::Browse(id));
+            let icon = self.icons.get_artist();
+            self.glyph(label, icon, Action::Browse(id));
         }
     }
 }
@@ -179,18 +169,18 @@ impl App {
         );
         if let Some(video_id) = item.video_id.clone() {
             if !playing {
-                lines.path("Play next", play_next, Action::PlayNext(item.clone()));
-                lines.path("Add to queue", add_queue, Action::AddToQueue(item.clone()));
+                lines.glyph("Play next", play_next, Action::PlayNext(item.clone()));
+                lines.glyph("Add to queue", add_queue, Action::AddToQueue(item.clone()));
             }
             lines.artists(item);
             if let Some((_, id)) = &item.album {
-                lines.path("Go to album", album, Action::Browse(id.clone()));
+                lines.glyph("Go to album", album, Action::Browse(id.clone()));
             }
-            lines.path("Start radio", radio, Action::Radio(item.clone()));
+            lines.glyph("Start radio", radio, Action::Radio(item.clone()));
             if offline::is_downloaded(&video_id) {
-                lines.path("Remove download", trash, Action::ToggleDownload(item.clone()));
+                lines.glyph("Remove download", trash, Action::ToggleDownload(item.clone()));
             } else if !offline::is_downloading(&video_id) {
-                lines.path("Download", download, Action::ToggleDownload(item.clone()));
+                lines.glyph("Download", download, Action::ToggleDownload(item.clone()));
             }
             if self.client.signed_in() {
                 if playing {
@@ -202,20 +192,20 @@ impl App {
             }
         } else if item.kind == Kind::Artist {
             if let Some(id) = &item.browse_id {
-                lines.path("Open", open, Action::Browse(id.clone()));
+                lines.glyph("Open", open, Action::Browse(id.clone()));
                 lines.glyph("Shuffle", shuffle, Action::Artist(id.clone(), true));
-                lines.path("Start radio", radio, Action::Artist(id.clone(), false));
+                lines.glyph("Start radio", radio, Action::Artist(id.clone(), false));
             }
         } else if is_collection(item) {
             lines.glyph("Play", play, Action::Collection(item.clone(), Then::Play));
             lines.glyph("Shuffle", shuffle, Action::Collection(item.clone(), Then::Shuffle));
-            lines.path("Download all", download, Action::Collection(item.clone(), Then::Download));
+            lines.glyph("Download all", download, Action::Collection(item.clone(), Then::Download));
             lines.artists(item);
             if let Some(id) = &item.browse_id {
-                lines.path("Open", open, Action::Browse(id.clone()));
+                lines.glyph("Open", open, Action::Browse(id.clone()));
             }
         } else if let Some(id) = &item.browse_id {
-            lines.path("Open", open, Action::Browse(id.clone()));
+            lines.glyph("Open", open, Action::Browse(id.clone()));
         }
     }
 
@@ -240,7 +230,7 @@ impl App {
                 lines.glyph("Shuffle", shuffle, Action::Endpoint(endpoint));
             }
             if let Some(endpoint) = header.radio.clone() {
-                lines.path("Start radio", radio, Action::Endpoint(endpoint));
+                lines.glyph("Start radio", radio, Action::Endpoint(endpoint));
             }
             return;
         }
@@ -251,11 +241,11 @@ impl App {
                 s.video_id.as_deref().is_some_and(offline::is_downloaded)
             });
             if !all_saved {
-                lines.path("Download all", download, Action::DownloadPage);
+                lines.glyph("Download all", download, Action::DownloadPage);
             }
         }
         if let Some(id) = header.byline_browse_id.clone() {
-            lines.path("Go to artist", artist, Action::Browse(id));
+            lines.glyph("Go to artist", artist, Action::Browse(id));
         }
     }
 
@@ -422,5 +412,6 @@ impl App {
         self.ui.set_queue(ModelRc::from(model));
         self.ui.set_queue_index(index as i32);
         self.sync_up_next();
+        self.save_session();
     }
 }

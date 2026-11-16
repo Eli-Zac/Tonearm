@@ -623,7 +623,9 @@ mod video {
         Ok(())
     }
 
-    /// Copies a sample's BGRX rows into RGBA.
+    /// Copies the middle square of a sample's BGRX rows into RGBA, with the
+    /// corners rounded like the still covers. The software renderer cannot
+    /// round an image itself, and a cover is square.
     unsafe fn frame(
         sample: &IMFSample,
         width: u32,
@@ -631,12 +633,17 @@ mod video {
         stride: i32,
     ) -> windows::core::Result<Pixels> {
         let buffer = sample.ConvertToContiguousBuffer()?;
-        let mut pixels = Pixels::new(width, height);
+        let side = width.min(height);
+        let (left, top) = ((width - side) as usize / 2, (height - side) as usize / 2);
+        let mut pixels = Pixels::new(side, side);
         let out = pixels.make_mut_bytes();
-        let row_bytes = width as usize * 4;
+        let row_bytes = side as usize * 4;
         let mut copy = |base: *const u8, pitch: isize| {
-            for y in 0..height as usize {
-                let row = std::slice::from_raw_parts(base.offset(pitch * y as isize), row_bytes);
+            for y in 0..side as usize {
+                let row = std::slice::from_raw_parts(
+                    base.offset(pitch * (y + top) as isize).add(left * 4),
+                    row_bytes,
+                );
                 let dest = &mut out[y * row_bytes..(y + 1) * row_bytes];
                 for (d, s) in dest.chunks_exact_mut(4).zip(row.chunks_exact(4)) {
                     d[0] = s[2];
@@ -665,6 +672,7 @@ mod video {
             copy(base, stride as isize);
             buffer.Unlock()?;
         }
+        crate::images::round_corners_square(pixels.make_mut_bytes(), side, side as f32 * 0.065);
         Ok(pixels)
     }
 }

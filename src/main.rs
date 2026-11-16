@@ -18,6 +18,7 @@ mod offline;
 mod pool;
 mod resolver;
 mod services;
+mod session;
 mod store;
 mod update;
 
@@ -27,7 +28,7 @@ use innertube::model::{Header, Item, Kind, Page, PageKind};
 use innertube::Client;
 use slint::{ComponentHandle, Image, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -35,6 +36,11 @@ use std::time::{Duration, Instant};
 
 const SLOW_TICK: Duration = Duration::from_millis(250);
 const FAST_TICK: Duration = Duration::from_millis(33);
+/// Links got ahead of a click at once. More would only crowd yt-dlp.
+const WARM_AT_ONCE: usize = 2;
+/// How often the playback session is saved while a song plays, so a
+/// crash loses little of your place.
+const SESSION_EVERY: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 enum Route {
@@ -131,6 +137,68 @@ struct Player {
     /// "Next up". One model for the app's life, so the list keeps its place.
     up_next: Rc<VecModel<ItemData>>,
     extending: bool,
+    /// Where to start a song restored from the last run, by its video id
+    /// and seconds. Used the first time that song plays.
+    resume_at: Option<(String, f32)>,
+    shuffle: bool,
+    /// The queue as it was before shuffle, to put back when shuffle ends.
+    unshuffled: Option<Vec<Item>>,
+    repeat: Repeat,
+}
+
+/// The repeat button: off, the whole queue, or the one song.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Repeat {
+    #[default]
+    Off,
+    All,
+    One,
+}
+
+impl Repeat {
+    fn next(self) -> Repeat {
+        match self {
+            Repeat::Off => Repeat::All,
+            Repeat::All => Repeat::One,
+            Repeat::One => Repeat::Off,
+        }
+    }
+    pub fn number(self) -> i32 {
+        self as i32
+    }
+    pub fn from_number(n: i64) -> Repeat {
+        match n {
+            1 => Repeat::All,
+            2 => Repeat::One,
+            _ => Repeat::Off,
+        }
+    }
+}
+
+/// The song at queue position `index` first, the rest shuffled after it.
+fn shuffled_from(mut items: Vec<Item>, index: usize) -> Vec<Item> {
+    if index >= items.len() {
+        return shuffled(items);
+    }
+    let first = items.remove(index);
+    let mut out = vec![first];
+    out.extend(shuffled(items));
+    out
+}
+
+/// Puts the queue back in its order from before shuffle. Songs added
+/// since go at the end. Returns the queue and where `current` is in it.
+fn unshuffle(original: Vec<Item>, queue: &[Item], current: &Item) -> (Vec<Item>, usize) {
+    let id = |i: &Item| i.video_id.clone();
+    let mut out = original;
+    for item in queue {
+        if !out.iter().any(|o| id(o) == id(item)) {
+            out.push(item.clone());
+        }
+    }
+    out.retain(|o| queue.iter().any(|q| id(q) == id(o)));
+    let index = out.iter().position(|o| id(o) == id(current)).unwrap_or(0);
+    (out, index)
 }
 
 #[derive(Default)]
@@ -140,6 +208,9 @@ struct LyricsState {
     synced: bool,
     /// Start, end, vertical offset and line number of every focusable row.
     rows: Vec<(i32, i32, f32, i32)>,
+    /// The lyrics as found, to break into rows again when the space for
+    /// them changes width.
+    found: Option<lyrics::Lyrics>,
 }
 
 /// How much of the current track has really played. Drives scrobbling.
@@ -176,6 +247,19 @@ struct App {
     taste: RefCell<history::History>,
     /// One thread, so history saves land in the order they were made.
     disk: pool::Pool,
+    /// When the playback session was last saved while a song played.
+    session_saved: Cell<Instant>,
+    /// Gets stream links ahead of a click. Its own threads, as a link can
+    /// take many seconds and must not hold up pages.
+    warm: pool::Pool,
+    /// The last song a failed stream was retried for, so it retries once.
+    retried: RefCell<Option<String>>,
+    /// Songs whose links are being got ahead right now.
+    warming: Rc<RefCell<HashSet<String>>>,
+    /// The album, playlist, mix or artist the queue was started from, by
+    /// its key. Empty for a song's radio and the like. Lights up that
+    /// item's play button while it plays.
+    playing_from: RefCell<String>,
     player: RefCell<Player>,
     lyrics: RefCell<LyricsState>,
     cover: RefCell<Option<Cover>>,
@@ -481,10 +565,9 @@ impl App {
                 }
             }
             Target::Track { generation } => {
-                if self.player.borrow().generation == generation
-                    && self.cover.borrow().is_none()
-                    && self.canvas.borrow().is_none()
-                {
+                // The still cover always goes in. Moving covers and the
+                // Canvas play in a layer of their own on top of it.
+                if self.player.borrow().generation == generation {
                     self.set_tint(&image);
                     self.ui.set_track_art(image);
                     self.ui.set_track_has_art(true);
@@ -512,6 +595,7 @@ impl App {
         let (album, album_browse) = item.album.clone().unwrap_or_default();
         ItemData {
             id: id as i32,
+            key: history::key_of(item).unwrap_or_default().into(),
             title: item.title.as_str().into(),
             subtitle: item.subtitle.as_str().into(),
             runs: ModelRc::new(VecModel::from(runs)),
@@ -526,6 +610,10 @@ impl App {
                 .video_id
                 .as_deref()
                 .is_some_and(offline::is_downloaded),
+            downloading: item.video_id.as_deref().is_some_and(|id| {
+                !offline::is_downloaded(id) && offline::is_downloading(id)
+            }),
+            progress: item.video_id.as_deref().map(offline::progress).unwrap_or(0.0),
         }
     }
 
@@ -571,6 +659,7 @@ impl App {
         self.ui.set_page_tint(slint::Color::from_rgb_u8(0x2b, 0x24, 0x40));
         self.ui.set_loading(true);
         self.ui.set_can_back(self.history.borrow().len() > 1);
+        self.show_now();
         self.ui.set_nav(match route {
             Route::Home => 0,
             Route::Explore => 1,
@@ -922,7 +1011,8 @@ impl App {
         if item.video_id.is_some() && !radio {
             let songs = self.page_songs();
             let index = songs.iter().position(|(i, _)| *i == id).unwrap_or(0);
-            self.set_queue(songs.into_iter().map(|(_, item)| item).collect(), index);
+            let from = self.page_key();
+            self.set_queue_from(songs.into_iter().map(|(_, item)| item).collect(), index, from);
         } else {
             self.open_item(item);
         }
@@ -1178,6 +1268,11 @@ impl App {
     }
 
     fn play_page(self: &Rc<Self>, shuffle: bool) {
+        // Play on the page that is playing pauses and resumes it.
+        if !shuffle && self.is_current(&self.page_key()) {
+            self.toggle_play();
+            return;
+        }
         let songs: Vec<Item> = self
             .page_songs()
             .into_iter()
@@ -1199,18 +1294,133 @@ impl App {
         if songs.is_empty() {
             return;
         }
-        self.set_queue(if shuffle { shuffled(songs) } else { songs }, 0);
+        let from = self.page_key();
+        self.set_queue_from(if shuffle { shuffled(songs) } else { songs }, 0, from);
+    }
+
+    /// The key of the album, playlist or artist page that is open, if any.
+    fn page_key(&self) -> String {
+        match self.history.borrow().last() {
+            Some(Route::Browse { id, .. }) => id.clone(),
+            _ => String::new(),
+        }
+    }
+
+    /// Whether the item keyed `key` is the song playing or what the queue
+    /// was started from.
+    fn is_current(&self, key: &str) -> bool {
+        if key.is_empty() {
+            return false;
+        }
+        let player = self.player.borrow();
+        let song = player.queue.get(player.index).and_then(|i| i.video_id.as_deref());
+        song == Some(key) || *self.playing_from.borrow() == key
+    }
+
+    /// The play button on a card or row: plays the item at once, without
+    /// opening its page. On what is already playing it pauses or resumes.
+    fn item_play(self: &Rc<Self>, id: usize) {
+        let Some(item) = self.page.borrow().items.get(id).cloned() else {
+            return;
+        };
+        let key = history::key_of(&item).unwrap_or_default();
+        if self.is_current(&key) && self.player.borrow().resume_at.is_none() {
+            self.toggle_play();
+            return;
+        }
+        if item.video_id.is_some() {
+            self.activate(id);
+            return;
+        }
+        self.remember(&item, 0.5);
+        let client = self.client.clone();
+        self.api.run(move || {
+            // A playlist id plays albums, playlists and mixes alike. Others,
+            // such as artists, play the songs listed on their page.
+            let result = match (&item.playlist_id, &item.browse_id) {
+                (Some(playlist), _) => client.queue(None, Some(playlist)).map(|(items, _)| items),
+                (None, Some(browse)) => client
+                    .browse(browse, item.params.as_deref())
+                    .map(|page| songs_of(&page)),
+                (None, None) => Ok(Vec::new()),
+            };
+            on_ui(move |app| match result {
+                Ok(items) if !items.is_empty() => app.set_queue_from(items, 0, key),
+                Ok(_) => app.toast("Nothing to play"),
+                Err(message) => app.toast(message),
+            });
+        });
+    }
+
+    /// A stream that fails gets one more try with a fresh link, from where
+    /// it stopped. Links can go stale or be refused once. Returns whether
+    /// it is trying again.
+    fn retry_stream(self: &Rc<Self>, message: &str) -> bool {
+        if !message.starts_with(audio::STREAM_FAILED) {
+            return false;
+        }
+        let (index, id) = {
+            let player = self.player.borrow();
+            let Some(id) = player.queue.get(player.index).and_then(|i| i.video_id.clone()) else {
+                return false;
+            };
+            (player.index, id)
+        };
+        // One retry per song: the retry itself plays under a new generation.
+        if self.retried.replace(Some(id.clone())).as_deref() == Some(id.as_str()) {
+            return false;
+        }
+        let position = self.audio.status.position_ms.load(Ordering::SeqCst) as f32 / 1000.0;
+        if let Some(resolver) = &self.resolver {
+            resolver.forget(&id);
+        }
+        self.player.borrow_mut().resume_at = Some((id, position));
+        self.play_index(index);
+        true
+    }
+
+    /// Tells every play button what is playing.
+    fn show_now(&self) {
+        let now = self.ui.global::<Now>();
+        let song = {
+            let player = self.player.borrow();
+            player
+                .queue
+                .get(player.index)
+                .and_then(|i| i.video_id.clone())
+                .unwrap_or_default()
+        };
+        now.set_song(song.into());
+        now.set_from(self.playing_from.borrow().as_str().into());
+        now.set_page(self.page_key().into());
     }
 
     // -------------------------------------------------------------- player
 
     fn set_queue(self: &Rc<Self>, items: Vec<Item>, index: usize) {
+        self.set_queue_from(items, index, String::new());
+    }
+
+    /// Plays `items` from `index`, as started from the item keyed `from`.
+    fn set_queue_from(self: &Rc<Self>, items: Vec<Item>, index: usize, from: String) {
+        *self.playing_from.borrow_mut() = from;
+        let (items, index) = {
+            let mut player = self.player.borrow_mut();
+            if player.shuffle {
+                player.unshuffled = Some(items.clone());
+                (shuffled_from(items, index), 0)
+            } else {
+                player.unshuffled = None;
+                (items, index)
+            }
+        };
         {
             let mut player = self.player.borrow_mut();
             player.queue = Vec::new();
             player.queue_generation += 1;
             player.model = Rc::new(VecModel::default());
             player.extending = false;
+            player.resume_at = None;
             self.ui.set_queue(ModelRc::from(player.model.clone()));
         }
         self.extend_queue(items);
@@ -1246,6 +1456,7 @@ impl App {
         };
         self.player.borrow_mut().queue.extend(fresh);
         self.sync_up_next();
+        self.save_session();
         if was_last {
             self.prefetch_next();
         }
@@ -1282,7 +1493,7 @@ impl App {
     fn extend_with_radio(self: &Rc<Self>) {
         let (generation, last) = {
             let mut player = self.player.borrow_mut();
-            if player.extending {
+            if player.extending || player.repeat != Repeat::Off {
                 return;
             }
             let Some(last) = player.queue.last().filter(|i| i.video_id.is_some()).cloned() else {
@@ -1313,11 +1524,88 @@ impl App {
     }
 
     fn play_index(self: &Rc<Self>, index: usize) {
+        let Some((item, generation, near_end)) = self.show_track(index) else {
+            return;
+        };
+        // Saved before the resume point is used, so it is kept.
+        self.save_session();
+        let (resume, repeat) = {
+            let mut player = self.player.borrow_mut();
+            let resume = player
+                .resume_at
+                .take()
+                .filter(|(at, _)| item.video_id.as_ref() == Some(at))
+                .map(|(_, s)| s);
+            (resume, player.repeat)
+        };
+        // Repeat loops the queue, so it does not grow a radio tail.
+        if near_end && repeat == Repeat::Off {
+            self.extend_with_radio();
+        }
+        let video_id = item.video_id.unwrap_or_default();
+        // A downloaded or cached copy needs no yt-dlp and no network.
+        if let Some(path) = offline::local_file(&video_id) {
+            self.ui.set_buffering(true);
+            self.load_audio(audio::Input::File(path), generation, resume);
+            self.prefetch_next();
+            return;
+        }
+        let Some(resolver) = self.resolver.clone() else {
+            self.audio.stop();
+            self.services.send(services::Event::Stopped);
+            self.ui.set_buffering(false);
+            self.toast("Playback is not set up yet. The README explains the missing piece.");
+            return;
+        };
+        self.ui.set_buffering(true);
+        self.api.run(move || {
+            let result = resolver.resolve(&video_id);
+            on_ui(move |app| {
+                if app.player.borrow().generation != generation {
+                    return;
+                }
+                match result {
+                    Ok(stream) => {
+                        if stream.duration > 0.0 {
+                            app.player.borrow_mut().duration = stream.duration;
+                            app.ui.set_duration_text(clock_text(stream.duration));
+                        }
+                        app.load_audio(
+                            audio::Input::Http {
+                                url: stream.url,
+                                headers: stream.headers,
+                                cache_as: Some(video_id),
+                            },
+                            generation,
+                            resume,
+                        );
+                        app.prefetch_next();
+                    }
+                    Err(message) => {
+                        app.ui.set_buffering(false);
+                        app.toast(message);
+                    }
+                }
+            });
+        });
+    }
+
+    /// Starts a track, from `start` seconds in when given.
+    fn load_audio(&self, input: audio::Input, generation: u64, start: Option<f32>) {
+        self.audio.load(input, generation);
+        // Commands run in order, so the seek lands once the track is loaded.
+        if let Some(seconds) = start.filter(|s| *s > 0.0) {
+            self.audio.seek(seconds);
+        }
+    }
+
+    /// Makes `index` the current song and shows it in the player, without
+    /// starting the audio. Returns the song, its player generation, and
+    /// whether the queue is about to run out.
+    fn show_track(self: &Rc<Self>, index: usize) -> Option<(Item, u64, bool)> {
         let (item, generation, near_end) = {
             let mut player = self.player.borrow_mut();
-            let Some(item) = player.queue.get(index).cloned() else {
-                return;
-            };
+            let item = player.queue.get(index).cloned()?;
             player.index = index;
             player.generation += 1;
             player.liked = false;
@@ -1354,67 +1642,219 @@ impl App {
         }
         #[cfg(windows)]
         self.update_keys(&item.title, &artist, seconds, &item.thumb);
-        if near_end {
+        self.show_now();
+        Some((item, generation, near_end))
+    }
+
+    // ------------------------------------------------------------- session
+
+    /// Saves the queue, the playing song and how far into it you are, in
+    /// the background.
+    fn save_session(&self) {
+        let text = {
+            let player = self.player.borrow();
+            if player.queue.is_empty() {
+                return;
+            }
+            let status = &self.audio.status;
+            let current = player.queue.get(player.index).and_then(|i| i.video_id.as_ref());
+            let position = match &player.resume_at {
+                // Restored and not played yet: keep the old place.
+                Some((at, seconds)) if current == Some(at) => *seconds,
+                _ if status.generation.load(Ordering::SeqCst) == player.generation => {
+                    status.position_ms.load(Ordering::SeqCst) as f32 / 1000.0
+                }
+                _ => 0.0,
+            };
+            session::Session {
+                queue: player.queue.clone(),
+                index: player.index,
+                position,
+                volume: self.ui.get_volume(),
+                shuffle: player.shuffle,
+                repeat: player.repeat,
+            }
+            .serialize()
+        };
+        self.session_saved.set(Instant::now());
+        self.disk.run(move || session::Session::save(text));
+    }
+
+    /// Puts back what was playing when the app last closed, paused.
+    fn restore_session(self: &Rc<Self>) {
+        let Some(saved) = session::Session::load() else {
+            return;
+        };
+        self.ui.set_volume(saved.volume);
+        self.audio.volume(saved.volume * saved.volume);
+        self.ui.set_shuffle(saved.shuffle);
+        self.ui.set_repeat(saved.repeat.number());
+        {
+            let mut player = self.player.borrow_mut();
+            player.shuffle = saved.shuffle;
+            player.repeat = saved.repeat;
+            player.queue_generation += 1;
+            self.ui.set_queue(ModelRc::from(player.model.clone()));
+        }
+        self.extend_queue(saved.queue);
+        let Some((item, _, _)) = self.show_track(saved.index) else {
+            return;
+        };
+        let duration = self.player.borrow().duration;
+        // A song left in its last seconds starts over instead.
+        let position = if duration > 0.0 && saved.position > duration - 5.0 {
+            0.0
+        } else {
+            saved.position
+        };
+        if let Some(id) = item.video_id {
+            self.show_resume_point(id, position);
+        }
+        // Filling the queue saved it before the place was known.
+        self.save_session();
+    }
+
+    /// Sets where a restored song will start, and shows it on the timeline.
+    fn show_resume_point(&self, id: String, seconds: f32) {
+        let duration = self.player.borrow().duration;
+        self.player.borrow_mut().resume_at = Some((id, seconds));
+        self.ui.set_position_text(clock_text(seconds));
+        self.ui.set_progress(if duration > 0.0 {
+            (seconds / duration).min(1.0)
+        } else {
+            0.0
+        });
+    }
+
+    /// Seeks the playing song. A restored song that has not started yet
+    /// moves its start point instead.
+    fn seek_to(&self, seconds: f32) {
+        let pending = {
+            let player = self.player.borrow();
+            let current = player.queue.get(player.index).and_then(|i| i.video_id.clone());
+            player
+                .resume_at
+                .as_ref()
+                .filter(|(at, _)| current.as_ref() == Some(at))
+                .map(|(at, _)| at.clone())
+        };
+        match pending {
+            Some(id) => self.show_resume_point(id, seconds),
+            None => self.audio.seek(seconds),
+        }
+    }
+
+    // ------------------------------------------------------ shuffle, repeat
+
+    /// Shuffles the songs after the playing one, or puts the queue back in
+    /// its old order.
+    fn toggle_shuffle(self: &Rc<Self>) {
+        {
+            let mut player = self.player.borrow_mut();
+            player.shuffle = !player.shuffle;
+            self.ui.set_shuffle(player.shuffle);
+            let index = player.index;
+            if player.shuffle {
+                player.unshuffled = Some(player.queue.clone());
+                if index + 1 < player.queue.len() {
+                    let rest = player.queue.split_off(index + 1);
+                    player.queue.extend(shuffled(rest));
+                }
+            } else if let Some(original) = player.unshuffled.take() {
+                if let Some(current) = player.queue.get(index).cloned() {
+                    let (queue, index) = unshuffle(original, &player.queue, &current);
+                    player.queue = queue;
+                    player.index = index;
+                }
+            }
+        }
+        self.rebuild_queue_model();
+        self.prefetch_next();
+    }
+
+    fn cycle_repeat(self: &Rc<Self>) {
+        let repeat = {
+            let mut player = self.player.borrow_mut();
+            player.repeat = player.repeat.next();
+            player.repeat
+        };
+        self.ui.set_repeat(repeat.number());
+        self.save_session();
+        // Turning repeat off near the end lets the radio carry on.
+        let near_end = {
+            let player = self.player.borrow();
+            player.index + 2 >= player.queue.len()
+        };
+        if repeat == Repeat::Off && near_end {
             self.extend_with_radio();
         }
-        let video_id = item.video_id.unwrap_or_default();
-        // A downloaded or cached copy needs no yt-dlp and no network.
-        if let Some(path) = offline::local_file(&video_id) {
-            ui.set_buffering(true);
-            self.audio.load(audio::Input::File(path), generation);
-            self.prefetch_next();
+    }
+
+    /// A song played to its end: again under repeat one, the next one
+    /// otherwise.
+    fn track_ended(self: &Rc<Self>) {
+        let (index, repeat) = {
+            let player = self.player.borrow();
+            (player.index, player.repeat)
+        };
+        if repeat == Repeat::One {
+            self.play_index(index);
+        } else {
+            self.next();
+        }
+    }
+
+    /// Gets a song's stream link in the background, so playing it starts
+    /// at once. YouTube's wait on a fresh link counts from when it was
+    /// given out, so getting it early hides that wait too. Skips songs
+    /// saved on this computer, and gives up when enough are already going.
+    fn warm_link(&self, video_id: String) {
+        if offline::local_file(&video_id).is_some() {
             return;
         }
         let Some(resolver) = self.resolver.clone() else {
-            self.audio.stop();
-            self.services.send(services::Event::Stopped);
-            ui.set_buffering(false);
-            self.toast("Playback is not set up yet. The README explains the missing piece.");
             return;
         };
-        ui.set_buffering(true);
-        self.api.run(move || {
-            let result = resolver.resolve(&video_id);
+        {
+            let mut warming = self.warming.borrow_mut();
+            if warming.len() >= WARM_AT_ONCE || !warming.insert(video_id.clone()) {
+                return;
+            }
+        }
+        self.warm.run(move || {
+            // Cached, so a link already got returns at once.
+            resolver.prefetch(&video_id);
             on_ui(move |app| {
-                if app.player.borrow().generation != generation {
-                    return;
-                }
-                match result {
-                    Ok(stream) => {
-                        if stream.duration > 0.0 {
-                            app.player.borrow_mut().duration = stream.duration;
-                            app.ui.set_duration_text(clock_text(stream.duration));
-                        }
-                        app.audio.load(
-                            audio::Input::Http {
-                                url: stream.url,
-                                headers: stream.headers,
-                                cache_as: Some(video_id),
-                            },
-                            generation,
-                        );
-                        app.prefetch_next();
-                    }
-                    Err(message) => {
-                        app.ui.set_buffering(false);
-                        app.toast(message);
-                    }
-                }
+                app.warming.borrow_mut().remove(&video_id);
             });
         });
+    }
+
+    /// The mouse rests on a song on the page: it is likely to be played.
+    fn item_rested(&self, id: usize) {
+        let item = self.page.borrow().items.get(id).cloned();
+        // A video plays as its album song, which takes a lookup to find.
+        // Albums and playlists play from their first song once opened.
+        if let Some(item) = item.filter(|i| !innertube::is_video(i)) {
+            if let Some(video_id) = item.video_id {
+                self.warm_link(video_id);
+            }
+        }
     }
 
     /// Fetches the next track into the offline cache in the background, so
     /// skipping to it, or reaching it, starts at once. With the cache off,
     /// it still resolves the stream link to skip the yt-dlp wait.
     fn prefetch_next(self: &Rc<Self>) {
-        let next = {
+        let (next, after) = {
             let player = self.player.borrow();
-            player
-                .queue
-                .get(player.index + 1)
-                .and_then(|item| item.video_id.clone())
+            let id = |n: usize| player.queue.get(n).and_then(|item| item.video_id.clone());
+            (id(player.index + 1), id(player.index + 2))
         };
+        // The song after next only gets its link, which costs no download.
+        if let Some(video_id) = after {
+            self.warm_link(video_id);
+        }
         let Some(video_id) = next else {
             return;
         };
@@ -1476,8 +1916,8 @@ impl App {
                                 .as_ref()
                                 .is_some_and(|(g, _)| *g == generation);
                             if live {
-                                app.ui.set_track_art(Image::from_rgba8(pixels));
-                                app.ui.set_track_has_art(true);
+                                app.ui.set_track_motion(Image::from_rgba8(pixels));
+                                app.ui.set_track_motion_on(true);
                             }
                         })
                     },
@@ -1502,9 +1942,11 @@ impl App {
         });
     }
 
+    /// Stops the Canvas and fades back to the still cover underneath.
     fn stop_canvas(&self) {
         // Dropping the clip stops its thread.
         self.canvas.borrow_mut().take();
+        self.ui.set_track_motion_on(false);
     }
 
     /// Shows the playing track's still cover again.
@@ -1550,14 +1992,28 @@ impl App {
     }
 
     fn next(self: &Rc<Self>) {
-        let index = self.player.borrow().index + 1;
+        let index = {
+            let player = self.player.borrow();
+            let next = player.index + 1;
+            if next >= player.queue.len() && player.repeat != Repeat::Off {
+                0
+            } else {
+                next
+            }
+        };
         self.play_index(index);
     }
 
     fn previous(self: &Rc<Self>) {
-        let index = self.player.borrow().index;
-        if self.audio.status.position_ms.load(Ordering::SeqCst) > 3000 || index == 0 {
+        let (index, len, repeat) = {
+            let player = self.player.borrow();
+            (player.index, player.queue.len(), player.repeat)
+        };
+        let wrap = index == 0 && repeat != Repeat::Off && len > 1;
+        if self.audio.status.position_ms.load(Ordering::SeqCst) > 3000 || (index == 0 && !wrap) {
             self.audio.seek(0.0);
+        } else if wrap {
+            self.play_index(len - 1);
         } else {
             self.play_index(index - 1);
         }
@@ -1627,6 +2083,18 @@ impl App {
         });
     }
 
+    /// The lyrics' space changed width, as when Now playing expands: break
+    /// the lines again to fit.
+    fn rewrap_lyrics(&self) {
+        let (generation, found) = {
+            let state = self.lyrics.borrow();
+            (state.generation, state.found.clone())
+        };
+        if found.is_some() {
+            self.show_lyrics(generation, found);
+        }
+    }
+
     fn show_lyrics(&self, generation: u64, found: Option<lyrics::Lyrics>) {
         let mut state = self.lyrics.borrow_mut();
         if state.generation != generation {
@@ -1636,7 +2104,16 @@ impl App {
             self.ui.set_lyrics_state(3);
             return;
         };
-        let (columns, height) = if found.synced { (24, 36.0) } else { (48, 24.0) };
+        state.found = Some(found.clone());
+        // As many characters as fit across the space the lyrics will have,
+        // less the side padding: about 13.5 px each at the synced size, 7 at
+        // the plain one.
+        let room = (self.ui.get_lyrics_width() - 40.0).max(160.0);
+        let (columns, height) = if found.synced {
+            ((room / 13.5) as usize, 36.0)
+        } else {
+            ((room / 7.0) as usize, 24.0)
+        };
         let rows = VecModel::default();
         let mut y = 0.0;
         let mut previous_end = 0u32;
@@ -1719,11 +2196,12 @@ impl App {
         self.repaint_after_restore();
         let status = &self.audio.status;
         let state = status.state.load(Ordering::SeqCst);
-        // The Canvas holds its frame while the music is paused or no one
-        // can see it, and decodes nothing meanwhile.
+        // The Canvas only shows in Now playing. It holds its frame while the
+        // music is paused or no one can see it, and decodes nothing meanwhile.
+        let cover_seen = !self.minimized.get() && self.ui.get_panel() == 3;
         if let Some((_, clip)) = self.canvas.borrow().as_ref() {
             clip.paused
-                .store(self.minimized.get() || state != audio::PLAYING, Ordering::SeqCst);
+                .store(!cover_seen || state != audio::PLAYING, Ordering::SeqCst);
         }
         let (generation, duration) = {
             let player = self.player.borrow();
@@ -1743,6 +2221,7 @@ impl App {
             let playing = state == audio::PLAYING;
             if ui.get_playing() != playing {
                 ui.set_playing(playing);
+                ui.global::<Now>().set_playing(playing);
                 #[cfg(windows)]
                 if let Some(keys) = self.keys.borrow_mut().as_mut() {
                     keys.playing(playing);
@@ -1750,16 +2229,21 @@ impl App {
             }
             ui.set_buffering(state == audio::LOADING);
             self.track_listening(generation, playing, duration);
+            if playing && self.session_saved.get().elapsed() >= SESSION_EVERY {
+                self.save_session();
+            }
             match state {
                 audio::ENDED => {
                     status.state.store(audio::IDLE, Ordering::SeqCst);
-                    self.next();
+                    self.track_ended();
                     return;
                 }
                 audio::FAILED => {
                     status.state.store(audio::IDLE, Ordering::SeqCst);
                     let message = status.error.lock().unwrap().clone();
-                    self.toast(message);
+                    if !self.retry_stream(&message) {
+                        self.toast(message);
+                    }
                 }
                 _ => {}
             }
@@ -1812,12 +2296,12 @@ impl App {
 
         let mut animating = false;
         if let Some(cover) = self.cover.borrow_mut().as_mut() {
-            if cover.generation == generation {
+            if cover.generation == generation && cover_seen {
                 animating = true;
                 if Instant::now() >= cover.due {
                     let frame = &cover.frames[cover.index];
-                    ui.set_track_art(Image::from_rgba8(frame.pixels.clone()));
-                    ui.set_track_has_art(true);
+                    ui.set_track_motion(Image::from_rgba8(frame.pixels.clone()));
+                    ui.set_track_motion_on(true);
                     cover.due = Instant::now() + frame.delay;
                     cover.index = (cover.index + 1) % cover.frames.len();
                 }
@@ -1842,6 +2326,8 @@ impl App {
             if !playing {
                 return;
             }
+            // It plays, so a later failure deserves a retry again.
+            self.retried.borrow_mut().take();
             *listen = Listen {
                 generation,
                 was_playing: true,
@@ -2127,6 +2613,10 @@ impl App {
             return;
         };
         self.client.set_cookie(Some(&cookie));
+        // Signed in, yt-dlp skips the wait YouTube puts on free accounts.
+        if let Some(resolver) = &self.resolver {
+            resolver.set_cookie(Some(cookie.clone()));
+        }
         if let Err(message) = store::save("session", &cookie) {
             self.toast(format!("Could not save the sign in: {message}"));
         }
@@ -2206,6 +2696,9 @@ impl App {
     fn sign_out(self: &Rc<Self>) {
         store::clear("session");
         self.client.set_cookie(None);
+        if let Some(resolver) = &self.resolver {
+            resolver.set_cookie(None);
+        }
         self.ui.set_signed_in(false);
         self.ui.set_account_name("".into());
     }
@@ -2213,6 +2706,18 @@ impl App {
 
 /// Fisher Yates with a xorshift seeded from the clock. Good enough for a
 /// playlist and it saves a dependency.
+/// The songs listed down a page, such as an album's tracks or an artist's
+/// top songs. Rows of cards are left out.
+fn songs_of(page: &Page) -> Vec<Item> {
+    page.shelves
+        .iter()
+        .filter(|shelf| !shelf.carousel)
+        .flat_map(|shelf| &shelf.items)
+        .filter(|item| item.video_id.is_some())
+        .cloned()
+        .collect()
+}
+
 fn shuffled(mut songs: Vec<Item>) -> Vec<Item> {
     let mut seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2604,7 +3109,12 @@ fn main() -> Result<(), slint::PlatformError> {
     set_font(&ui);
     ui.set_app_version(update::VERSION.trim_start_matches('v').into());
     let client = Arc::new(Client::new());
-    let signed_in = store::load("session").is_some_and(|cookie| client.set_cookie(Some(&cookie)));
+    let session = store::load("session");
+    let signed_in = session.as_deref().is_some_and(|cookie| client.set_cookie(Some(cookie)));
+    let resolver: Option<Arc<dyn resolver::Resolver>> = resolver::default().map(Arc::from);
+    if let (Some(resolver), Some(cookie)) = (&resolver, session.filter(|_| signed_in)) {
+        resolver.set_cookie(Some(cookie));
+    }
 
     let settings = services::Settings::load();
     let app = Rc::new(App {
@@ -2617,7 +3127,7 @@ fn main() -> Result<(), slint::PlatformError> {
         api: pool::Pool::new("api", 3),
         art: pool::Pool::new("art", 2),
         http: innertube::agent(Duration::from_secs(15)),
-        resolver: resolver::default().map(Arc::from),
+        resolver,
         audio: audio::Audio::new(),
         cache: RefCell::default(),
         pending: RefCell::default(),
@@ -2625,6 +3135,11 @@ fn main() -> Result<(), slint::PlatformError> {
         page: RefCell::default(),
         taste: RefCell::new(history::History::load()),
         disk: pool::Pool::new("disk", 1),
+        session_saved: Cell::new(Instant::now()),
+        warm: pool::Pool::new("warm", WARM_AT_ONCE),
+        warming: Rc::default(),
+        retried: RefCell::default(),
+        playing_from: RefCell::default(),
         player: RefCell::default(),
         lyrics: RefCell::default(),
         cover: RefCell::new(None),
@@ -2676,6 +3191,9 @@ fn main() -> Result<(), slint::PlatformError> {
         .suggestion_picked(index as usize));
     on!(on_clear_history, |app| app.clear_history());
     on!(on_item_activated, |app, id| app.activate(id as usize));
+    on!(on_item_rested, |app, id| app.item_rested(id as usize));
+    on!(on_item_play, |app, id| app.item_play(id as usize));
+    on!(on_lyrics_width_changed, |app| app.rewrap_lyrics());
     on!(on_queue_activated, |app, index| app
         .play_index(index as usize));
     on!(on_load_more, |app| app.load_more());
@@ -2685,13 +3203,15 @@ fn main() -> Result<(), slint::PlatformError> {
     on!(on_previous, |app| app.previous());
     on!(on_seek, |app, fraction| {
         let duration = app.player.borrow().duration;
-        app.audio.seek(fraction * duration);
+        app.seek_to(fraction * duration);
     });
     on!(on_set_volume, |app, volume| {
         app.ui.set_volume(volume);
         app.audio.volume(volume * volume);
     });
     on!(on_toggle_like, |app| app.toggle_like());
+    on!(on_toggle_shuffle, |app| app.toggle_shuffle());
+    on!(on_cycle_repeat, |app| app.cycle_repeat());
     on!(on_canvas_unlink, |app| app.canvas_unlink());
     on!(on_queue_moved, |app, from, to| app
         .move_queued(from as usize, to as usize));
@@ -2701,7 +3221,7 @@ fn main() -> Result<(), slint::PlatformError> {
             app.load_lyrics();
         }
     });
-    on!(on_lyrics_seek, |app, ms| app.audio.seek(ms as f32 / 1000.0));
+    on!(on_lyrics_seek, |app, ms| app.seek_to(ms as f32 / 1000.0));
     on!(on_save_cookie, |app, text| app.save_cookie(&text));
     on!(on_sign_out, |app| app.sign_out());
     on!(on_save_services, |app| app.save_services());
@@ -2738,9 +3258,17 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     app.ui
         .set_up_next(ModelRc::from(app.player.borrow().up_next.clone()));
+    app.restore_session();
     app.repair_downloads();
     app.check_update(true);
     let result = app.ui.run();
+    // Save where we are, and wait for it behind any saves still queued.
+    app.save_session();
+    let (done, wait) = std::sync::mpsc::channel();
+    app.disk.run(move || {
+        let _ = done.send(());
+    });
+    let _ = wait.recv_timeout(Duration::from_secs(3));
     APP.with(|slot| slot.borrow_mut().take());
     update::relaunch_if_updated();
     result
@@ -2760,6 +3288,38 @@ mod tests {
         assert_eq!(index_after_move(2, 5, 0), 3);
         // Moving the playing song itself follows it.
         assert_eq!(index_after_move(2, 2, 7), 7);
+    }
+
+    fn songs(ids: &[&str]) -> Vec<Item> {
+        ids.iter()
+            .map(|id| Item {
+                video_id: Some(id.to_string()),
+                ..Item::default()
+            })
+            .collect()
+    }
+
+    fn ids(items: &[Item]) -> Vec<String> {
+        items.iter().filter_map(|i| i.video_id.clone()).collect()
+    }
+
+    #[test]
+    fn shuffle_starts_with_the_picked_song_and_keeps_every_song() {
+        let out = shuffled_from(songs(&["a", "b", "c", "d", "e"]), 2);
+        assert_eq!(out[0].video_id.as_deref(), Some("c"));
+        let mut all = ids(&out);
+        all.sort();
+        assert_eq!(all, ["a", "b", "c", "d", "e"]);
+    }
+
+    #[test]
+    fn unshuffle_restores_the_order_and_follows_the_playing_song() {
+        let original = songs(&["a", "b", "c", "d"]);
+        // Shuffled, with "b" removed and "x" added meanwhile.
+        let queue = songs(&["c", "a", "x", "d"]);
+        let (out, index) = unshuffle(original, &queue, &queue[1]);
+        assert_eq!(ids(&out), ["a", "c", "d", "x"]);
+        assert_eq!(index, 0);
     }
 
     #[test]

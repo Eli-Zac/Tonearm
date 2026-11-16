@@ -81,26 +81,6 @@ pub struct History {
     artists: HashMap<String, (f64, u64)>,
 }
 
-fn kind_name(kind: Kind) -> &'static str {
-    match kind {
-        Kind::Song => "song",
-        Kind::Album => "album",
-        Kind::Artist => "artist",
-        Kind::Playlist => "playlist",
-        Kind::Other => "other",
-    }
-}
-
-fn kind_from(name: &str) -> Kind {
-    match name {
-        "song" => Kind::Song,
-        "album" => Kind::Album,
-        "artist" => Kind::Artist,
-        "playlist" => Kind::Playlist,
-        _ => Kind::Other,
-    }
-}
-
 impl History {
     pub fn load() -> Self {
         let mut history = History::default();
@@ -110,21 +90,8 @@ impl History {
         let Ok(v) = serde_json::from_str::<Value>(&text) else {
             return history;
         };
-        let s = |e: &Value, k: &str| e.get(k).and_then(Value::as_str).map(str::to_string);
         for e in v["entries"].as_array().into_iter().flatten() {
-            let item = Item {
-                kind: kind_from(&s(e, "kind").unwrap_or_default()),
-                title: s(e, "title").unwrap_or_default(),
-                subtitle: s(e, "subtitle").unwrap_or_default(),
-                thumb: s(e, "thumb").unwrap_or_default(),
-                duration: s(e, "duration").unwrap_or_default(),
-                video_id: s(e, "video"),
-                playlist_id: s(e, "playlist"),
-                browse_id: s(e, "browse"),
-                params: s(e, "params"),
-                artists: Item::artists_from_json(e.get("artist_links")),
-                album: Item::album_from_json(e.get("album")),
-            };
+            let item = Item::from_json(e);
             if let Some(key) = key_of(&item) {
                 let score = e["score"].as_f64().unwrap_or(0.0);
                 let at = e["at"].as_u64().unwrap_or(0);
@@ -147,23 +114,10 @@ impl History {
             .entries
             .values()
             .map(|e| {
-                let i = &e.item;
-                let (artist_links, album) = i.links_json();
-                json!({
-                    "kind": kind_name(i.kind),
-                    "title": i.title,
-                    "subtitle": i.subtitle,
-                    "thumb": i.thumb,
-                    "duration": i.duration,
-                    "video": i.video_id,
-                    "playlist": i.playlist_id,
-                    "browse": i.browse_id,
-                    "params": i.params,
-                    "artist_links": artist_links,
-                    "album": album,
-                    "score": e.score,
-                    "at": e.at,
-                })
+                let mut v = e.item.to_json();
+                v["score"] = json!(e.score);
+                v["at"] = json!(e.at);
+                v
             })
             .collect();
         let artists: serde_json::Map<String, Value> = self

@@ -44,7 +44,8 @@ fn parts(version: &str) -> Vec<u64> {
         .collect()
 }
 
-fn newer(candidate: &str, current: &str) -> bool {
+/// Whether version `candidate` comes after `current`.
+pub fn newer(candidate: &str, current: &str) -> bool {
     let (mut a, mut b) = (parts(candidate), parts(current));
     let len = a.len().max(b.len());
     a.resize(len, 0);

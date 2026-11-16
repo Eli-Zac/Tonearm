@@ -51,6 +51,8 @@ pub struct Track {
 
 impl Track {
     /// `output_rate` is the device rate. Zero keeps the track's own rate.
+    /// A source that says it cannot seek opens from the head of the file
+    /// alone. A seekable one has every fragment header read first.
     pub fn open(source: Box<dyn MediaSource>, output_rate: u32) -> Result<Track, String> {
         let stream = MediaSourceStream::new(source, Default::default());
         let mut hint = Hint::new();
@@ -219,7 +221,15 @@ impl Track {
 fn describe(error: Error) -> String {
     match error {
         Error::Unsupported(what) => format!("Cannot decode this track: unsupported {what}"),
-        Error::IoError(e) => format!("Stream failed: {e}"),
+        // Download errors already read well. Others get the same prefix.
+        Error::IoError(e) => {
+            let text = e.to_string();
+            if text.starts_with(crate::audio::STREAM_FAILED) {
+                text
+            } else {
+                format!("{}: {e}", crate::audio::STREAM_FAILED)
+            }
+        }
         e => format!("Cannot decode this track: {e}"),
     }
 }

@@ -73,6 +73,64 @@ impl Item {
         let a = v?;
         Some((a.get(0)?.as_str()?.to_string(), a.get(1)?.as_str()?.to_string()))
     }
+
+    /// The whole item as JSON, for the files that keep items.
+    pub fn to_json(&self) -> Value {
+        let (artist_links, album) = self.links_json();
+        json!({
+            "kind": self.kind.name(),
+            "title": self.title,
+            "subtitle": self.subtitle,
+            "thumb": self.thumb,
+            "duration": self.duration,
+            "video": self.video_id,
+            "playlist": self.playlist_id,
+            "browse": self.browse_id,
+            "params": self.params,
+            "artist_links": artist_links,
+            "album": album,
+        })
+    }
+
+    /// Reads back what `to_json` wrote. Missing fields come back empty.
+    pub fn from_json(e: &Value) -> Item {
+        let s = |k: &str| e.get(k).and_then(Value::as_str).map(str::to_string);
+        Item {
+            kind: Kind::from_name(&s("kind").unwrap_or_default()),
+            title: s("title").unwrap_or_default(),
+            subtitle: s("subtitle").unwrap_or_default(),
+            thumb: s("thumb").unwrap_or_default(),
+            duration: s("duration").unwrap_or_default(),
+            video_id: s("video"),
+            playlist_id: s("playlist"),
+            browse_id: s("browse"),
+            params: s("params"),
+            artists: Item::artists_from_json(e.get("artist_links")),
+            album: Item::album_from_json(e.get("album")),
+        }
+    }
+}
+
+impl Kind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Kind::Song => "song",
+            Kind::Album => "album",
+            Kind::Artist => "artist",
+            Kind::Playlist => "playlist",
+            Kind::Other => "other",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Kind {
+        match name {
+            "song" => Kind::Song,
+            "album" => Kind::Album,
+            "artist" => Kind::Artist,
+            "playlist" => Kind::Playlist,
+            _ => Kind::Other,
+        }
+    }
 }
 
 /// What a detail page is about. Picks its layout.

@@ -280,14 +280,40 @@ impl App {
     /// Updates the downloaded marks on the page and in the queue. Runs
     /// whenever a download finishes or is removed.
     pub fn refresh_downloaded(&self) {
+        self.refresh_download_marks(None);
+    }
+
+    /// Moves the progress ring of one song that is downloading.
+    pub fn show_download_progress(&self, video_id: &str) {
+        self.refresh_download_marks(Some(video_id));
+    }
+
+    /// Updates the download marks on the page and in the queue: saved,
+    /// downloading, and how far. With `only`, just that song's rows.
+    fn refresh_download_marks(&self, only: Option<&str>) {
+        let marks = |item: &Item| {
+            let id = item.video_id.as_deref()?;
+            if only.is_some_and(|o| o != id) {
+                return None;
+            }
+            let saved = crate::offline::is_downloaded(id);
+            let busy = !saved && crate::offline::is_downloading(id);
+            let progress = if busy { crate::offline::progress(id) } else { 0.0 };
+            Some((saved, busy, progress))
+        };
+        let apply = |data: &mut crate::ItemData, (saved, busy, progress): (bool, bool, f32)| {
+            let changed = data.downloaded != saved
+                || data.downloading != busy
+                || (data.progress - progress).abs() > f32::EPSILON;
+            data.downloaded = saved;
+            data.downloading = busy;
+            data.progress = progress;
+            changed
+        };
         let mark = |model: &VecModel<crate::ItemData>, index: usize, item: &Item| {
-            let saved = item
-                .video_id
-                .as_deref()
-                .is_some_and(crate::offline::is_downloaded);
+            let Some(m) = marks(item) else { return };
             if let Some(mut data) = model.row_data(index) {
-                if data.downloaded != saved {
-                    data.downloaded = saved;
+                if apply(&mut data, m) {
                     model.set_row_data(index, data);
                 }
             }
@@ -297,13 +323,9 @@ impl App {
             for (item, place) in page.items.iter().zip(&page.places) {
                 match place {
                     Place::Row(row) => {
-                        let saved = item
-                            .video_id
-                            .as_deref()
-                            .is_some_and(crate::offline::is_downloaded);
+                        let Some(m) = marks(item) else { continue };
                         if let Some(mut data) = page.rows.row_data(*row) {
-                            if data.item.downloaded != saved {
-                                data.item.downloaded = saved;
+                            if apply(&mut data.item, m) {
                                 page.rows.set_row_data(*row, data);
                             }
                         }

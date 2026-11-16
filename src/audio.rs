@@ -14,6 +14,20 @@ use std::time::Duration;
 
 const CHUNK: u64 = 512 * 1024;
 
+/// How every download error starts, so the player can tell them from
+/// broken files and try a fresh link.
+pub const STREAM_FAILED: &str = "Stream failed";
+
+/// A download error as people can read it. Never the link itself: it is
+/// long, says nothing useful, and is tied to this computer.
+fn stream_error(error: ureq::Error) -> String {
+    match error {
+        ureq::Error::Status(403, _) => format!("{STREAM_FAILED}: YouTube refused the link (403)"),
+        ureq::Error::Status(code, _) => format!("{STREAM_FAILED}: YouTube answered {code}"),
+        ureq::Error::Transport(t) => format!("{STREAM_FAILED}: {}", t.kind()),
+    }
+}
+
 pub const IDLE: u32 = 0;
 pub const LOADING: u32 = 1;
 pub const PLAYING: u32 = 2;
@@ -130,11 +144,21 @@ fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
                     } => {
                         let source = HttpSource::open(url, headers, cache_as);
                         let shared = source.shared.clone();
-                        crate::decode::Track::open(Box::new(source), *rate).map_err(|e| {
-                            // A failed download looks like a broken file to
-                            // the decoder. Report the download error instead.
-                            shared.buffer.lock().unwrap().error.clone().unwrap_or(e)
-                        })
+                        let spare = source.reader();
+                        // Opening reads only the head of the file, so playback
+                        // starts after the first few kilobytes arrive.
+                        shared.opening.store(true, Ordering::SeqCst);
+                        let first = crate::decode::Track::open(Box::new(source), *rate);
+                        shared.opening.store(false, Ordering::SeqCst);
+                        // A file with its index at the end cannot open from the
+                        // head. Try again the slow way, reading the whole file.
+                        first
+                            .or_else(|_| crate::decode::Track::open(Box::new(spare), *rate))
+                            .map_err(|e| {
+                                // A failed download looks like a broken file
+                                // to the decoder. Report the download error.
+                                shared.buffer.lock().unwrap().error.clone().unwrap_or(e)
+                            })
                     }
                     Input::File(path) => {
                         let opened = std::fs::File::open(&path)
@@ -236,11 +260,39 @@ struct Shared {
     buffer: Mutex<Buffer>,
     ready: Condvar,
     cancelled: AtomicBool,
+    /// Set while the decoder opens the track. The source then says it
+    /// cannot seek, so symphonia's MP4 reader stops at the first fragment.
+    /// Otherwise it walks every fragment header in the file before it
+    /// returns, and that waits for the whole download.
+    opening: AtomicBool,
+    /// Told the bytes so far and the whole size as the download goes.
+    progress: Option<Box<dyn Fn(u64, u64) + Send + Sync>>,
+}
+
+/// Stops the download when the last reader of it goes away.
+struct Cancel(Arc<Shared>);
+
+impl Drop for Cancel {
+    fn drop(&mut self) {
+        self.0.cancelled.store(true, Ordering::SeqCst);
+    }
 }
 
 /// Fetches a whole track into memory. Blocks, so run it on a worker.
 pub fn fetch_all(url: &str, headers: &[(String, String)]) -> Result<Vec<u8>, String> {
-    let shared = Shared::default();
+    fetch_all_with(url, headers, None)
+}
+
+/// `fetch_all`, telling `progress` the bytes so far and the whole size.
+pub fn fetch_all_with(
+    url: &str,
+    headers: &[(String, String)],
+    progress: Option<Box<dyn Fn(u64, u64) + Send + Sync>>,
+) -> Result<Vec<u8>, String> {
+    let shared = Shared {
+        progress,
+        ..Shared::default()
+    };
     download(url, headers, &shared)?;
     let buffer = shared.buffer.into_inner().unwrap();
     if buffer.data.is_empty() || buffer.total.is_some_and(|t| t != buffer.data.len() as u64) {
@@ -254,6 +306,7 @@ pub fn fetch_all(url: &str, headers: &[(String, String)]) -> Result<Vec<u8>, Str
 pub struct HttpSource {
     shared: Arc<Shared>,
     position: u64,
+    _cancel: Arc<Cancel>,
 }
 
 impl HttpSource {
@@ -281,8 +334,18 @@ impl HttpSource {
             })
             .expect("cannot start the download thread");
         HttpSource {
+            _cancel: Arc::new(Cancel(shared.clone())),
             shared,
             position: 0,
+        }
+    }
+
+    /// A second reader over the same download, from the start.
+    fn reader(&self) -> Self {
+        HttpSource {
+            shared: self.shared.clone(),
+            position: 0,
+            _cancel: self._cancel.clone(),
         }
     }
 }
@@ -310,7 +373,7 @@ fn download(url: &str, headers: &[(String, String)], shared: &Shared) -> Result<
         let response = match request.call() {
             Ok(r) => r,
             Err(ureq::Error::Status(416, _)) => return Ok(()),
-            Err(e) => return Err(format!("Stream failed: {e}")),
+            Err(e) => return Err(stream_error(e)),
         };
         let total = response
             .header("Content-Range")
@@ -328,7 +391,7 @@ fn download(url: &str, headers: &[(String, String)], shared: &Shared) -> Result<
         loop {
             let n = reader
                 .read(&mut chunk)
-                .map_err(|e| format!("Stream failed: {e}"))?;
+                .map_err(|e| format!("{STREAM_FAILED}: the connection dropped ({})", e.kind()))?;
             if n == 0 || shared.cancelled.load(Ordering::SeqCst) {
                 break;
             }
@@ -341,7 +404,12 @@ fn download(url: &str, headers: &[(String, String)], shared: &Shared) -> Result<
             }
             buffer.data.extend_from_slice(&chunk[..n]);
             received += n as u64;
+            let (so_far, whole) = (buffer.data.len() as u64, buffer.total);
+            drop(buffer);
             shared.ready.notify_all();
+            if let (Some(report), Some(whole)) = (&shared.progress, whole) {
+                report(so_far, whole);
+            }
         }
         offset += received;
         if whole_file || received == 0 || total.is_some_and(|t| offset >= t) {
@@ -399,7 +467,7 @@ impl Seek for HttpSource {
 
 impl symphonia::core::io::MediaSource for HttpSource {
     fn is_seekable(&self) -> bool {
-        true
+        !self.shared.opening.load(Ordering::SeqCst)
     }
 
     /// Waits for the first response, which carries the full length.
@@ -409,11 +477,5 @@ impl symphonia::core::io::MediaSource for HttpSource {
             buffer = self.shared.ready.wait(buffer).unwrap();
         }
         buffer.total.or(Some(buffer.data.len() as u64))
-    }
-}
-
-impl Drop for HttpSource {
-    fn drop(&mut self) {
-        self.shared.cancelled.store(true, Ordering::SeqCst);
     }
 }

@@ -95,6 +95,25 @@ pub fn fetch_wide(http: &ureq::Agent, url: &str, width: u32) -> Option<Pixels> {
     ))
 }
 
+/// `round_corners` for raw RGBA bytes, `side` pixels square. Only the four
+/// corner squares are touched, so it is cheap enough for every video frame.
+pub fn round_corners_square(bytes: &mut [u8], side: u32, radius: f32) {
+    let r = radius.ceil() as u32;
+    let s = side as f32;
+    for y in (0..r).chain(side.saturating_sub(r)..side) {
+        for x in (0..r).chain(side.saturating_sub(r)..side) {
+            let cx = (x as f32 + 0.5).clamp(radius, s - radius);
+            let cy = (y as f32 + 0.5).clamp(radius, s - radius);
+            let distance = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
+            let cover = (radius - distance + 0.5).clamp(0.0, 1.0);
+            if cover < 1.0 {
+                let i = (y * side + x) as usize * 4 + 3;
+                bytes[i] = (bytes[i] as f32 * cover) as u8;
+            }
+        }
+    }
+}
+
 /// Rounds the corners by fading alpha. The software renderer cannot clip
 /// an image to a rounded shape, so we bake the shape into the pixels.
 pub fn round_corners(rgba: &mut image::RgbaImage, radius: f32) {

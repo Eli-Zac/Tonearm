@@ -41,6 +41,8 @@ struct State {
     downloads: HashMap<String, Saved>,
     /// Being downloaded right now.
     busy: HashSet<String>,
+    /// How far each running download has got, from 0 to 1.
+    progress: HashMap<String, f32>,
     cache_mb: Option<u64>,
 }
 
@@ -127,6 +129,11 @@ pub fn local_file(video_id: &str) -> Option<PathBuf> {
 
 pub fn is_downloaded(video_id: &str) -> bool {
     state().downloads.contains_key(video_id)
+}
+
+/// How far a download has got, from 0 to 1. Zero while it waits its turn.
+pub fn progress(video_id: &str) -> f32 {
+    state().progress.get(video_id).copied().unwrap_or(0.0)
 }
 
 pub fn is_downloading(video_id: &str) -> bool {
@@ -439,7 +446,21 @@ pub fn download(
         let resolver = resolver.ok_or("Playback is not set up yet")?;
         let stream = resolver.resolve(video_id)?;
         seconds = stream.duration;
-        let bytes = crate::audio::fetch_all(&stream.url, &stream.headers)?;
+        // Shows on the song's row, every couple of percent.
+        let id = video_id.to_string();
+        let shown = Mutex::new(0.0f32);
+        let report = move |so_far: u64, whole: u64| {
+            let done = (so_far as f32 / whole.max(1) as f32).min(1.0);
+            let mut last = shown.lock().unwrap();
+            if done - *last >= 0.02 || done >= 1.0 {
+                *last = done;
+                state().progress.insert(id.clone(), done);
+                let id = id.clone();
+                crate::on_ui(move |app| app.show_download_progress(&id));
+            }
+        };
+        let bytes =
+            crate::audio::fetch_all_with(&stream.url, &stream.headers, Some(Box::new(report)))?;
         write_atomic(&target, &bytes).map_err(|e| format!("Could not save the song: {e}"))?;
     }
     save_cover(http, item, video_id);
@@ -551,7 +572,11 @@ impl crate::App {
             workers().lock().unwrap().run(move || {
                 let result = download(resolver.as_deref(), &http, &item);
                 let video_id = item.video_id.clone().unwrap_or_default();
-                state().busy.remove(&video_id);
+                {
+                    let mut state = state();
+                    state.busy.remove(&video_id);
+                    state.progress.remove(&video_id);
+                }
                 crate::on_ui(move |app| {
                     match result {
                         Ok(()) if total == 1 => app.toast(format!("Downloaded {}", item.title)),

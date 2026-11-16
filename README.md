@@ -160,4 +160,5 @@ A track scrobbles after it has played for half its length or four minutes.
 Slint is free for desktop apps under its royalty free licence, which asks
 for attribution, or under GPLv3. Pick the one that fits before you ship.
 
-The icons are from Lucide, under the ISC licence in `ui/icons-LICENSE.txt`.
+The icons are from Phosphor (phosphoricons.com), under the MIT licence in
+`ui/icons-LICENSE.txt`.
