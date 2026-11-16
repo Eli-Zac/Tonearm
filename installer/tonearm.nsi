@@ -38,6 +38,7 @@ VIAddVersionKey "ProductName" "${NAME}"
 VIAddVersionKey "FileDescription" "${NAME} installer"
 VIAddVersionKey "FileVersion" "${VERSION}"
 VIAddVersionKey "ProductVersion" "${VERSION}"
+VIAddVersionKey "LegalCopyright" "Free software under the GNU GPL v3"
 
 !define MUI_ICON "..\assets\tonearm.ico"
 !define MUI_UNICON "..\assets\tonearm.ico"
@@ -66,19 +67,23 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 ; Waits up to about 15 seconds for a running Tonearm to let go of its exe.
 ; The updater closes the app just before it starts the installer.
 !macro WaitForExe path
+  ; ${__LINE__} changes on every line of a macro, so take one id for all the
+  ; labels of this use of it.
+  !define WFE_ID ${__LINE__}
   StrCpy $0 0
-  wait_loop_${__LINE__}:
-    IfFileExists "${path}" 0 wait_done_${__LINE__}
+  wait_loop_${WFE_ID}:
+    IfFileExists "${path}" 0 wait_done_${WFE_ID}
     ClearErrors
     FileOpen $1 "${path}" a
-    IfErrors 0 wait_open_${__LINE__}
+    IfErrors 0 wait_open_${WFE_ID}
     IntOp $0 $0 + 1
-    IntCmp $0 30 wait_done_${__LINE__}
+    IntCmp $0 30 wait_done_${WFE_ID}
     Sleep 500
-    Goto wait_loop_${__LINE__}
-  wait_open_${__LINE__}:
+    Goto wait_loop_${WFE_ID}
+  wait_open_${WFE_ID}:
     FileClose $1
-  wait_done_${__LINE__}:
+  wait_done_${WFE_ID}:
+  !undef WFE_ID
 !macroend
 
 Section "Tonearm"
