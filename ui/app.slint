@@ -1087,6 +1087,29 @@ component SettingRow inherits HorizontalLayout {
     }
 }
 
+// Pulses in place of a cover that is still on its way, like the skeletons.
+// A cover that never comes (a dead link, or a song with none) stops it after
+// a while, so an idle app stays idle.
+component ArtPending inherits Rectangle {
+    in property <bool> waiting;
+    property <bool> gave-up;
+    changed waiting => {
+        if root.waiting {
+            root.gave-up = false;
+        }
+    }
+    Timer {
+        interval: 8s;
+        running: root.waiting && !root.gave-up;
+        triggered => { root.gave-up = true; }
+    }
+    if root.waiting && !root.gave-up: Bone {
+        width: 100%;
+        height: 100%;
+        corner: 0;
+    }
+}
+
 component Art inherits Rectangle {
     in property <image> source;
     in property <bool> has;
@@ -1098,6 +1121,9 @@ component Art inherits Rectangle {
     background: has || motion-t > 0 ? transparent : #232329;
     border-radius: round ? self.width / 2 : corner;
     clip: true;
+    ArtPending {
+        waiting: !root.has && root.motion-t <= 0;
+    }
     if has: Image {
         source: root.source;
         width: 100%;
@@ -3727,6 +3753,9 @@ export component AppWindow inherits Window {
                     // The moving cover stands in for it while Now playing
                     // expands or comes back.
                     opacity: root.expand-t > 0 ? 0 : 1;
+                    ArtPending {
+                        waiting: !root.track-has-art && root.motion-t <= 0;
+                    }
                     if root.track-has-art: Image {
                         width: 100%;
                         height: 100%;
@@ -3995,6 +4024,9 @@ export component AppWindow inherits Window {
             clip: true;
             // Only seen while there is no cover. It fades as the cover grows.
             background: root.panel-color.transparentize(parent.t);
+            ArtPending {
+                waiting: !root.track-has-art && root.motion-t <= 0;
+            }
             if root.track-has-art: Image {
                 width: 100%;
                 height: 100%;
