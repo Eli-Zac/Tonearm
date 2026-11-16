@@ -458,6 +458,43 @@ pub fn download(
     Ok(())
 }
 
+/// Albums with downloads saved before album tracks named their artist.
+/// Those songs carry a play count where the artist belongs.
+fn uncredited_albums() -> Vec<String> {
+    let state = state();
+    let mut albums: Vec<String> = state
+        .downloads
+        .values()
+        .filter(|s| s.item.artists.is_empty())
+        .filter_map(|s| s.item.album.as_ref().map(|(_, id)| id.clone()))
+        .filter(|id| id.starts_with("MPREb_"))
+        .collect();
+    albums.sort();
+    albums.dedup();
+    albums
+}
+
+/// Takes the artist and subtitle of fresh tracks into saved songs that
+/// have no artist. True when any changed.
+fn credit(tracks: &[Item]) -> bool {
+    let mut state = state();
+    let mut changed = false;
+    for track in tracks.iter().filter(|t| !t.artists.is_empty()) {
+        let Some(saved) = track.video_id.as_deref().and_then(|id| state.downloads.get_mut(id)) else {
+            continue;
+        };
+        if saved.item.artists.is_empty() {
+            saved.item.artists = track.artists.clone();
+            saved.item.subtitle = track.subtitle.clone();
+            changed = true;
+        }
+    }
+    if changed {
+        save_index(&state);
+    }
+    changed
+}
+
 fn remove(video_id: &str) {
     let mut state = state();
     if state.downloads.remove(video_id).is_none() {
@@ -528,6 +565,29 @@ impl crate::App {
                 });
             });
         }
+    }
+
+    /// Fills in the artist of downloads saved without one, from their
+    /// album pages. Quiet, and a no-op once every song is credited.
+    pub fn repair_downloads(self: &Rc<Self>) {
+        let albums = uncredited_albums();
+        if albums.is_empty() {
+            return;
+        }
+        let client = self.client.clone();
+        self.api.run(move || {
+            let mut changed = false;
+            for id in albums {
+                if let Ok(page) = client.browse(&id, None) {
+                    let tracks: Vec<Item> =
+                        page.shelves.into_iter().flat_map(|s| s.items).collect();
+                    changed |= credit(&tracks);
+                }
+            }
+            if changed {
+                crate::on_ui(|app| app.downloads_changed());
+            }
+        });
     }
 
     /// Downloads a song, or removes it when it is already downloaded.

@@ -47,6 +47,39 @@ fn cookie_value<'a>(cookie: &'a str, name: &str) -> Option<&'a str> {
 }
 
 /// Accepts what people paste: the raw value or a whole `Cookie: ...` line.
+/// A music video rather than a song: search labels it, and its subtitle
+/// counts views where a song names its album or plays.
+pub fn is_video(item: &Item) -> bool {
+    item.video_id.is_some()
+        && item
+            .subtitle
+            .split(" • ")
+            .any(|p| p == "Video" || p.ends_with(" views"))
+}
+
+/// A title with what marks it as a video taken off, lowercased:
+/// "Wisp - If not winter (Official Lyric Video)" becomes "if not winter".
+fn bare_title(title: &str, artist: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0;
+    for c in title.chars() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = (depth - 1).max(0),
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    let mut out = out.trim().to_lowercase();
+    let artist = artist.to_lowercase();
+    for sep in [" - ", " – ", " — "] {
+        if let Some(rest) = out.strip_prefix(&format!("{artist}{sep}")) {
+            out = rest.to_string();
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 pub fn normalize_cookie(raw: &str) -> Option<String> {
     let line = raw.lines().map(str::trim).find(|l| l.contains("SAPISID"))?;
     let line = line
@@ -144,11 +177,27 @@ impl Client {
             .filter(|h| matches!(h.kind, PageKind::Album | PageKind::Single))
             .filter(|_| id.starts_with("MPREb_"))
             .map(|h| (h.title.clone(), id.to_string()));
+        // Nor their artist: the column holds a play count instead. Credit
+        // the album's artist, or the player and scrobbles show "2M plays".
+        let artist = page
+            .header
+            .as_ref()
+            .filter(|h| !h.byline.is_empty())
+            .map(|h| (h.byline.clone(), h.byline_browse_id.clone()));
         if let Some(album) = album {
             let tracks = page.shelves.iter_mut().filter(|s| !s.carousel);
             for item in tracks.flat_map(|s| s.items.iter_mut()) {
-                if item.album.is_none() && item.video_id.is_some() {
+                if item.video_id.is_none() {
+                    continue;
+                }
+                if item.album.is_none() {
                     item.album = Some(album.clone());
+                }
+                if item.artists.is_empty() {
+                    if let Some(artist) = &artist {
+                        item.artists = vec![artist.clone()];
+                        item.subtitle = format!("{} • {}", artist.0, album.0);
+                    }
                 }
             }
         }
@@ -159,6 +208,33 @@ impl Client {
         Ok(parse::page(
             &self.post("browse", json!({"continuation": token}))?,
         ))
+    }
+
+    /// The song a music video is the video of, so a video started from a
+    /// search or a radio plays the album track, and its radio is songs.
+    /// None when the item is no video, or no song clearly matches.
+    pub fn song_for(&self, item: &Item) -> Option<Item> {
+        if !is_video(item) {
+            return None;
+        }
+        let artist = item
+            .artists
+            .first()
+            .map(|(name, _)| name.clone())
+            .or_else(|| item.subtitle.split(" • ").find(|p| *p != "Video").map(str::to_string))?;
+        let title = bare_title(&item.title, &artist);
+        if title.is_empty() {
+            return None;
+        }
+        let page = self.search(&format!("{title} {artist}")).ok()?;
+        page.shelves
+            .into_iter()
+            .flat_map(|s| s.items)
+            .filter(|i| i.kind == Kind::Song && i.video_id.is_some() && !is_video(i))
+            .find(|i| {
+                bare_title(&i.title, &artist) == title
+                    && i.artists.iter().any(|(n, _)| n.eq_ignore_ascii_case(&artist))
+            })
     }
 
     pub fn search(&self, query: &str) -> Result<Page, String> {
@@ -258,5 +334,33 @@ impl Client {
         Ok(parse::account_name(
             &self.post("account/account_menu", json!({}))?,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bare_titles_drop_video_marks() {
+        assert_eq!(bare_title("If not winter (Official Lyric Video)", "Wisp"), "if not winter");
+        assert_eq!(bare_title("Wisp - Your face [Official Video]", "Wisp"), "your face");
+        assert_eq!(bare_title("Your face", "Wisp"), "your face");
+    }
+
+    #[test]
+    fn videos_are_told_from_songs() {
+        let video = Item {
+            video_id: Some("a".into()),
+            subtitle: "Wisp • 531K views • 6.2K likes".into(),
+            ..Item::default()
+        };
+        let song = Item {
+            video_id: Some("b".into()),
+            subtitle: "Wisp • 2.7M plays".into(),
+            ..Item::default()
+        };
+        assert!(is_video(&video));
+        assert!(!is_video(&song));
     }
 }

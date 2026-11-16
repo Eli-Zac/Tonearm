@@ -42,9 +42,11 @@ pub struct Settings {
     pub lastfm_user: String,
     pub spotify_id: String,
     pub spotify_secret: String,
+    /// The sp_dc cookie of a Spotify web sign in. Only Canvas uses it.
+    pub spotify_cookie: String,
 }
 
-const FIELDS: [&str; 9] = [
+const FIELDS: [&str; 10] = [
     "discord_on",
     "discord_app",
     "discord_status",
@@ -54,6 +56,7 @@ const FIELDS: [&str; 9] = [
     "lastfm_user",
     "spotify_id",
     "spotify_secret",
+    "spotify_cookie",
 ];
 
 impl Settings {
@@ -78,7 +81,7 @@ impl Settings {
         }
     }
 
-    fn slots(&mut self) -> [&mut String; 9] {
+    fn slots(&mut self) -> [&mut String; 10] {
         [
             &mut self.discord_on,
             &mut self.discord_app,
@@ -89,6 +92,7 @@ impl Settings {
             &mut self.lastfm_user,
             &mut self.spotify_id,
             &mut self.spotify_secret,
+            &mut self.spotify_cookie,
         ]
     }
 

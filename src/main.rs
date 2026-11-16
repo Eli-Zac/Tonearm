@@ -1,6 +1,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod audio;
+mod canvas;
 mod decode;
 mod detail;
 mod history;
@@ -126,6 +127,9 @@ struct Player {
     duration: f32,
     liked: bool,
     model: Rc<VecModel<ItemData>>,
+    /// The rows of `model` after the playing one: the queue panel's
+    /// "Next up". One model for the app's life, so the list keeps its place.
+    up_next: Rc<VecModel<ItemData>>,
     extending: bool,
 }
 
@@ -175,6 +179,8 @@ struct App {
     player: RefCell<Player>,
     lyrics: RefCell<LyricsState>,
     cover: RefCell<Option<Cover>>,
+    /// The Spotify Canvas looping as the cover, with the track it is for.
+    canvas: RefCell<Option<(u64, canvas::Clip)>>,
     clock: Cell<(u64, Instant)>,
     timer: Timer,
     fast: Cell<bool>,
@@ -239,6 +245,27 @@ fn clock_text(seconds: f32) -> SharedString {
 
 /// Search results put the kind first and the length last in the subtitle:
 /// "Song • Daft Punk • Discovery • 5:21". Returns the artist and the length.
+fn canvas_keys(s: &services::Settings) -> canvas::Keys {
+    canvas::Keys {
+        cookie: s.spotify_cookie.clone(),
+        client_id: s.spotify_id.clone(),
+        client_secret: s.spotify_secret.clone(),
+    }
+}
+
+/// Where the song at `index` sits after the song at `from` moves to `to`.
+fn index_after_move(index: usize, from: usize, to: usize) -> usize {
+    if from == index {
+        to
+    } else if from < index && to >= index {
+        index - 1
+    } else if from > index && to <= index {
+        index + 1
+    } else {
+        index
+    }
+}
+
 fn credits(item: &Item) -> (String, f32) {
     let (artist, _, seconds) = credits_with_album(item);
     (artist, seconds)
@@ -249,8 +276,19 @@ fn credits(item: &Item) -> (String, f32) {
 fn credits_with_album(item: &Item) -> (String, String, f32) {
     let parts: Vec<&str> = item.subtitle.split(" • ").map(str::trim).collect();
     let labels = ["Song", "Video", "Single", "Album", "EP", "Episode"];
+    let is_count = |p: &str| [" views", " plays", " likes"].iter().any(|w| p.ends_with(w));
     let mut names = parts.iter().filter(|p| !labels.contains(*p)).copied();
-    let artist = names.next().unwrap_or("").to_string();
+    // A play count in the artist's place is no artist. Fall back to the
+    // linked artists, which the subtitle does not always carry.
+    let artist = match names.next() {
+        Some(p) if !is_count(p) => p.to_string(),
+        _ => item
+            .artists
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+    };
     let album = names
         .next()
         .filter(|p| {
@@ -426,6 +464,9 @@ impl App {
                 let player = self.player.borrow();
                 if player.queue_generation == generation {
                     set(&player.model, index);
+                    if index > player.index {
+                        set(&player.up_next, index - player.index - 1);
+                    }
                 }
             }
             Target::Suggest { generation, row } => {
@@ -440,7 +481,10 @@ impl App {
                 }
             }
             Target::Track { generation } => {
-                if self.player.borrow().generation == generation && self.cover.borrow().is_none() {
+                if self.player.borrow().generation == generation
+                    && self.cover.borrow().is_none()
+                    && self.canvas.borrow().is_none()
+                {
                     self.set_tint(&image);
                     self.ui.set_track_art(image);
                     self.ui.set_track_has_art(true);
@@ -892,7 +936,15 @@ impl App {
             // taste. Songs are counted when they play.
             self.remember(&item, 0.5);
         }
-        if item.video_id.is_some() {
+        if innertube::is_video(&item) {
+            // Songs over videos: play the album track the video is of, so
+            // its radio is songs too. The video plays when there is none.
+            let client = self.client.clone();
+            self.api.run(move || {
+                let song = client.song_for(&item).unwrap_or(item);
+                on_ui(move |app| app.set_queue(vec![song], 0));
+            });
+        } else if item.video_id.is_some() {
             self.set_queue(vec![item], 0);
         } else if let Some(browse_id) = item.browse_id {
             self.open(
@@ -1193,28 +1245,61 @@ impl App {
             player.index + 1 == player.queue.len()
         };
         self.player.borrow_mut().queue.extend(fresh);
+        self.sync_up_next();
         if was_last {
             self.prefetch_next();
         }
     }
 
+    /// Copies the rows after the playing one into "Next up".
+    fn sync_up_next(&self) {
+        let player = self.player.borrow();
+        let rows: Vec<ItemData> = (player.index + 1..player.model.row_count())
+            .filter_map(|i| player.model.row_data(i))
+            .collect();
+        player.up_next.set_vec(rows);
+    }
+
+    /// Moves a queued song from one place to another, by queue position.
+    /// The playing song stays playing wherever it ends up.
+    fn move_queued(self: &Rc<Self>, from: usize, to: usize) {
+        {
+            let mut player = self.player.borrow_mut();
+            let len = player.queue.len();
+            if from >= len || to >= len || from == to {
+                return;
+            }
+            let item = player.queue.remove(from);
+            player.queue.insert(to, item);
+            player.index = index_after_move(player.index, from, to);
+        }
+        self.rebuild_queue_model();
+        self.prefetch_next();
+    }
+
     /// Asks for the radio of the last song and appends it, so music keeps
     /// going when the queue runs out.
     fn extend_with_radio(self: &Rc<Self>) {
-        let (generation, video_id) = {
+        let (generation, last) = {
             let mut player = self.player.borrow_mut();
             if player.extending {
                 return;
             }
-            let Some(id) = player.queue.last().and_then(|i| i.video_id.clone()) else {
+            let Some(last) = player.queue.last().filter(|i| i.video_id.is_some()).cloned() else {
                 return;
             };
             player.extending = true;
-            (player.queue_generation, id)
+            (player.queue_generation, last)
         };
         let client = self.client.clone();
         self.api.run(move || {
-            let result = client.queue(Some(&video_id), None);
+            // A video's radio is videos. Seed it with the song instead.
+            let seed = client
+                .song_for(&last)
+                .and_then(|s| s.video_id)
+                .or(last.video_id)
+                .unwrap_or_default();
+            let result = client.queue(Some(&seed), None);
             on_ui(move |app| {
                 if app.player.borrow().queue_generation != generation {
                     return;
@@ -1247,20 +1332,24 @@ impl App {
         ui.set_track_artist(artist.as_str().into());
         self.show_track_links(&item, &artist);
         ui.set_queue_index(index as i32);
+        self.sync_up_next();
         ui.set_liked(false);
         ui.set_progress(0.0);
         ui.set_position_text(clock_text(0.0));
         ui.set_duration_text(clock_text(seconds));
         ui.set_playing(false);
         *self.cover.borrow_mut() = None;
-        let art = self.thumb(&item.thumb, 128, false, Target::Track { generation });
+        // Large enough for the Now playing panel. The player scales it down.
+        let art = self.thumb(&item.thumb, 544, false, Target::Track { generation });
         if let Some(image) = &art {
             self.set_tint(image);
         }
         ui.set_track_has_art(art.is_some());
         ui.set_track_art(art.unwrap_or_default());
         self.load_cover(&item.title, &artist, generation);
-        if ui.get_panel() == 2 {
+        self.stop_canvas();
+        self.load_canvas(&item.title, &artist, generation);
+        if matches!(ui.get_panel(), 2 | 3) {
             self.load_lyrics();
         }
         #[cfg(windows)]
@@ -1358,6 +1447,79 @@ impl App {
         });
     }
 
+    /// Looks for the track's Spotify Canvas and, when there is one, loops it
+    /// in place of the cover. The still cover stays when there is none.
+    fn load_canvas(self: &Rc<Self>, title: &str, artist: &str, generation: u64) {
+        let keys = canvas_keys(&self.settings.borrow());
+        if keys.cookie.is_empty() || title.is_empty() {
+            return;
+        }
+        let (http, title, artist) = (self.http.clone(), title.to_string(), artist.to_string());
+        self.api.run(move || {
+            let found = canvas::fetch(&http, &keys, &title, &artist);
+            on_ui(move |app| {
+                if app.player.borrow().generation != generation {
+                    return;
+                }
+                let path = match found {
+                    Ok(Some(path)) => path,
+                    Ok(None) => return,
+                    Err(message) => return eprintln!("canvas: {message}"),
+                };
+                let clip = canvas::Clip::play(
+                    path,
+                    move |pixels| {
+                        on_ui(move |app| {
+                            let live = app
+                                .canvas
+                                .borrow()
+                                .as_ref()
+                                .is_some_and(|(g, _)| *g == generation);
+                            if live {
+                                app.ui.set_track_art(Image::from_rgba8(pixels));
+                                app.ui.set_track_has_art(true);
+                            }
+                        })
+                    },
+                    move |message| {
+                        eprintln!("canvas: {message}");
+                        // Back to the still cover.
+                        on_ui(move |app| {
+                            let ours = app
+                                .canvas
+                                .borrow()
+                                .as_ref()
+                                .is_some_and(|(g, _)| *g == generation);
+                            if ours {
+                                app.stop_canvas();
+                                app.restore_still_cover();
+                            }
+                        });
+                    },
+                );
+                *app.canvas.borrow_mut() = Some((generation, clip));
+            });
+        });
+    }
+
+    fn stop_canvas(&self) {
+        // Dropping the clip stops its thread.
+        self.canvas.borrow_mut().take();
+    }
+
+    /// Shows the playing track's still cover again.
+    fn restore_still_cover(self: &Rc<Self>) {
+        let (thumb, generation) = {
+            let player = self.player.borrow();
+            let Some(item) = player.queue.get(player.index) else { return };
+            (item.thumb.clone(), player.generation)
+        };
+        if let Some(image) = self.thumb(&thumb, 544, false, Target::Track { generation }) {
+            self.ui.set_track_art(image);
+            self.ui.set_track_has_art(true);
+        }
+    }
+
     #[cfg(windows)]
     fn update_keys(self: &Rc<Self>, title: &str, artist: &str, seconds: f32, thumb: &str) {
         let mut keys = self.keys.borrow_mut();
@@ -1448,6 +1610,7 @@ impl App {
             };
         }
         self.ui.set_lyrics(ModelRc::default());
+        self.ui.set_lyrics_preview(ModelRc::default());
         self.ui.set_lyrics_state(1);
         self.ui.set_lyrics_synced(false);
         let client = self.client.clone();
@@ -1526,6 +1689,10 @@ impl App {
             }
         }
         state.synced = found.synced;
+        // Whole lines, by line number, for the Now playing preview. It wraps
+        // them itself and scrolls to `lyrics_line`.
+        let texts: Vec<SharedString> = found.lines.iter().map(|l| l.text.as_str().into()).collect();
+        self.ui.set_lyrics_preview(ModelRc::new(VecModel::from(texts)));
         self.ui.set_lyrics(ModelRc::new(rows));
         self.ui.set_lyrics_synced(found.synced);
         self.ui.set_lyrics_source(found.source.into());
@@ -1552,6 +1719,12 @@ impl App {
         self.repaint_after_restore();
         let status = &self.audio.status;
         let state = status.state.load(Ordering::SeqCst);
+        // The Canvas holds its frame while the music is paused or no one
+        // can see it, and decodes nothing meanwhile.
+        if let Some((_, clip)) = self.canvas.borrow().as_ref() {
+            clip.paused
+                .store(self.minimized.get() || state != audio::PLAYING, Ordering::SeqCst);
+        }
         let (generation, duration) = {
             let player = self.player.borrow();
             (player.generation, player.duration)
@@ -1611,7 +1784,7 @@ impl App {
             });
         }
 
-        let lyrics_live = ui.get_panel() == 2 && self.lyrics.borrow().synced;
+        let lyrics_live = matches!(ui.get_panel(), 2 | 3) && self.lyrics.borrow().synced;
         if lyrics_live {
             ui.set_lyrics_time(time as i32);
             let lyrics = self.lyrics.borrow();
@@ -1738,6 +1911,9 @@ impl App {
         self.ui.set_lastfm_user(s.lastfm_user.as_str().into());
         self.ui
             .set_spotify_linked(!s.spotify_id.is_empty() && !s.spotify_secret.is_empty());
+        self.ui
+            .set_svc_spotify_cookie(s.spotify_cookie.as_str().into());
+        self.ui.set_canvas_linked(!s.spotify_cookie.is_empty());
         self.ui.set_discord_on(!s.discord_id().is_empty());
         self.ui.set_discord_status(match s.discord_status.as_str() {
             "song" => 1,
@@ -1779,8 +1955,21 @@ impl App {
             s.discord_app = self.ui.get_svc_discord().trim().to_string();
             s.spotify_id = self.ui.get_svc_spotify_id().trim().to_string();
             s.spotify_secret = self.ui.get_svc_spotify_secret().trim().to_string();
+            // People paste "sp_dc=..." as often as the bare value.
+            let cookie = self.ui.get_svc_spotify_cookie();
+            let cookie = cookie.trim();
+            s.spotify_cookie = cookie.strip_prefix("sp_dc=").unwrap_or(cookie).trim_end_matches(';').to_string();
         }
         self.apply_services("Saved");
+        canvas::forget_token();
+    }
+
+    /// Forgets the Spotify cookie, which turns Canvas off.
+    fn canvas_unlink(self: &Rc<Self>) {
+        self.settings.borrow_mut().spotify_cookie.clear();
+        canvas::forget_token();
+        self.stop_canvas();
+        self.apply_services("Canvas is off");
     }
 
     /// Turns Discord on or off. Discord asks for no sign in. It trusts
@@ -2113,6 +2302,21 @@ fn probe(args: &[String]) {
             }
         }),
         "browse" => client.browse(arg(1), None),
+        // The song a video in a radio stands for: --probe song <videoId>
+        "song" => {
+            let video = client
+                .queue(Some(arg(1)), None)
+                .ok()
+                .and_then(|(items, _)| items.into_iter().next());
+            match video {
+                Some(video) => match client.song_for(&video) {
+                    Some(song) => println!("{} | {} -> {} | {} {:?}", video.title, video.subtitle, song.title, song.subtitle, song.video_id),
+                    None => println!("{} | {} -> no song", video.title, video.subtitle),
+                },
+                None => println!("no such video"),
+            }
+            return;
+        }
         "queue" => client.queue(Some(arg(1)), None).map(|(items, _)| Page {
             shelves: vec![innertube::model::Shelf {
                 title: "Queue".into(),
@@ -2242,6 +2446,35 @@ fn probe(args: &[String]) {
                 }
                 Err(message) => println!("error: {message}"),
             }
+            return;
+        }
+        // Decodes a video for three seconds: --probe clip <file.mp4>
+        "clip" => {
+            let frames = Arc::new(std::sync::Mutex::new(Vec::<(u32, u32)>::new()));
+            let seen = frames.clone();
+            // Saves the first frame here when given, to look at.
+            let arg_owned = arg(2).to_string();
+            let clip = canvas::Clip::play(
+                std::path::PathBuf::from(arg(1)),
+                move |p| {
+                    let mut seen = seen.lock().unwrap();
+                    if seen.is_empty() && !arg_owned.is_empty() {
+                        let _ = image::save_buffer(&arg_owned, p.as_bytes(), p.width(), p.height(), image::ExtendedColorType::Rgba8);
+                    }
+                    seen.push((p.width(), p.height()));
+                },
+                |message| println!("failed: {message}"),
+            );
+            std::thread::sleep(Duration::from_secs(3));
+            drop(clip);
+            let frames = frames.lock().unwrap();
+            println!("{} frames, first {:?}", frames.len(), frames.first());
+            return;
+        }
+        // Whether Spotify gives a Canvas: --probe canvas <title> <artist>
+        "canvas" => {
+            let settings = services::Settings::load();
+            canvas::probe(&canvas_keys(&settings), arg(1), arg(2));
             return;
         }
         "lyrics" => {
@@ -2395,6 +2628,7 @@ fn main() -> Result<(), slint::PlatformError> {
         player: RefCell::default(),
         lyrics: RefCell::default(),
         cover: RefCell::new(None),
+        canvas: RefCell::new(None),
         clock: Cell::new((0, Instant::now())),
         timer: Timer::default(),
         fast: Cell::new(false),
@@ -2458,8 +2692,12 @@ fn main() -> Result<(), slint::PlatformError> {
         app.audio.volume(volume * volume);
     });
     on!(on_toggle_like, |app| app.toggle_like());
+    on!(on_canvas_unlink, |app| app.canvas_unlink());
+    on!(on_queue_moved, |app, from, to| app
+        .move_queued(from as usize, to as usize));
     on!(on_panel_changed, |app, panel| {
-        if panel == 2 {
+        // Now playing previews the lyrics, so it needs them too.
+        if panel == 2 || panel == 3 {
             app.load_lyrics();
         }
     });
@@ -2498,9 +2736,45 @@ fn main() -> Result<(), slint::PlatformError> {
     if signed_in {
         app.check_account();
     }
+    app.ui
+        .set_up_next(ModelRc::from(app.player.borrow().up_next.clone()));
+    app.repair_downloads();
     app.check_update(true);
     let result = app.ui.run();
     APP.with(|slot| slot.borrow_mut().take());
     update::relaunch_if_updated();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_playing_song_keeps_its_place_through_moves() {
+        // Moves after the playing song leave it alone.
+        assert_eq!(index_after_move(2, 4, 6), 2);
+        // A song moved from before it to after it pulls it up one.
+        assert_eq!(index_after_move(2, 0, 5), 1);
+        // A song moved from after it to before it pushes it down one.
+        assert_eq!(index_after_move(2, 5, 0), 3);
+        // Moving the playing song itself follows it.
+        assert_eq!(index_after_move(2, 2, 7), 7);
+    }
+
+    #[test]
+    fn a_play_count_is_no_artist() {
+        let item = Item {
+            subtitle: "2.7M plays".into(),
+            artists: vec![("Wisp".into(), None)],
+            ..Item::default()
+        };
+        assert_eq!(credits_with_album(&item).0, "Wisp");
+        let plain = Item {
+            subtitle: "Wisp • If Not Winter".into(),
+            ..Item::default()
+        };
+        assert_eq!(credits_with_album(&plain).0, "Wisp");
+        assert_eq!(credits_with_album(&plain).1, "If Not Winter");
+    }
 }

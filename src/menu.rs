@@ -405,7 +405,7 @@ impl App {
 
     /// Builds the queue list again after songs moved. Ids are positions,
     /// so a move shifts every row after it.
-    fn rebuild_queue_model(self: &Rc<Self>) {
+    pub(crate) fn rebuild_queue_model(self: &Rc<Self>) {
         let (items, generation, index) = {
             let mut player = self.player.borrow_mut();
             player.queue_generation += 1;
@@ -421,5 +421,6 @@ impl App {
         }
         self.ui.set_queue(ModelRc::from(model));
         self.ui.set_queue_index(index as i32);
+        self.sync_up_next();
     }
 }
