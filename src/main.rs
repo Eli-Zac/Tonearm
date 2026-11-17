@@ -544,7 +544,13 @@ fn credits_with_album(item: &Item) -> (String, String, f32) {
     let parts: Vec<&str> = item.subtitle.split(" • ").map(str::trim).collect();
     let labels = ["Song", "Video", "Single", "Album", "EP", "Episode"];
     let is_count = |p: &str| [" views", " plays", " likes"].iter().any(|w| p.ends_with(w));
-    let mut names = parts.iter().filter(|p| !labels.contains(*p)).copied();
+    // "2:38" is the length, not a name.
+    let is_duration =
+        |p: &str| p.contains(':') && p.chars().all(|c| c.is_ascii_digit() || c == ':');
+    let mut names = parts
+        .iter()
+        .filter(|p| !labels.contains(*p) && !is_duration(p))
+        .copied();
     // A play count in the artist's place is no artist. Fall back to the
     // linked artists, which the subtitle does not always carry.
     let artist = match names.next() {
@@ -567,7 +573,7 @@ fn credits_with_album(item: &Item) -> (String, String, f32) {
         .to_string();
     let mut seconds = item.duration_secs();
     if seconds == 0.0 {
-        if let Some(last) = parts.last().filter(|p| p.contains(':')) {
+        if let Some(last) = parts.iter().rev().find(|p| is_duration(p)) {
             seconds = Item {
                 duration: last.to_string(),
                 ..Item::default()
@@ -4719,5 +4725,18 @@ mod tests {
         };
         assert_eq!(credits_with_album(&plain).0, "Wisp");
         assert_eq!(credits_with_album(&plain).1, "If Not Winter");
+    }
+
+    #[test]
+    fn a_length_is_no_artist() {
+        let item = Item {
+            subtitle: "Song • 2:38 • 35M plays".into(),
+            artists: vec![("Don Toliver".into(), None)],
+            ..Item::default()
+        };
+        let (artist, album, seconds) = credits_with_album(&item);
+        assert_eq!(artist, "Don Toliver");
+        assert_eq!(album, "");
+        assert_eq!(seconds, 158.0);
     }
 }

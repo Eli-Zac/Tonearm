@@ -543,6 +543,21 @@ impl Walker {
                             self.shelf(child, false);
                             if let Some(shelf) = self.page.shelves.last_mut() {
                                 shelf.title = "Top result".into();
+                                // The songs under the card read "Song • 2:38 •
+                                // 35M plays", with no artist. They are the
+                                // card's artist's, so lend them that one.
+                                let artist = std::iter::once(&item)
+                                    .chain(shelf.items.iter())
+                                    .find(|i| i.kind == Kind::Artist && !i.title.is_empty())
+                                    .map(|a| (a.title.clone(), a.browse_id.clone()))
+                                    .or_else(|| item.artists.first().cloned());
+                                if let Some(artist) = artist {
+                                    for song in shelf.items.iter_mut() {
+                                        if song.kind == Kind::Song && song.artists.is_empty() {
+                                            song.artists.push(artist.clone());
+                                        }
+                                    }
+                                }
                                 if !item.title.is_empty() {
                                     shelf.items.insert(0, item);
                                 }
