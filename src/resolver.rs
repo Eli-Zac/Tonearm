@@ -222,6 +222,20 @@ struct YtDlp {
     self_update: Once,
     /// The signed-in user's `Cookie:` header, if any.
     cookie: Mutex<Option<String>>,
+    /// Fetches Deno once per start, when it is needed and missing.
+    #[cfg(windows)]
+    deno: Once,
+}
+
+/// The JavaScript runtime yt-dlp gets to use.
+enum Runtime {
+    /// One on the computer's PATH, which yt-dlp finds itself.
+    System,
+    /// The Deno Tonearm fetched.
+    #[cfg(windows)]
+    Ours(PathBuf),
+    /// None at all. Signed in, YouTube then offers no audio.
+    Missing,
 }
 
 fn data_dir() -> Option<PathBuf> {
@@ -360,38 +374,199 @@ fn sweep_cookie_files(folder: &Path) {
     }
 }
 
-// ------------------------------------------------------- the Windows build
+/// ------------------------------------------------------- the Windows builds
 
-/// Each version unpacks into its own folder in here, named after its tag.
-/// An update unpacks next to the old one and only then appears under its
-/// final name, so a resolve that is running keeps its files.
+/// A program Tonearm keeps for itself, fetched from its GitHub releases.
+/// Each version unpacks into its own folder, named after its tag, in the
+/// tool's folder. An update unpacks next to the old one and only then
+/// appears under its final name, so a run that is going keeps its files.
 #[cfg(windows)]
-fn builds_dir() -> Option<PathBuf> {
-    Some(data_dir()?.join("yt-dlp"))
+struct Tool {
+    /// Shown in errors.
+    name: &'static str,
+    repo: &'static str,
+    asset: &'static str,
+    /// Its folder in the local data folder.
+    folder: &'static str,
+    /// The program in each version's folder.
+    exe: &'static str,
+    /// Whether a download with no digest from GitHub is refused.
+    must_verify: bool,
 }
 
-/// The newest complete build: its version and its `yt-dlp.exe`.
+/// yt-dlp's unpacked build: `yt-dlp.exe` next to an `_internal` folder.
 #[cfg(windows)]
-fn newest_build() -> Option<(String, PathBuf)> {
-    let mut best: Option<(String, PathBuf)> = None;
-    for entry in std::fs::read_dir(builds_dir()?).ok()?.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let exe = entry.path().join("yt-dlp.exe");
-        if !is_version(&name) || !exe.is_file() {
-            continue;
+const YT_DLP: Tool = Tool {
+    name: "yt-dlp",
+    repo: REPO,
+    asset: ASSET,
+    folder: "yt-dlp",
+    exe: "yt-dlp.exe",
+    must_verify: false,
+};
+
+/// Deno, the JavaScript runtime yt-dlp needs to unlock audio for the web
+/// clients it asks as when signed in. Only fetched when the computer has
+/// no Deno, Node or Bun of its own.
+#[cfg(windows)]
+const DENO: Tool = Tool {
+    name: "Deno",
+    repo: "denoland/deno",
+    #[cfg(target_arch = "aarch64")]
+    asset: "deno-aarch64-pc-windows-msvc.zip",
+    #[cfg(not(target_arch = "aarch64"))]
+    asset: "deno-x86_64-pc-windows-msvc.zip",
+    folder: "deno",
+    exe: "deno.exe",
+    must_verify: true,
+};
+
+#[cfg(windows)]
+impl Tool {
+    fn dir(&self) -> Option<PathBuf> {
+        Some(data_dir()?.join(self.folder))
+    }
+
+    /// The newest complete version: its tag and its program.
+    fn newest(&self) -> Option<(String, PathBuf)> {
+        let mut best: Option<(String, PathBuf)> = None;
+        for entry in std::fs::read_dir(self.dir()?).ok()?.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let exe = entry.path().join(self.exe);
+            if !is_version(&name) || !exe.is_file() {
+                continue;
+            }
+            if best
+                .as_ref()
+                .is_none_or(|(version, _)| crate::update::newer(&name, version))
+            {
+                best = Some((name, exe));
+            }
         }
-        if best
-            .as_ref()
-            .is_none_or(|(version, _)| crate::update::newer(&name, version))
-        {
-            best = Some((name, exe));
+        best
+    }
+
+    fn latest(&self, http: &ureq::Agent) -> Result<crate::update::Release, String> {
+        crate::update::latest(http, self.repo, self.asset)
+            .map_err(|e| format!("Could not get {}: {e}", self.name))
+    }
+
+    /// Downloads a release's zip, checks it, and unpacks it into the
+    /// tool's folder. Returns the new program.
+    fn install(&self, http: &ureq::Agent, release: &crate::update::Release) -> Result<PathBuf, String> {
+        let name = self.name;
+        if !is_version(&release.version) {
+            return Err(format!("Unexpected {name} version {:?}", release.version));
+        }
+        if self.must_verify && !release.has_digest() {
+            return Err(format!("GitHub gave no checksum for {name}, so it was not installed"));
+        }
+        let builds = self.dir().ok_or("No local data folder")?;
+        let failed = |e: std::io::Error| format!("Could not save {name}: {e}");
+        std::fs::create_dir_all(&builds).map_err(failed)?;
+        let bytes = crate::update::download(http, release).map_err(|e| format!("Could not get {name}: {e}"))?;
+        // Named for this process, so two Tonearms never unpack into one folder.
+        let work = format!("{}.{}", release.version, std::process::id());
+        let zip = builds.join(format!("{work}.zip"));
+        let part = builds.join(format!("{work}.part"));
+        let _ = std::fs::remove_dir_all(&part);
+        let unpacked = (|| {
+            std::fs::write(&zip, &bytes).map_err(failed)?;
+            std::fs::create_dir_all(&part).map_err(failed)?;
+            // Windows 10 and later ship bsdtar, which reads zips. Ask for it by
+            // full path so nothing on PATH can stand in for it.
+            let system = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+            let tar = Path::new(&system).join("System32").join("tar.exe");
+            let output = command(&tar)
+                .arg("-xf")
+                .arg(&zip)
+                .arg("-C")
+                .arg(&part)
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .output()
+                .map_err(|e| format!("Could not unpack {name}: {e}"))?;
+            if !output.status.success() {
+                let why = String::from_utf8_lossy(&output.stderr);
+                return Err(format!("Could not unpack {name}: {}", why.trim()));
+            }
+            if !part.join(self.exe).is_file() {
+                return Err(format!("The {name} download has no {} in it", self.exe));
+            }
+            Ok(())
+        })();
+        let _ = std::fs::remove_file(&zip);
+        if let Err(e) = unpacked {
+            let _ = std::fs::remove_dir_all(&part);
+            return Err(e);
+        }
+        let done = builds.join(&release.version);
+        if done.join(self.exe).is_file() {
+            // Another Tonearm got there first.
+            let _ = std::fs::remove_dir_all(&part);
+        } else {
+            let _ = std::fs::remove_dir_all(&done);
+            if let Err(e) = std::fs::rename(&part, &done) {
+                let _ = std::fs::remove_dir_all(&part);
+                return Err(failed(e));
+            }
+        }
+        Ok(done.join(self.exe))
+    }
+
+    /// Installs the latest release when it is newer than what is here.
+    fn update(&self, http: &ureq::Agent) -> Result<PathBuf, String> {
+        let release = self.latest(http)?;
+        match self.newest() {
+            Some((version, exe)) if !crate::update::newer(&release.version, &version) => Ok(exe),
+            _ => self.install(http, &release),
         }
     }
-    best
+
+    /// Deletes every version but the newest, and unpacking an earlier run
+    /// did not finish. A version still in use by another Tonearm cannot be
+    /// renamed, so we rename first and delete only what moved.
+    fn tidy(&self) {
+        let Some(builds) = self.dir() else {
+            return;
+        };
+        let keep = self.newest().map(|(version, _)| version);
+        let Ok(entries) = std::fs::read_dir(&builds) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if Some(&name) == keep.as_ref() {
+                continue;
+            }
+            let path = entry.path();
+            if path.is_file() {
+                // A zip from an unpack that never finished.
+                if name.ends_with(".zip") {
+                    let _ = std::fs::remove_file(&path);
+                }
+                continue;
+            }
+            let young = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age < Duration::from_secs(10 * 60));
+            if name.ends_with(".part") && young {
+                // Another Tonearm may be unpacking an update into it.
+                continue;
+            }
+            let doomed = builds.join(format!("{name}.{}.old", std::process::id()));
+            if std::fs::rename(&path, &doomed).is_ok() {
+                let _ = std::fs::remove_dir_all(&doomed);
+            }
+        }
+    }
 }
 
-/// Release tags look like `2026.10.26`, sometimes with a fourth number.
-/// Folders being unpacked or thrown away have other names.
+/// Release tags look like `2026.10.26` or `v2.9.8`, sometimes with a
+/// fourth number. Folders being unpacked or thrown away have other names.
 #[cfg(windows)]
 fn is_version(name: &str) -> bool {
     !name.is_empty()
@@ -400,109 +575,18 @@ fn is_version(name: &str) -> bool {
             .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
-/// Downloads a release's zip, checks it, and unpacks it into the builds
-/// folder. Returns the new `yt-dlp.exe`.
+/// Whether the computer has a JavaScript runtime yt-dlp can use: Deno,
+/// Node or Bun on PATH.
 #[cfg(windows)]
-fn install_build(
-    http: &ureq::Agent,
-    release: &crate::update::Release,
-) -> Result<PathBuf, String> {
-    if !is_version(&release.version) {
-        return Err(format!("Unexpected yt-dlp version {:?}", release.version));
-    }
-    let builds = builds_dir().ok_or("No local data folder")?;
-    let failed = |e: std::io::Error| format!("Could not save yt-dlp: {e}");
-    std::fs::create_dir_all(&builds).map_err(failed)?;
-    let bytes = crate::update::download(http, release)?;
-    // Named for this process, so two Tonearms never unpack into one folder.
-    let work = format!("{}.{}", release.version, std::process::id());
-    let zip = builds.join(format!("{work}.zip"));
-    let part = builds.join(format!("{work}.part"));
-    let _ = std::fs::remove_dir_all(&part);
-    let unpacked = (|| {
-        std::fs::write(&zip, &bytes).map_err(failed)?;
-        std::fs::create_dir_all(&part).map_err(failed)?;
-        // Windows 10 and later ship bsdtar, which reads zips. Ask for it by
-        // full path so nothing on PATH can stand in for it.
-        let system = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
-        let tar = Path::new(&system).join("System32").join("tar.exe");
-        let output = command(&tar)
-            .arg("-xf")
-            .arg(&zip)
-            .arg("-C")
-            .arg(&part)
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .output()
-            .map_err(|e| format!("Could not unpack yt-dlp: {e}"))?;
-        if !output.status.success() {
-            let why = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("Could not unpack yt-dlp: {}", why.trim()));
-        }
-        if !part.join("yt-dlp.exe").is_file() {
-            return Err("The yt-dlp download has no yt-dlp.exe in it".to_string());
-        }
-        Ok(())
-    })();
-    let _ = std::fs::remove_file(&zip);
-    if let Err(e) = unpacked {
-        let _ = std::fs::remove_dir_all(&part);
-        return Err(e);
-    }
-    let done = builds.join(&release.version);
-    if done.join("yt-dlp.exe").is_file() {
-        // Another Tonearm got there first.
-        let _ = std::fs::remove_dir_all(&part);
-    } else {
-        let _ = std::fs::remove_dir_all(&done);
-        if let Err(e) = std::fs::rename(&part, &done) {
-            let _ = std::fs::remove_dir_all(&part);
-            return Err(failed(e));
-        }
-    }
-    Ok(done.join("yt-dlp.exe"))
-}
-
-/// Deletes every build but the newest, and unpacking an earlier run did
-/// not finish. A build still in use by another Tonearm cannot be renamed,
-/// so we rename first and delete only what moved.
-#[cfg(windows)]
-fn tidy_builds() {
-    let Some(builds) = builds_dir() else {
-        return;
+fn system_runtime() -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
     };
-    let keep = newest_build().map(|(version, _)| version);
-    let Ok(entries) = std::fs::read_dir(&builds) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if Some(&name) == keep.as_ref() {
-            continue;
-        }
-        let path = entry.path();
-        if path.is_file() {
-            // A zip from an unpack that never finished.
-            if name.ends_with(".zip") {
-                let _ = std::fs::remove_file(&path);
-            }
-            continue;
-        }
-        let young = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.elapsed().ok())
-            .is_some_and(|age| age < Duration::from_secs(10 * 60));
-        if name.ends_with(".part") && young {
-            // Another Tonearm may be unpacking an update into it.
-            continue;
-        }
-        let doomed = builds.join(format!("{name}.{}.old", std::process::id()));
-        if std::fs::rename(&path, &doomed).is_ok() {
-            let _ = std::fs::remove_dir_all(&doomed);
-        }
-    }
+    std::env::split_paths(&path).any(|dir| {
+        ["deno.exe", "node.exe", "bun.exe"]
+            .iter()
+            .any(|exe| dir.join(exe).is_file())
+    })
 }
 
 impl YtDlp {
@@ -512,29 +596,71 @@ impl YtDlp {
             tidy: Once::new(),
             self_update: Once::new(),
             cookie: Mutex::new(None),
+            #[cfg(windows)]
+            deno: Once::new(),
         }
     }
+
+    /// Ours comes first: a Node on PATH may be too old for yt-dlp.
+    #[cfg(windows)]
+    fn runtime(&self) -> Runtime {
+        if let Some((_, exe)) = DENO.newest() {
+            Runtime::Ours(exe)
+        } else if system_runtime() {
+            Runtime::System
+        } else {
+            Runtime::Missing
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn runtime(&self) -> Runtime {
+        Runtime::System
+    }
+
+    /// Fetches Deno in the background, once per start, when signed in on a
+    /// computer with no runtime. Keeps a Deno fetched before up to date.
+    #[cfg(windows)]
+    fn fetch_deno(&self) {
+        let ours = DENO.newest().is_some();
+        if !ours && (system_runtime() || self.cookie.lock().unwrap().is_none()) {
+            return;
+        }
+        self.deno.call_once(|| {
+            let _ = std::thread::Builder::new()
+                .name("deno-fetch".into())
+                .spawn(|| {
+                    // About 43 MB, so it gets longer than yt-dlp does.
+                    let http = crate::innertube::agent(Duration::from_secs(120));
+                    if let Err(e) = DENO.update(&http) {
+                        eprintln!("{e}");
+                    }
+                });
+        });
+    }
+
+    #[cfg(not(windows))]
+    fn fetch_deno(&self) {}
 
     #[cfg(windows)]
     fn ensure(&self) -> Result<PathBuf, String> {
         let folder = data_dir().ok_or("No local data folder")?;
         self.tidy.call_once(|| {
             sweep_cookie_files(&folder);
-            tidy_builds();
+            YT_DLP.tidy();
+            DENO.tidy();
         });
-        if let Some((_, exe)) = newest_build() {
+        if let Some((_, exe)) = YT_DLP.newest() {
             return Ok(exe);
         }
         let _guard = self.install.lock().unwrap();
         // Someone may have installed it while we waited for the lock.
-        if let Some((_, exe)) = newest_build() {
+        if let Some((_, exe)) = YT_DLP.newest() {
             return Ok(exe);
         }
         let http = crate::innertube::agent(Duration::from_secs(30));
-        let release = crate::update::latest(&http, REPO, ASSET)
-            .map_err(|e| format!("Could not get yt-dlp: {e}"))?;
-        let exe =
-            install_build(&http, &release).map_err(|e| format!("Could not get yt-dlp: {e}"))?;
+        let release = YT_DLP.latest(&http)?;
+        let exe = YT_DLP.install(&http, &release)?;
         // Fresh from GitHub, so no need to update it this session.
         self.self_update.call_once(|| {});
         Ok(exe)
@@ -580,13 +706,7 @@ impl YtDlp {
                 .name("yt-dlp-update".into())
                 .spawn(|| {
                     let http = crate::innertube::agent(Duration::from_secs(30));
-                    let Ok(release) = crate::update::latest(&http, REPO, ASSET) else {
-                        return;
-                    };
-                    let current = newest_build().map(|(version, _)| version);
-                    if current.is_none_or(|v| crate::update::newer(&release.version, &v)) {
-                        let _ = install_build(&http, &release);
-                    }
+                    let _ = YT_DLP.update(&http);
                 });
         });
     }
@@ -626,21 +746,26 @@ impl YtDlp {
     fn link(&self, video_id: &str) -> Result<(Stream, Option<u64>), String> {
         let path = self.ensure()?;
         let cookie = self.cookie.lock().unwrap().clone();
-        let result = match cookie.as_deref() {
-            // Signed in, the YouTube Music web client alone is enough and
-            // saves yt-dlp asking two more. Should it fail, ask them all.
-            //
+        let runtime = self.runtime();
+        self.fetch_deno();
+        let result = match (cookie.as_deref(), &runtime) {
             // Signed in, yt-dlp asks as web clients, and those need a
-            // JavaScript runtime (Deno, Node or Bun) to unlock the audio. On
-            // a computer with none, YouTube offers them only images, and
-            // yt-dlp says no format is available. Signed out it asks as the
-            // apps, which need no runtime, so that is the last try: the
-            // song plays, just without what the account adds.
-            Some(cookie) => self
-                .run(&path, video_id, Some(cookie), true)
-                .or_else(|_| self.run(&path, video_id, Some(cookie), false))
-                .or_else(|first| self.run(&path, video_id, None, false).map_err(|_| first)),
-            None => self.run(&path, video_id, None, false),
+            // JavaScript runtime to unlock the audio. With none, YouTube
+            // offers them only images, so skip straight to signed out, which
+            // asks as the apps and needs no runtime. The song plays, just
+            // without what the account adds, until Deno arrives.
+            (Some(_), Runtime::Missing) => self.run(&path, video_id, None, false, &runtime),
+            // Signed in, the YouTube Music web client alone is enough and
+            // saves yt-dlp asking two more. Should it fail, ask them all,
+            // and then signed out, as above.
+            (Some(cookie), _) => self
+                .run(&path, video_id, Some(cookie), true, &runtime)
+                .or_else(|_| self.run(&path, video_id, Some(cookie), false, &runtime))
+                .or_else(|first| {
+                    self.run(&path, video_id, None, false, &runtime)
+                        .map_err(|_| first)
+                }),
+            (None, _) => self.run(&path, video_id, None, false, &runtime),
         };
         // Update only after the track resolves, so the exe is not replaced
         // while we are running it.
@@ -661,6 +786,7 @@ impl YtDlp {
         video_id: &str,
         cookie: Option<&str>,
         music_only: bool,
+        runtime: &Runtime,
     ) -> Result<(Stream, Option<u64>), String> {
         let jar = match cookie {
             Some(cookie) => Some(CookieFile::write(
@@ -676,18 +802,24 @@ impl YtDlp {
             "youtube:skip=hls"
         };
         let mut yt_dlp = command(path);
+        // yt-dlp needs a JavaScript runtime for some YouTube formats. The
+        // Deno Tonearm fetched, by its path, or whichever the machine has.
+        let deno: std::ffi::OsString = match runtime {
+            #[cfg(windows)]
+            Runtime::Ours(exe) => {
+                let mut arg = std::ffi::OsString::from("deno:");
+                arg.push(exe);
+                arg
+            }
+            _ => "deno".into(),
+        };
+        for name in [deno, "node".into(), "bun".into()] {
+            yt_dlp.arg("--js-runtimes").arg(name);
+        }
         yt_dlp.args([
             "--no-config",
             "--no-playlist",
             "--no-warnings",
-            // yt-dlp needs a JavaScript runtime for some YouTube
-            // formats. Use whichever one the machine has.
-            "--js-runtimes",
-            "deno",
-            "--js-runtimes",
-            "node",
-            "--js-runtimes",
-            "bun",
             "--extractor-args",
             extractor,
             "-f",
@@ -761,6 +893,9 @@ impl Resolver for YtDlp {
 
     fn set_cookie(&self, cookie: Option<String>) {
         *self.cookie.lock().unwrap() = cookie.filter(|c| !c.trim().is_empty());
+        // Signing in is when a missing runtime starts to matter, so Deno
+        // starts downloading now rather than at the first song.
+        self.fetch_deno();
     }
 }
 
@@ -860,4 +995,17 @@ mod tests {
         assert!(!is_version("2026.10.26.1234.zip"));
         assert!(!is_version(""));
     }
+}
+
+/// Fetches Deno into `TONEARM_PROFILE` the way the app does:
+/// `cargo test fetches_deno -- --ignored --nocapture`.
+#[cfg(all(test, windows))]
+#[test]
+#[ignore]
+fn fetches_deno() {
+    let http = crate::innertube::agent(Duration::from_secs(120));
+    let exe = DENO.update(&http).unwrap();
+    eprintln!("deno at {}", exe.display());
+    // A second run finds it and fetches nothing.
+    assert_eq!(DENO.update(&http).unwrap(), exe);
 }

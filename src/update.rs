@@ -40,6 +40,13 @@ pub struct Release {
     sha256: Option<String>,
 }
 
+impl Release {
+    /// Whether GitHub gave a SHA-256 to check the download against.
+    pub fn has_digest(&self) -> bool {
+        self.sha256.is_some()
+    }
+}
+
 /// `v1.2.3` to `[1, 2, 3]`. Anything after a `-` or `+` is ignored.
 fn parts(version: &str) -> Vec<u64> {
     version
