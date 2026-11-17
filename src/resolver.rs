@@ -629,9 +629,17 @@ impl YtDlp {
         let result = match cookie.as_deref() {
             // Signed in, the YouTube Music web client alone is enough and
             // saves yt-dlp asking two more. Should it fail, ask them all.
+            //
+            // Signed in, yt-dlp asks as web clients, and those need a
+            // JavaScript runtime (Deno, Node or Bun) to unlock the audio. On
+            // a computer with none, YouTube offers them only images, and
+            // yt-dlp says no format is available. Signed out it asks as the
+            // apps, which need no runtime, so that is the last try: the
+            // song plays, just without what the account adds.
             Some(cookie) => self
                 .run(&path, video_id, Some(cookie), true)
-                .or_else(|_| self.run(&path, video_id, Some(cookie), false)),
+                .or_else(|_| self.run(&path, video_id, Some(cookie), false))
+                .or_else(|first| self.run(&path, video_id, None, false).map_err(|_| first)),
             None => self.run(&path, video_id, None, false),
         };
         // Update only after the track resolves, so the exe is not replaced
