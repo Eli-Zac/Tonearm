@@ -5,8 +5,9 @@
 //! closed and saved its session, `main` runs the installer silently. It waits
 //! for the exe to free up, puts the new one in place, and starts it again.
 //!
-//! Releases still carry a bare `tonearm.exe` for copies from 0.5 and before,
-//! whose updater swaps the exe in place. Their next update uses the installer.
+//! The installer is named after its version, `Tonearm-1.2.3-setup.exe`. 0.6.0
+//! looked for a plain `tonearm-setup.exe`, which is still taken when a
+//! release has no versioned one.
 
 use sha2::{Digest, Sha256};
 use std::io::Read;
@@ -21,7 +22,12 @@ pub const VERSION: &str = match option_env!("TONEARM_VERSION") {
 };
 
 const REPO: &str = "Eli-Zac/tonearm";
-const ASSET: &str = "tonearm-setup.exe";
+
+/// Whether a release file is the installer.
+fn is_installer(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    (name.starts_with("tonearm-") && name.ends_with("-setup.exe")) || name == "tonearm-setup.exe"
+}
 
 /// Set once the installer is saved. `main` runs it on the way out.
 static RESTART: AtomicBool = AtomicBool::new(false);
@@ -58,12 +64,22 @@ pub fn newer(candidate: &str, current: &str) -> bool {
 
 /// The latest release when it is newer than this build.
 pub fn check(http: &ureq::Agent) -> Result<Option<Release>, String> {
-    let release = latest(http, REPO, ASSET)?;
+    let release = latest_matching(http, REPO, is_installer)?;
     Ok(newer(&release.version, VERSION).then_some(release))
 }
 
 /// The latest GitHub release of `repo` and its file called `asset`.
 pub fn latest(http: &ureq::Agent, repo: &str, asset: &str) -> Result<Release, String> {
+    latest_matching(http, repo, |name| name == asset)
+}
+
+/// The latest GitHub release of `repo` and the first of its files whose name
+/// `wanted` picks.
+fn latest_matching(
+    http: &ureq::Agent,
+    repo: &str,
+    wanted: impl Fn(&str) -> bool,
+) -> Result<Release, String> {
     let body: serde_json::Value = http
         .get(&format!(
             "https://api.github.com/repos/{repo}/releases/latest"
@@ -82,8 +98,11 @@ pub fn latest(http: &ureq::Agent, repo: &str, asset: &str) -> Result<Release, St
     let tag = body["tag_name"].as_str().ok_or("The release has no tag")?;
     let file = body["assets"]
         .as_array()
-        .and_then(|list| list.iter().find(|a| a["name"].as_str() == Some(asset)))
-        .ok_or_else(|| format!("Release {tag} has no {asset}"))?;
+        .and_then(|list| {
+            list.iter()
+                .find(|a| a["name"].as_str().is_some_and(&wanted))
+        })
+        .ok_or_else(|| format!("Release {tag} has no installer"))?;
     let asset = file;
     Ok(Release {
         version: tag.trim_start_matches(['v', 'V']).to_string(),

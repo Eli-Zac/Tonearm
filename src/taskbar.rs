@@ -67,6 +67,9 @@ struct State {
     button_created: u32,
     /// Sent when Explorer restarts and the tray is empty again.
     tray_created: u32,
+    /// The installer broadcasts this to close a running copy, which would
+    /// otherwise hold on to the exe it has to replace.
+    installer_quit: u32,
     on_action: Box<dyn Fn(Action)>,
 }
 
@@ -99,6 +102,7 @@ pub fn attach(window: &slint::Window, on_action: impl Fn(Action) + 'static) -> b
             in_tray: false,
             button_created: RegisterWindowMessageW(w!("TaskbarButtonCreated")),
             tray_created: RegisterWindowMessageW(w!("TaskbarCreated")),
+            installer_quit: RegisterWindowMessageW(w!("Tonearm.InstallerQuit")),
             on_action: Box::new(on_action),
         };
         STATE.with(|slot| *slot.borrow_mut() = Some(state));
@@ -302,6 +306,9 @@ unsafe extern "system" fn window_proc(
             add_buttons(state);
         } else if message == state.tray_created && state.in_tray {
             tray(state, NIM_ADD);
+        } else if message == state.installer_quit && installed() {
+            action = Some(Action::Quit);
+            handled = true;
         }
     });
     if let Some(action) = action {
@@ -318,6 +325,15 @@ unsafe extern "system" fn window_proc(
         return LRESULT(0);
     }
     DefSubclassProc(hwnd, message, wparam, lparam)
+}
+
+/// Whether this copy is the installed one, with the uninstaller beside it.
+/// A copy run from a build folder ignores the installer.
+fn installed() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("uninstall.exe").exists()))
+        .unwrap_or(false)
 }
 
 fn copy_wide(into: &mut [u16], text: &str) {

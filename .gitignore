@@ -1,5 +1,6 @@
 /target
 /keys.env
-/tonearm-setup.exe
+/Tonearm-*-setup.exe
 /tonearm.exe
 __pycache__/
+/tonearm-setup.exe

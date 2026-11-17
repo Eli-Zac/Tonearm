@@ -28,7 +28,7 @@ SetCompressor /SOLID lzma
 !include "FileFunc.nsh"
 
 Name "${NAME}"
-OutFile "..\tonearm-setup.exe"
+OutFile "..\Tonearm-${VERSION}-setup.exe"
 InstallDir "$LOCALAPPDATA\Programs\Tonearm"
 InstallDirRegKey HKCU "${UNINSTALL_KEY}" "InstallLocation"
 BrandingText "${NAME} ${VERSION}"
@@ -64,37 +64,45 @@ VIAddVersionKey "LegalCopyright" "Free software under the GNU GPL v3"
 !insertmacro MUI_UNPAGE_FINISH
 !insertmacro MUI_LANGUAGE "English"
 
-; Waits up to about 15 seconds for a running Tonearm to let go of its exe.
-; The updater closes the app just before it starts the installer.
-!macro WaitForExe path
+; Asks a running Tonearm to quit, then waits up to about 15 seconds for it to
+; let go of its exe. The updater closes the app before it starts the
+; installer, but a copy started by hand may still be open, often hidden in
+; the tray. If the exe is still locked after that, asks the user to quit it,
+; and stops if they cancel.
+!macro CloseTonearm path
   ; ${__LINE__} changes on every line of a macro, so take one id for all the
   ; labels of this use of it.
-  !define WFE_ID ${__LINE__}
+  !define CT_ID ${__LINE__}
+  ; Copies from 0.6.1 on quit when they get this message.
+  System::Call 'user32::RegisterWindowMessage(t "Tonearm.InstallerQuit") i .r2'
+  System::Call 'user32::PostMessage(p 0xffff, i r2, p 0, p 0)'
   StrCpy $0 0
-  wait_loop_${WFE_ID}:
-    IfFileExists "${path}" 0 wait_done_${WFE_ID}
+  close_check_${CT_ID}:
+    IfFileExists "${path}" 0 close_done_${CT_ID}
     ClearErrors
     FileOpen $1 "${path}" a
-    IfErrors 0 wait_open_${WFE_ID}
+    IfErrors 0 close_free_${CT_ID}
     IntOp $0 $0 + 1
-    IntCmp $0 30 wait_done_${WFE_ID}
+    IntCmp $0 30 close_ask_${CT_ID} 0 close_ask_${CT_ID}
     Sleep 500
-    Goto wait_loop_${WFE_ID}
-  wait_open_${WFE_ID}:
+    Goto close_check_${CT_ID}
+  close_ask_${CT_ID}:
+    MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "Tonearm is still running.$\r$\n$\r$\nQuit it from its tray icon (right click it, then Quit), then click Retry." /SD IDCANCEL IDRETRY close_retry_${CT_ID}
+    Abort
+  close_retry_${CT_ID}:
+    ; A few more seconds to let go after it quits.
+    StrCpy $0 24
+    Goto close_check_${CT_ID}
+  close_free_${CT_ID}:
     FileClose $1
-  wait_done_${WFE_ID}:
-  !undef WFE_ID
+  close_done_${CT_ID}:
+  !undef CT_ID
 !macroend
 
 Section "Tonearm"
   SetOutPath "$INSTDIR"
-  !insertmacro WaitForExe "$INSTDIR\tonearm.exe"
-  ClearErrors
+  !insertmacro CloseTonearm "$INSTDIR\tonearm.exe"
   File "/oname=tonearm.exe" "${EXE}"
-  IfErrors 0 copied
-    MessageBox MB_ICONSTOP "Tonearm is still running. Close it and try again." /SD IDOK
-    Abort
-  copied:
   ; Left over from the exe swapping updater of 0.5 and before.
   Delete "$INSTDIR\tonearm.old"
   Delete "$INSTDIR\tonearm.new"
@@ -124,7 +132,7 @@ Section "Tonearm"
 SectionEnd
 
 Section "Uninstall"
-  !insertmacro WaitForExe "$INSTDIR\tonearm.exe"
+  !insertmacro CloseTonearm "$INSTDIR\tonearm.exe"
   Delete "$INSTDIR\tonearm.exe"
   Delete "$INSTDIR\tonearm.old"
   Delete "$INSTDIR\tonearm.new"

@@ -1,4 +1,4 @@
-# Builds tonearm.exe and tonearm-setup.exe on this computer, the way the
+# Builds tonearm.exe and Tonearm-<version>-setup.exe on this computer, the way the
 # Release workflow does, so the installer can be checked before tagging.
 #
 #   .\release.ps1 0.6.0              build the exe and the installer
@@ -43,11 +43,15 @@ if (-not $nsis) {
 if (-not $nsis) { throw "NSIS is not installed. Run: winget install NSIS.NSIS" }
 & $nsis -V3 "-DVERSION=$Version" installer\tonearm.nsi
 if ($LASTEXITCODE -ne 0) { throw "makensis failed" }
-Write-Host "Made tonearm-setup.exe for $tag"
+$installer = "Tonearm-$Version-setup.exe"
+Write-Host "Made $installer"
 
 if ($Publish) {
-    # The bare exe is for 0.5 and older, whose updater looks for it.
+    # Transitional, for v0.6.1 only: the v0.6.0 updater looks for
+    # tonearm-setup.exe, and v0.5.0 and earlier look for tonearm.exe.
+    # From v0.6.2 on, publish only $installer.
+    Copy-Item $installer tonearm-setup.exe -Force
     Copy-Item target\release\tonearm.exe tonearm.exe -Force
-    gh release create $tag tonearm-setup.exe tonearm.exe --target (git rev-parse HEAD) --title "Tonearm $tag" --generate-notes
+    gh release create $tag $installer tonearm-setup.exe tonearm.exe --target (git rev-parse HEAD) --title "Tonearm $tag" --generate-notes
     if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
 }
