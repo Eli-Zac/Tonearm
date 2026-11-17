@@ -658,9 +658,22 @@ pub fn suggestions(v: &Value) -> (Vec<String>, Vec<Item>) {
     (found, items)
 }
 
-pub fn account_name(v: &Value) -> Option<String> {
+/// The signed in account: its name, picture and handle.
+pub struct Account {
+    pub name: String,
+    /// A link to its picture. Empty when it has none.
+    pub photo: String,
+    /// Its @handle. Empty when it has none.
+    pub handle: String,
+}
+
+pub fn account(v: &Value) -> Option<Account> {
     let header = find(v, "activeAccountHeaderRenderer")?;
-    Some(text(header.get("accountName")?))
+    let name = text(header.get("accountName")?);
+    // The biggest on offer, as the profile page shows it large.
+    let photo = header.get("accountPhoto").map(thumb_best).unwrap_or_default();
+    let handle = header.get("channelHandle").map(text).unwrap_or_default();
+    Some(Account { name, photo, handle })
 }
 
 #[cfg(test)]

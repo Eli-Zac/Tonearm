@@ -501,8 +501,9 @@ impl Client {
         }
     }
 
-    pub fn account_name(&self) -> Result<Option<String>, String> {
-        Ok(parse::account_name(
+    /// The signed in account's name, picture and handle.
+    pub fn account(&self) -> Result<Option<parse::Account>, String> {
+        Ok(parse::account(
             &self.post("account/account_menu", json!({}))?,
         ))
     }

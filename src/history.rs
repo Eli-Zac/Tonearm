@@ -231,6 +231,29 @@ impl History {
         artists.into_iter().take(limit).map(|(name, _)| name.clone()).collect()
     }
 
+    /// The artists you play most, best first, as they are written on the
+    /// songs and pages they came from rather than folded.
+    pub fn top_artist_names(&self, limit: usize) -> Vec<String> {
+        let mut written: HashMap<String, String> = HashMap::new();
+        for entry in self.entries.values() {
+            let name = artist_of(&entry.item);
+            if !name.is_empty() {
+                written.entry(fold(&name)).or_insert(name);
+            }
+        }
+        self.top_artists(limit)
+            .into_iter()
+            .map(|folded| written.remove(&folded).unwrap_or(folded))
+            .collect()
+    }
+
+    /// How many songs, artists, and albums, playlists and artist pages
+    /// the history holds.
+    pub fn counts(&self) -> (usize, usize, usize) {
+        let songs = self.entries.values().filter(|e| e.item.video_id.is_some()).count();
+        (songs, self.artists.len(), self.entries.len() - songs)
+    }
+
     /// How much an item from YouTube Music matches your taste: its own
     /// score if you have played or opened it, plus part of its artist's.
     pub fn affinity(&self, item: &Item) -> f64 {

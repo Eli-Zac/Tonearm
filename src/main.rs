@@ -71,6 +71,23 @@ enum Target {
     Suggest { generation: u64, row: usize },
     /// The art at the top of a detail page.
     Hero { generation: u64 },
+    /// The signed in account's picture.
+    Account,
+    /// The account's picture at the top of the profile page.
+    ProfilePhoto,
+    /// A card under Played lately on the profile page.
+    Profile { generation: u64, index: usize },
+}
+
+/// What the profile page shows, kept to act on clicks.
+#[derive(Default)]
+struct Profile {
+    /// Counts up each time the page is built, so art for an older one is
+    /// dropped.
+    generation: u64,
+    played: Vec<Item>,
+    artists: Vec<String>,
+    model: Option<Rc<VecModel<ItemData>>>,
 }
 
 /// What a row under the search bar does when picked.
@@ -341,6 +358,14 @@ struct Cover {
     due: Instant,
 }
 
+/// The song going out during a crossfade. Its moving cover or Canvas keeps
+/// playing while it fades out under the new song's.
+struct Outgoing {
+    cover: Option<Cover>,
+    canvas: Option<(u64, canvas::Clip)>,
+    until: Instant,
+}
+
 struct App {
     ui: AppWindow,
     client: Arc<Client>,
@@ -354,6 +379,9 @@ struct App {
     history: RefCell<Vec<Route>>,
     page: RefCell<PageState>,
     taste: RefCell<history::History>,
+    profile: RefCell<Profile>,
+    /// The link to the signed in account's picture.
+    account_photo: RefCell<String>,
     /// One thread, so history saves land in the order they were made.
     disk: pool::Pool,
     /// When the playback session was last saved while a song played.
@@ -374,6 +402,7 @@ struct App {
     cover: RefCell<Option<Cover>>,
     /// The Spotify Canvas looping as the cover, with the track it is for.
     canvas: RefCell<Option<(u64, canvas::Clip)>>,
+    outgoing: RefCell<Option<Outgoing>>,
     clock: Cell<(u64, Instant)>,
     /// Seconds a song crossfades into the next one over. Zero is off.
     crossfade: Cell<u32>,
@@ -717,6 +746,26 @@ impl App {
             Target::Hero { generation } => {
                 if self.page.borrow().generation == generation {
                     self.set_hero_art(image);
+                }
+            }
+            Target::Account => {
+                if self.ui.get_signed_in() {
+                    self.ui.set_account_art(image);
+                    self.ui.set_account_has_art(true);
+                }
+            }
+            Target::ProfilePhoto => {
+                if self.ui.get_signed_in() {
+                    self.ui.set_profile_art(image);
+                    self.ui.set_profile_has_art(true);
+                }
+            }
+            Target::Profile { generation, index } => {
+                let profile = self.profile.borrow();
+                if profile.generation == generation {
+                    if let Some(model) = &profile.model {
+                        set(model, index);
+                    }
                 }
             }
         }
@@ -1139,8 +1188,9 @@ impl App {
     }
 
     fn back(self: &Rc<Self>) {
-        if self.ui.get_nav() == 3 {
-            // Settings sits on top of the page. Leaving it shows the page again.
+        if matches!(self.ui.get_nav(), 3 | 5) {
+            // Settings and the profile sit on top of the page. Leaving them
+            // shows the page again.
             let current = self.history.borrow().last().cloned();
             if let Some(route) = current {
                 self.open(route, false);
@@ -1925,6 +1975,9 @@ impl App {
         };
         let (artist, album, seconds) = credits_with_album(&item);
         let ui = &self.ui;
+        ui.invoke_end_crossfade();
+        self.outgoing.borrow_mut().take();
+        ui.set_fade_motion_on(false);
         ui.set_track_album(album.into());
         ui.set_has_track(true);
         ui.set_track_title(item.title.as_str().into());
@@ -2543,9 +2596,28 @@ impl App {
     /// Now playing, lyrics and media keys switch to it as the fade starts,
     /// the same way as when a song starts.
     fn crossfade_into(self: &Rc<Self>, index: usize, token: u64, seconds: f32, duration: f32) {
+        // The song going out stays on show and fades as its sound does,
+        // its Canvas or moving cover still playing.
+        let ui = &self.ui;
+        ui.set_fade_title(ui.get_track_title());
+        ui.set_fade_artist(ui.get_track_artist());
+        ui.set_fade_art(ui.get_track_art());
+        ui.set_fade_has_art(ui.get_track_has_art());
+        ui.set_fade_motion(ui.get_track_motion());
+        let motion_on = ui.get_track_motion_on();
+        let cover = self.cover.borrow_mut().take();
+        let canvas = self.canvas.borrow_mut().take();
         self.moved_on(index, duration, |app, generation| {
             app.audio.crossfade(token, generation, seconds);
         });
+        // After the move, which ends any crossfade still going.
+        *self.outgoing.borrow_mut() = Some(Outgoing {
+            cover,
+            canvas,
+            until: Instant::now() + Duration::from_secs_f32(seconds),
+        });
+        self.ui.set_fade_motion_on(motion_on);
+        self.ui.invoke_begin_crossfade(seconds);
     }
 
     /// The engine started the armed next song gaplessly. Moves the player
@@ -2693,6 +2765,15 @@ impl App {
                             if live {
                                 app.ui.set_track_motion(Image::from_rgba8(pixels));
                                 app.ui.set_track_motion_on(true);
+                            } else if app
+                                .outgoing
+                                .borrow()
+                                .as_ref()
+                                .and_then(|o| o.canvas.as_ref())
+                                .is_some_and(|(g, _)| *g == generation)
+                            {
+                                // Fading out under the next song.
+                                app.ui.set_fade_motion(Image::from_rgba8(pixels));
                             }
                         })
                     },
@@ -3143,6 +3224,14 @@ impl App {
                 time = base;
             }
             let seconds = time as f32 / 1000.0;
+            // Marks where the next song will start to fade in.
+            let fade = self.crossfade.get() as f32;
+            let fade_from = if fade > 0.0 && duration > fade * 2.0 && self.crossfade_target().is_some() {
+                (duration - fade) / duration
+            } else {
+                1.0
+            };
+            ui.set_fade_from(fade_from);
             ui.set_position_text(clock_text(seconds));
             ui.set_progress(if duration > 0.0 {
                 (seconds / duration).min(1.0)
@@ -3191,8 +3280,32 @@ impl App {
             }
         }
 
+        // The song going out keeps its moving cover going until it has
+        // faded, and is let go then.
+        let mut fading = false;
+        let faded = match self.outgoing.borrow_mut().as_mut() {
+            Some(out) if Instant::now() >= out.until => true,
+            Some(out) => {
+                fading = true;
+                if let Some(cover) = out.cover.as_mut() {
+                    if Instant::now() >= cover.due {
+                        let frame = &cover.frames[cover.index];
+                        ui.set_fade_motion(Image::from_rgba8(frame.pixels.clone()));
+                        cover.due = Instant::now() + frame.delay;
+                        cover.index = (cover.index + 1) % cover.frames.len();
+                    }
+                }
+                false
+            }
+            None => false,
+        };
+        if faded {
+            self.outgoing.borrow_mut().take();
+            ui.set_fade_motion_on(false);
+        }
+
         // Tick fast only while something on screen is moving.
-        let fast = animating || (lyrics_live && state == audio::PLAYING);
+        let fast = animating || fading || (lyrics_live && state == audio::PLAYING);
         if fast != self.fast.replace(fast) {
             self.timer
                 .set_interval(if fast { FAST_TICK } else { SLOW_TICK });
@@ -3542,11 +3655,20 @@ impl App {
     fn check_account(self: &Rc<Self>) {
         let client = self.client.clone();
         self.api.run(move || {
-            let result = client.account_name();
+            let result = client.account();
             on_ui(move |app| match result {
-                Ok(Some(name)) => {
+                Ok(Some(account)) => {
                     app.ui.set_signed_in(true);
-                    app.ui.set_account_name(name.into());
+                    app.ui.set_account_name(account.name.into());
+                    app.ui.set_account_handle(account.handle.into());
+                    if let Some(image) = app.thumb(&account.photo, 48, Target::Account) {
+                        app.ui.set_account_art(image);
+                        app.ui.set_account_has_art(true);
+                    }
+                    *app.account_photo.borrow_mut() = account.photo;
+                    if app.ui.get_nav() == 5 {
+                        app.show_profile_photo();
+                    }
                     app.ui.set_settings_note("".into());
                     let current = app.history.borrow().last().cloned();
                     if let (Some(route), true) = (current, app.ui.get_nav() != 3) {
@@ -3662,6 +3784,69 @@ impl App {
         }
         self.ui.set_signed_in(false);
         self.ui.set_account_name("".into());
+        self.ui.set_account_handle("".into());
+        self.ui.set_account_has_art(false);
+        self.ui.set_profile_has_art(false);
+        self.account_photo.borrow_mut().clear();
+    }
+
+    /// Opens the profile page over the current page, as Settings does: who
+    /// is signed in, what the history on this computer says you play, and
+    /// the services Tonearm reports to.
+    fn show_profile(self: &Rc<Self>) {
+        let (played, artists, (songs, artist_count, opened)) = {
+            let taste = self.taste.borrow();
+            (taste.recent(true, 12), taste.top_artist_names(5), taste.counts())
+        };
+        let generation = {
+            let mut profile = self.profile.borrow_mut();
+            profile.generation += 1;
+            profile.generation
+        };
+        let cards: Vec<ItemData> = played
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                self.item_data(item, index, 156, Target::Profile { generation, index })
+            })
+            .collect();
+        let model = Rc::new(VecModel::from(cards));
+        let ui = &self.ui;
+        ui.set_profile_played(ModelRc::from(model.clone()));
+        ui.set_profile_artists(ModelRc::new(VecModel::from(
+            artists.iter().map(|a| a.as_str().into()).collect::<Vec<SharedString>>(),
+        )));
+        ui.set_profile_songs(songs as i32);
+        ui.set_profile_artist_count(artist_count as i32);
+        ui.set_profile_opened(opened as i32);
+        *self.profile.borrow_mut() = Profile { generation, played, artists, model: Some(model) };
+        self.show_profile_photo();
+        ui.set_nav(5);
+    }
+
+    fn show_profile_photo(self: &Rc<Self>) {
+        let photo = self.account_photo.borrow().clone();
+        if let Some(image) = self.thumb(&photo, 112, Target::ProfilePhoto) {
+            self.ui.set_profile_art(image);
+            self.ui.set_profile_has_art(true);
+        }
+    }
+
+    /// A card under Played lately: plays it, as a click on Home does.
+    fn profile_played(self: &Rc<Self>, index: usize) {
+        let item = self.profile.borrow().played.get(index).cloned();
+        if let Some(item) = item {
+            self.open_item(item);
+        }
+    }
+
+    /// One of the top artists: searches for them.
+    fn profile_artist(self: &Rc<Self>, index: usize) {
+        let name = self.profile.borrow().artists.get(index).cloned();
+        if let Some(name) = name {
+            self.ui.set_search_text(name.as_str().into());
+            self.open(Route::Search(name, 0), true);
+        }
     }
 }
 
@@ -4095,6 +4280,8 @@ fn main() -> Result<(), slint::PlatformError> {
         history: RefCell::default(),
         page: RefCell::default(),
         taste: RefCell::new(history::History::load()),
+        profile: RefCell::default(),
+        account_photo: RefCell::default(),
         disk: pool::Pool::new("disk", 1),
         session_saved: Cell::new(Instant::now()),
         warm: pool::Pool::new("warm", WARM_AT_ONCE),
@@ -4105,6 +4292,7 @@ fn main() -> Result<(), slint::PlatformError> {
         lyrics: RefCell::default(),
         cover: RefCell::new(None),
         canvas: RefCell::new(None),
+        outgoing: RefCell::new(None),
         clock: Cell::new((0, Instant::now())),
         crossfade: Cell::new(load_crossfade()),
         fade_next: RefCell::new(None),
@@ -4154,6 +4342,10 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
     on!(on_back, |app| app.back());
+    on!(on_open_profile, |app| app.show_profile());
+    on!(on_profile_played_picked, |app, index| app.profile_played(index.max(0) as usize));
+    on!(on_profile_played_play, |app, index| app.profile_played(index.max(0) as usize));
+    on!(on_profile_artist_picked, |app, index| app.profile_artist(index.max(0) as usize));
     on!(on_search, |app, query| {
         let query = query.trim().to_string();
         if !query.is_empty() {
