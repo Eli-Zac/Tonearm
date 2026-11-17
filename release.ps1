@@ -47,11 +47,6 @@ $installer = "Tonearm-$Version-setup.exe"
 Write-Host "Made $installer"
 
 if ($Publish) {
-    # Transitional, for v0.6.1 only: the v0.6.0 updater looks for
-    # tonearm-setup.exe, and v0.5.0 and earlier look for tonearm.exe.
-    # From v0.6.2 on, publish only $installer.
-    Copy-Item $installer tonearm-setup.exe -Force
-    Copy-Item target\release\tonearm.exe tonearm.exe -Force
-    gh release create $tag $installer tonearm-setup.exe tonearm.exe --target (git rev-parse HEAD) --title "Tonearm $tag" --generate-notes
+    gh release create $tag $installer --target (git rev-parse HEAD) --title "Tonearm $tag" --generate-notes
     if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
 }

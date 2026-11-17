@@ -102,12 +102,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           INSTALLER="Tonearm-${VERSION#v}-setup.exe"
-          # Transitional, for v0.6.1 only: the v0.6.0 updater looks for
-          # tonearm-setup.exe, and v0.5.0 and earlier look for tonearm.exe.
-          # From v0.6.2 on, publish only "$INSTALLER".
-          cp "$INSTALLER" tonearm-setup.exe
-          cp target/release/tonearm.exe tonearm.exe
-          gh release create "$VERSION" "$INSTALLER" tonearm-setup.exe tonearm.exe \
+          gh release create "$VERSION" "$INSTALLER" \
             --target "$GITHUB_SHA" \
             --title "Tonearm $VERSION" \
             --generate-notes
