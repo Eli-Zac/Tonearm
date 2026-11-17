@@ -1,8 +1,12 @@
 name: Release
 
 # Builds the Windows binary and installer and publishes them as a GitHub
-# release. Triggered by pushing a version tag (v*) or manually from the
-# Actions tab.
+# release. Start a release by pushing a version tag:
+#
+#   git tag v1.2.0 && git push origin v1.2.0
+#
+# A manual run from the Actions tab needs that tag to exist already: the
+# workflow token cannot create a tag on commits that change workflow files.
 on:
   workflow_dispatch:
     inputs:
@@ -32,6 +36,15 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Check release tag exists
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        shell: bash
+        run: |
+          if ! git ls-remote --exit-code --tags origin "refs/tags/$VERSION" > /dev/null; then
+            echo "::error::Tag $VERSION does not exist. Push it first: git tag $VERSION && git push origin $VERSION"
+            exit 1
+          fi
 
       # Falls back to the most recent cache when Cargo.lock changes, and
       # saves even if a later step fails.
