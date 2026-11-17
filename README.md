@@ -6,6 +6,8 @@ Tonearm has no web view and no browser engine. It draws its own UI with
 [Slint](https://slint.dev) and Skia, and talks to YouTube Music over plain
 HTTPS, so it starts fast and stays small in memory.
 
+![Tonearm's Now playing view: a large album cover beside synced lyrics](assets/screenshots/now-playing.webp)
+
 > [!IMPORTANT]
 > Tonearm is an unofficial, independent project. It is not affiliated with,
 > endorsed by or sponsored by Google, YouTube or Spotify. YouTube Music is a
@@ -32,11 +34,20 @@ HTTPS, so it starts fast and stays small in memory.
 * Discord Rich Presence and Last.fm scrobbling
 * In-app updates
 
+## Screenshots
+
+| | |
+|---|---|
+| ![An artist page with a banner and a numbered list of popular songs](assets/screenshots/artist.webp) | ![Synced lyrics in a side panel, with the current line in focus](assets/screenshots/lyrics.webp) |
+| Artist pages | Synced lyrics |
+| ![Search suggestions with songs and artists as you type](assets/screenshots/search.webp) | ![The Now playing panel with the cover, lyrics and what plays next](assets/screenshots/queue-panel.webp) |
+| Search as you type | The Now playing panel |
+
 Tonearm is young. Expect rough edges, and please report what breaks.
 
 ## Install
 
-Download `tonearm-setup.exe` from the
+Download `Tonearm-<version>-setup.exe` from the
 [latest release](../../releases/latest) and run it. It installs just for
 you, in `%LOCALAPPDATA%\Programs\Tonearm`, and needs no admin rights. You
 can uninstall it from Settings > Apps like any other app.
@@ -144,7 +155,7 @@ and run this from the repository root.
 makensis -DVERSION=0.6.0 installer/tonearm.nsi
 ```
 
-It writes `tonearm-setup.exe` next to `Cargo.toml`.
+It writes `Tonearm-0.6.0-setup.exe` next to `Cargo.toml`.
 
 ### Service keys
 
