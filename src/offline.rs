@@ -61,7 +61,7 @@ fn state() -> std::sync::MutexGuard<'static, State> {
 }
 
 fn root() -> Option<PathBuf> {
-    Some(dirs::data_local_dir()?.join("tonearm"))
+    crate::store::data_dir()
 }
 
 fn cache_dir() -> Option<PathBuf> {

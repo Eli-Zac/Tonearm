@@ -289,7 +289,7 @@ fn read_all(response: ureq::Response, limit: u64) -> Result<Vec<u8>, String> {
 }
 
 fn clips_dir() -> Option<PathBuf> {
-    Some(dirs::data_local_dir()?.join("tonearm").join("canvas"))
+    Some(crate::store::data_dir()?.join("canvas"))
 }
 
 /// Finds the track's Canvas and keeps the clip on disk. Ok(None) means the

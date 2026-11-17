@@ -225,7 +225,7 @@ struct YtDlp {
 }
 
 fn data_dir() -> Option<PathBuf> {
-    Some(dirs::data_local_dir()?.join("tonearm"))
+    crate::store::data_dir()
 }
 
 fn command(path: &Path) -> Command {

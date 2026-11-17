@@ -30,6 +30,10 @@ pub fn set_process_id() {
 /// startup does not wait on the shell. Does nothing when it already points
 /// at this exe.
 pub fn ensure_shortcut() {
+    // A test copy with a profile of its own must not take the shortcut over.
+    if std::env::var_os("TONEARM_PROFILE").is_some() {
+        return;
+    }
     std::thread::spawn(|| {
         let _ = ensure();
     });

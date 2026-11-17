@@ -3,12 +3,26 @@
 
 use std::path::PathBuf;
 
+/// Where Tonearm keeps its settings and sign in. `TONEARM_PROFILE` points a
+/// copy at a folder of its own instead, so a test copy starts signed out and
+/// leaves the real queue and history alone.
+pub fn config_dir() -> Option<PathBuf> {
+    match std::env::var_os("TONEARM_PROFILE") {
+        Some(dir) => Some(PathBuf::from(dir).join("config")),
+        None => Some(dirs::config_dir()?.join("tonearm")),
+    }
+}
+
+/// Where Tonearm keeps downloads, caches and yt-dlp. See `config_dir`.
+pub fn data_dir() -> Option<PathBuf> {
+    match std::env::var_os("TONEARM_PROFILE") {
+        Some(dir) => Some(PathBuf::from(dir).join("data")),
+        None => Some(dirs::data_local_dir()?.join("tonearm")),
+    }
+}
+
 fn path(name: &str) -> Option<PathBuf> {
-    Some(
-        dirs::config_dir()?
-            .join("tonearm")
-            .join(format!("{name}.bin")),
-    )
+    Some(config_dir()?.join(format!("{name}.bin")))
 }
 
 pub fn load(name: &str) -> Option<String> {
