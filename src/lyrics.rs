@@ -37,6 +37,11 @@ pub struct Line {
     /// Backing vocals sung along with the line, without their brackets.
     pub background: Vec<Syllable>,
     pub background_text: String,
+    /// Translations the source ships with the line, as language tag and
+    /// text, such as ("en", "Hello").
+    pub official: Vec<(String, String)>,
+    /// The translation on show under the line. Empty for none.
+    pub translation: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -290,6 +295,104 @@ fn close_lines(lines: &mut [Line]) {
     }
 }
 
+// ------------------------------------------------------------ translation
+
+/// Whether two language tags name the same language: "en" and "en-GB" do,
+/// "zh-CN" and "zh-TW" do not.
+pub fn same_language(a: &str, b: &str) -> bool {
+    let a = a.to_ascii_lowercase().replace('_', "-");
+    let b = b.to_ascii_lowercase().replace('_', "-");
+    let chinese = |t: &str| match t {
+        "zh-tw" | "zh-hk" | "zh-hant" | "zh-mo" => "zh-hant",
+        t if t.starts_with("zh") => "zh-hans",
+        _ => "",
+    };
+    if a.starts_with("zh") && b.starts_with("zh") {
+        return chinese(&a) == chinese(&b);
+    }
+    a.split('-').next() == b.split('-').next()
+}
+
+/// Machine translations of `lines` into the language `target`, one per
+/// line, from the Google Translate endpoint Chrome's translate extension
+/// uses. (The better known `translate_a/single?client=gtx` one turns a
+/// computer away for a while after a few requests.) A line comes back
+/// empty when it could not be translated, or was already in that language.
+pub fn translate(lines: &[String], target: &str) -> Option<Vec<String>> {
+    let http = agent(Duration::from_secs(10));
+    let mut out = Vec::with_capacity(lines.len());
+    let mut any = false;
+    // Lines go a batch at a time, each its own `q`, keeping the address
+    // short enough once Hangul and kana are escaped.
+    let mut start = 0;
+    while start < lines.len() {
+        let mut end = start;
+        let mut size = 0;
+        while end < lines.len() && (end == start || size + lines[end].len() < 1200) {
+            size += lines[end].len();
+            end += 1;
+        }
+        let batch = &lines[start..end];
+        match translate_batch(&http, batch, target) {
+            Some(done) => {
+                any = true;
+                out.extend(done);
+            }
+            None => out.extend(batch.iter().map(|_| String::new())),
+        }
+        start = end;
+    }
+    any.then_some(out)
+}
+
+fn translate_batch(http: &ureq::Agent, lines: &[String], target: &str) -> Option<Vec<String>> {
+    let mut request = http
+        .get("https://clients5.google.com/translate_a/t")
+        .set("User-Agent", AGENT)
+        .query("client", "dict-chrome-ex")
+        .query("sl", "auto")
+        .query("tl", target);
+    for line in lines {
+        request = request.query("q", line);
+    }
+    let response = request
+        .call()
+        .map_err(|e| eprintln!("lyrics: translating failed: {e}"))
+        .ok()?;
+    let json: Value = serde_json::from_str(&response.into_string().ok()?).ok()?;
+    // One entry per line: [translation, detected language], or just the
+    // translation when there is a single line.
+    let entries: Vec<Value> = match json {
+        Value::Array(entries) => entries,
+        single => vec![single],
+    };
+    if entries.len() != lines.len() {
+        return None;
+    }
+    Some(
+        entries
+            .iter()
+            .zip(lines)
+            .map(|(entry, line)| {
+                let (text, detected) = match entry {
+                    Value::String(text) => (text.as_str(), ""),
+                    entry => (
+                        entry.get(0).and_then(Value::as_str).unwrap_or(""),
+                        entry.get(1).and_then(Value::as_str).unwrap_or(""),
+                    ),
+                };
+                // Words already in the language, such as an English
+                // chorus, need no second copy.
+                if same_language(detected, target) || normalized(text) == normalized(line) {
+                    String::new()
+                } else {
+                    text.trim().to_string()
+                }
+            })
+            .collect(),
+    )
+}
+
 // ------------------------------------------------------------------- TTML
 
 /// "1:02:03.5", "1:23.456" and "12.3" all mean a time. Returns milliseconds.
@@ -406,10 +509,40 @@ pub fn parse_ttml(ttml: &str) -> Vec<Line> {
         .filter(|n| n.tag_name().name() == "agent" && attr(*n, "type").as_deref() == Some("group"))
         .filter_map(|n| attr(n, "id"))
         .collect();
+    let all_text = |n: roxmltree::Node| -> String {
+        let text: String = n
+            .descendants()
+            .filter_map(|d| d.text().filter(|_| d.is_text()))
+            .collect();
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    };
+    // Apple's translations sit in the head, each keyed to a line:
+    // <translation xml:lang="en"><text for="L1">…</text></translation>
+    let mut keyed: Vec<(String, String, String)> = Vec::new();
+    for translation in doc.descendants().filter(|n| n.tag_name().name() == "translation") {
+        let Some(lang) = attr(translation, "lang") else { continue };
+        for text in translation.children().filter(|n| n.tag_name().name() == "text") {
+            if let Some(key) = attr(text, "for") {
+                keyed.push((key, lang.clone(), all_text(text)));
+            }
+        }
+    }
     // Singers take turns left and right, in the order they first sing.
     let mut singers: Vec<String> = Vec::new();
     let mut lines = Vec::new();
     for p in doc.descendants().filter(|n| n.has_tag_name("p")) {
+        let mut official: Vec<(String, String)> = Vec::new();
+        if let Some(key) = attr(p, "key") {
+            for (_, lang, text) in keyed.iter().filter(|(k, _, _)| *k == key) {
+                official.push((lang.clone(), text.clone()));
+            }
+        }
+        // Others put the translation in the line itself.
+        for span in p.descendants().filter(|n| attr(*n, "role").as_deref() == Some("x-translation")) {
+            let lang = attr(span, "lang").unwrap_or_default();
+            official.push((lang, all_text(span)));
+        }
+        official.retain(|(_, text)| !text.is_empty());
         let mut syllables = Vec::new();
         let mut background = Vec::new();
         collect(p, &mut syllables, &mut background);
@@ -435,9 +568,15 @@ pub fn parse_ttml(ttml: &str) -> Vec<Line> {
             None => 0,
         };
         let line = if syllables.is_empty() {
+            let aside = |d: roxmltree::Node| {
+                d.ancestors().any(|a| {
+                    matches!(attr(a, "role").as_deref(), Some("x-translation" | "x-roman"))
+                })
+            };
             let text: String = p
                 .descendants()
-                .filter_map(|d| d.text().filter(|_| d.is_text()))
+                .filter(|d| d.is_text() && !aside(*d))
+                .filter_map(|d| d.text())
                 .collect();
             let Some((start, end)) = span else { continue };
             Line {
@@ -446,6 +585,7 @@ pub fn parse_ttml(ttml: &str) -> Vec<Line> {
                 text: text.trim().to_string(),
                 syllables,
                 align,
+                official,
                 ..Line::default()
             }
         } else {
@@ -466,6 +606,8 @@ pub fn parse_ttml(ttml: &str) -> Vec<Line> {
                 align,
                 background,
                 background_text,
+                official,
+                translation: String::new(),
             }
         };
         if !line.text.is_empty() {
@@ -518,6 +660,22 @@ mod tests {
           </div></body></tt>"#;
         let aligns: Vec<u8> = parse_ttml(ttml).iter().map(|l| l.align).collect();
         assert_eq!(aligns, [0, 1, 2, 0]);
+    }
+
+    #[test]
+    fn translations_come_from_the_head_or_the_line() {
+        let ttml = r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttm="http://www.w3.org/ns/ttml#metadata" xmlns:itunes="http://music.apple.com/lyric-ttml-internal">
+          <head><metadata><iTunesMetadata xmlns="http://music.apple.com/lyric-ttml-internal"><translations>
+            <translation type="subtitle" xml:lang="en"><text for="L1">My world at last</text></translation>
+          </translations></iTunesMetadata></metadata></head>
+          <body><div>
+            <p begin="1.0" end="2.0" itunes:key="L1"><span begin="1.0" end="1.5">비로소</span> <span begin="1.5" end="2.0">내 세상</span></p>
+            <p begin="2.0" end="3.0">안녕<span ttm:role="x-translation" xml:lang="en">Hello</span></p>
+          </div></body></tt>"#;
+        let lines = parse_ttml(ttml);
+        assert_eq!(lines[0].official, [("en".to_string(), "My world at last".to_string())]);
+        assert_eq!(lines[1].text, "안녕");
+        assert_eq!(lines[1].official, [("en".to_string(), "Hello".to_string())]);
     }
 
     #[test]

@@ -267,6 +267,9 @@ struct LyricsState {
     /// Counts the times the rows were laid out, so blurred images drawn
     /// for an older layout are dropped.
     layout: u64,
+    /// The language the lyrics on show are translated into, or being
+    /// translated into. Empty for none.
+    translated_to: &'static str,
 }
 
 /// How much of the current track has really played. Drives scrobbling.
@@ -351,6 +354,20 @@ fn load_crossfade() -> u32 {
         .unwrap_or(0)
 }
 
+/// Languages lyrics can be translated into in Settings, as the tag Google
+/// Translate takes. The first, empty, is off. Names match the dropdown.
+const TRANSLATE_CHOICES: [&str; 13] = [
+    "", "en", "es", "fr", "de", "it", "pt", "ru", "ja", "ko", "zh-CN", "zh-TW", "id",
+];
+
+/// The language saved in Settings to translate lyrics into, as an index
+/// into `TRANSLATE_CHOICES`. Off when none is saved.
+fn load_translate() -> usize {
+    store::load("translate")
+        .and_then(|tag| TRANSLATE_CHOICES.iter().position(|&t| t == tag.trim()))
+        .unwrap_or(0)
+}
+
 struct Cover {
     generation: u64,
     frames: Vec<motion::Frame>,
@@ -406,6 +423,9 @@ struct App {
     clock: Cell<(u64, Instant)>,
     /// Seconds a song crossfades into the next one over. Zero is off.
     crossfade: Cell<u32>,
+    /// The language lyrics are translated into: an index into
+    /// `TRANSLATE_CHOICES`, zero for off.
+    translate: Cell<usize>,
     /// The next song, being opened ahead for a crossfade.
     fade_next: RefCell<Option<FadeNext>>,
     /// Counts the songs opened ahead, so each gets its own token.
@@ -2935,7 +2955,10 @@ impl App {
                 seconds,
             };
             let found = lyrics::fetch(&client, &query);
-            on_ui(move |app| app.show_lyrics(generation, found));
+            on_ui(move |app| {
+                app.show_lyrics(generation, found);
+                app.translate_lyrics();
+            });
         });
     }
 
@@ -2949,6 +2972,84 @@ impl App {
         if found.is_some() {
             self.show_lyrics(generation, found);
         }
+    }
+
+    fn set_translate_choice(&self, choice: i32) {
+        let index = (choice.max(0) as usize).min(TRANSLATE_CHOICES.len() - 1);
+        self.translate.set(index);
+        let tag = TRANSLATE_CHOICES[index];
+        self.disk.run(move || {
+            let _ = store::save("translate", tag);
+        });
+        self.translate_lyrics();
+    }
+
+    /// Puts translations under the lyrics on show, in the language picked in
+    /// Settings, or takes them away when it is off. The source's own
+    /// translation is used when it has one in that language; otherwise the
+    /// lines are machine translated in the background.
+    fn translate_lyrics(&self) {
+        let target = TRANSLATE_CHOICES[self.translate.get()];
+        let (generation, mut found) = {
+            let mut state = self.lyrics.borrow_mut();
+            let Some(found) = state.found.clone() else { return };
+            if state.translated_to == target {
+                return;
+            }
+            state.translated_to = target;
+            (state.generation, found)
+        };
+        if target.is_empty() {
+            for line in &mut found.lines {
+                line.translation.clear();
+            }
+            self.show_lyrics(generation, Some(found));
+            return;
+        }
+        // Lines with a translation of their own in the language use it. Any
+        // older translation goes while the rest come.
+        let mut missing: Vec<usize> = Vec::new();
+        for (index, line) in found.lines.iter_mut().enumerate() {
+            let official = line
+                .official
+                .iter()
+                .find(|(lang, _)| lyrics::same_language(lang, target))
+                .map(|(_, text)| text.clone());
+            line.translation = match official {
+                Some(text) if text != line.text => text,
+                Some(_) => String::new(),
+                None => {
+                    missing.push(index);
+                    String::new()
+                }
+            };
+        }
+        self.show_lyrics(generation, Some(found.clone()));
+        if missing.is_empty() {
+            return;
+        }
+        let texts: Vec<String> = missing.iter().map(|&i| found.lines[i].text.clone()).collect();
+        std::thread::spawn(move || {
+            let Some(translated) = lyrics::translate(&texts, target) else {
+                return;
+            };
+            on_ui(move |app| {
+                let found = {
+                    let state = app.lyrics.borrow();
+                    if state.generation != generation || state.translated_to != target {
+                        return;
+                    }
+                    let Some(mut found) = state.found.clone() else { return };
+                    for (index, text) in missing.into_iter().zip(translated) {
+                        if let Some(line) = found.lines.get_mut(index) {
+                            line.translation = text;
+                        }
+                    }
+                    found
+                };
+                app.show_lyrics(generation, Some(found));
+            });
+        });
     }
 
     fn show_lyrics(&self, generation: u64, found: Option<lyrics::Lyrics>) {
@@ -3046,6 +3147,27 @@ impl App {
                         start,
                         end,
                         kind: 3,
+                        line: number,
+                        align: line.align as i32,
+                        ..LyricRow::default()
+                    });
+                }
+            }
+            // The translation, smaller and dimmer, under the line.
+            if !line.translation.is_empty() {
+                let translation = lyrics::Line {
+                    text: line.translation.clone(),
+                    ..lyrics::Line::default()
+                };
+                // At 0.6 of the size, and never grown.
+                let wider = if found.synced { columns * 2 } else { columns };
+                for text in wrap(&translation, wider).into_iter().map(|(text, _)| text) {
+                    y += height * 0.6;
+                    rows.push(LyricRow {
+                        text: text.into(),
+                        start,
+                        end,
+                        kind: 4,
                         line: number,
                         align: line.align as i32,
                         ..LyricRow::default()
@@ -3879,14 +4001,40 @@ fn shuffled(mut songs: Vec<Item>) -> Vec<Item> {
     songs
 }
 
-/// Breaks a lyric line into rows of at most `columns` characters. Breaks
-/// fall only between words, so a syllable sweep never splits a word.
+/// Whether a character is drawn about twice as wide as a Latin letter, as
+/// Hangul, kana and CJK ideographs are.
+fn is_wide(c: char) -> bool {
+    matches!(c as u32,
+        0x1100..=0x115F       // Hangul Jamo
+        | 0x2E80..=0x303E     // CJK radicals, punctuation
+        | 0x3041..=0x33FF     // kana, CJK compatibility
+        | 0x3400..=0x4DBF     // CJK extension A
+        | 0x4E00..=0x9FFF     // CJK ideographs
+        | 0xA960..=0xA97F     // Hangul Jamo extended A
+        | 0xAC00..=0xD7FF     // Hangul syllables, Jamo extended B
+        | 0xF900..=0xFAFF     // CJK compatibility ideographs
+        | 0xFE30..=0xFE4F     // CJK compatibility forms
+        | 0xFF00..=0xFF60     // full-width forms
+        | 0xFFE0..=0xFFE6
+        | 0x1F300..=0x1FAFF   // emoji
+        | 0x20000..=0x3FFFD)  // CJK extensions B on
+}
+
+/// How many columns a piece of text takes, counting wide characters twice.
+fn columns_of(text: &str) -> usize {
+    text.chars().map(|c| if is_wide(c) { 2 } else { 1 }).sum()
+}
+
+/// Breaks a lyric line into rows of at most `columns` columns, counting
+/// wide characters twice. Breaks fall only between words, so a syllable
+/// sweep never splits a word; in Japanese and Chinese, written without
+/// spaces, a row may break between any two syllables.
 fn wrap(line: &lyrics::Line, columns: usize) -> Vec<(String, Vec<lyrics::Syllable>)> {
     let mut rows: Vec<(String, Vec<lyrics::Syllable>)> = vec![Default::default()];
     if line.syllables.is_empty() {
         for word in line.text.split_whitespace() {
             let row = rows.last_mut().unwrap();
-            if !row.0.is_empty() && row.0.chars().count() + word.chars().count() + 1 > columns {
+            if !row.0.is_empty() && columns_of(&row.0) + columns_of(word) + 1 > columns {
                 rows.push((word.to_string(), Vec::new()));
             } else {
                 if !row.0.is_empty() {
@@ -3901,12 +4049,18 @@ fn wrap(line: &lyrics::Line, columns: usize) -> Vec<(String, Vec<lyrics::Syllabl
     let count = line.syllables.len();
     for (index, syllable) in line.syllables.iter().enumerate() {
         word.push(syllable.clone());
-        if !syllable.text.ends_with(' ') && index + 1 < count {
+        // Korean spaces its words, so only kana and Han break anywhere.
+        let spaceless = |c: char| is_wide(c) && !matches!(c as u32, 0x1100..=0x11FF | 0xA960..=0xA97F | 0xAC00..=0xD7FF);
+        let ends_wide = syllable.text.chars().last().is_some_and(spaceless)
+            && line.syllables.get(index + 1).is_some_and(|next| {
+                next.text.chars().next().is_some_and(spaceless)
+            });
+        if !syllable.text.ends_with(' ') && !ends_wide && index + 1 < count {
             continue;
         }
-        let length: usize = word.iter().map(|s| s.text.chars().count()).sum();
+        let length: usize = word.iter().map(|s| columns_of(&s.text)).sum();
         if !rows.last().unwrap().0.is_empty()
-            && rows.last().unwrap().0.chars().count() + length > columns
+            && columns_of(&rows.last().unwrap().0) + length > columns
         {
             rows.push(Default::default());
         }
@@ -4152,6 +4306,21 @@ fn probe(args: &[String]) {
                             line.syllables.len()
                         );
                     }
+                    // --probe lyrics <title> <artist> <seconds> <videoId> <language>
+                    if !arg(5).is_empty() {
+                        let texts: Vec<String> = found.lines.iter().map(|l| l.text.clone()).collect();
+                        for line in found.lines.iter().take(3) {
+                            println!("official {:?}", line.official);
+                        }
+                        match lyrics::translate(&texts, arg(5)) {
+                            Some(done) => {
+                                for (line, text) in texts.iter().zip(done).take(12) {
+                                    println!("{line}\n  -> {text}");
+                                }
+                            }
+                            None => println!("no translation"),
+                        }
+                    }
                 }
                 None => println!("no lyrics"),
             }
@@ -4295,6 +4464,7 @@ fn main() -> Result<(), slint::PlatformError> {
         outgoing: RefCell::new(None),
         clock: Cell::new((0, Instant::now())),
         crossfade: Cell::new(load_crossfade()),
+        translate: Cell::new(load_translate()),
         fade_next: RefCell::new(None),
         fade_token: Cell::new(0),
         levelling: Cell::new(load_levelling()),
@@ -4421,6 +4591,7 @@ fn main() -> Result<(), slint::PlatformError> {
     on!(on_cache_choice_changed, |app, choice| app.set_cache_choice(choice));
     on!(on_clear_cache, |app| app.clear_cache());
     on!(on_crossfade_choice_changed, |app, choice| app.set_crossfade_choice(choice));
+    on!(on_translate_choice_changed, |app, choice| app.set_translate_choice(choice));
     // detail pages, links and the right click menu
     on!(on_show_all, |app, id| app.show_all(id as usize));
     on!(on_byline_clicked, |app| app.byline_clicked());
@@ -4436,6 +4607,7 @@ fn main() -> Result<(), slint::PlatformError> {
             .position(|&c| c == app.crossfade.get())
             .unwrap_or(0) as i32,
     );
+    app.ui.set_translate_choice(app.translate.get() as i32);
     app.ui.set_levelling_choice(app.levelling.get());
     app.ui.set_close_choice(if app.close_to_tray.get() { 0 } else { 1 });
     {

@@ -9,18 +9,54 @@ use swash::shape::ShapeContext;
 use swash::zeno::Format;
 use swash::FontRef;
 
-/// Segoe UI Bold, close to the window's font. Not the variable Segoe UI the
-/// window uses: swash gives some of its letters, such as r, far too wide an
-/// advance. The image is stretched to the window's own width of the line.
-fn font_data() -> Option<&'static [u8]> {
-    static DATA: OnceLock<Option<Vec<u8>>> = OnceLock::new();
+/// The fonts lines are drawn in, first choice first. Segoe UI Bold is close
+/// to the window's font. (Not the variable Segoe UI the window uses: swash
+/// gives some of its letters, such as r, far too wide an advance. The image
+/// is stretched to the window's own width of the line.) Segoe UI has no
+/// Korean, Japanese or Chinese, so those come from the fonts Windows itself
+/// falls back to for them, in bold.
+fn fonts() -> &'static [Vec<u8>] {
+    static DATA: OnceLock<Vec<Vec<u8>>> = OnceLock::new();
     DATA.get_or_init(|| {
-        let fonts = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into()) + r"\Fonts\";
-        ["segoeuib.ttf", "SegUIVar.ttf"]
+        let dir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into()) + r"\Fonts\";
+        let mut fonts: Vec<Vec<u8>> = ["segoeuib.ttf", "SegUIVar.ttf"]
             .iter()
-            .find_map(|name| std::fs::read(fonts.clone() + name).ok())
+            .find_map(|name| std::fs::read(dir.clone() + name).ok())
+            .into_iter()
+            .collect();
+        for name in ["malgunbd.ttf", "YuGothB.ttc", "msyhbd.ttc", "msjhbd.ttc", "seguisym.ttf"] {
+            if let Ok(data) = std::fs::read(dir.clone() + name) {
+                fonts.push(data);
+            }
+        }
+        fonts
     })
-    .as_deref()
+}
+
+/// Splits `text` into runs, each with the index of the first font in
+/// `fonts` that has all its letters. Spaces and marks stay with the run
+/// they are in, so a word is never split between fonts.
+fn runs<'a>(text: &'a str, fonts: &[FontRef]) -> Vec<(usize, &'a str)> {
+    let pick = |c: char| fonts.iter().position(|f| f.charmap().map(c) != 0);
+    let mut runs: Vec<(usize, &str)> = Vec::new();
+    let mut start = 0;
+    let mut current: Option<usize> = None;
+    for (at, c) in text.char_indices() {
+        let neutral = c.is_whitespace() || (c.is_ascii_punctuation() && current.is_some());
+        let font = if neutral { current } else { pick(c).or(current) };
+        if let (Some(old), Some(new)) = (current, font) {
+            if old != new {
+                runs.push((old, &text[start..at]));
+                start = at;
+            }
+        }
+        if font.is_some() {
+            current = font;
+        }
+    }
+    runs.push((current.unwrap_or(0), &text[start..]));
+    runs.retain(|(_, run)| !run.is_empty());
+    runs
 }
 
 /// Draws `text` white on clear at `px` physical pixels in bold, blurred by
@@ -28,40 +64,56 @@ fn font_data() -> Option<&'static [u8]> {
 /// each side, and the line's ascent plus descent plus `margin` above and
 /// below. `margin` should be about three times the radius, so the blur fits.
 pub fn render(text: &str, px: f32, radius: f32, margin: u32) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
-    let data = font_data()?;
-    let font = FontRef::from_index(data, 0)?;
+    let fonts: Vec<FontRef> = fonts()
+        .iter()
+        .filter_map(|data| FontRef::from_index(data, 0))
+        .collect();
+    if fonts.is_empty() {
+        return None;
+    }
     let weight = [("wght", 700.0f32)];
 
+    // Shape each run in its own font, one after another along the line.
     let mut shape = ShapeContext::new();
-    let mut shaper = shape.builder(font).size(px).variations(weight).build();
-    let metrics = shaper.metrics();
-    shaper.add_str(text);
     let mut glyphs = Vec::new();
     let mut pen = 0.0f32;
-    shaper.shape_with(|cluster| {
-        for glyph in cluster.glyphs {
-            glyphs.push((glyph.id, pen + glyph.x, glyph.y));
-            pen += glyph.advance;
-        }
-    });
+    let (mut ascent, mut descent) = (0f32, 0f32);
+    for (index, run) in runs(text, &fonts) {
+        let mut shaper = shape.builder(fonts[index]).size(px).variations(weight).build();
+        let metrics = shaper.metrics();
+        ascent = ascent.max(metrics.ascent);
+        descent = descent.max(metrics.descent);
+        shaper.add_str(run);
+        shaper.shape_with(|cluster| {
+            for glyph in cluster.glyphs {
+                glyphs.push((index, glyph.id, pen + glyph.x, glyph.y));
+                pen += glyph.advance;
+            }
+        });
+    }
 
     let width = pen.ceil() as u32 + margin * 2;
-    let line = (metrics.ascent + metrics.descent).ceil() as u32;
+    let line = (ascent + descent).ceil() as u32;
     let height = line + margin * 2;
-    let baseline = margin as f32 + metrics.ascent;
+    let baseline = margin as f32 + ascent;
     let mut alpha = vec![0f32; (width * height) as usize];
 
-    let mut scale = ScaleContext::new();
-    let mut scaler = scale.builder(font).size(px).variations(weight).hint(false).build();
+    let mut contexts: Vec<ScaleContext> = fonts.iter().map(|_| ScaleContext::new()).collect();
+    let mut scalers: Vec<_> = contexts
+        .iter_mut()
+        .zip(&fonts)
+        .map(|(context, font)| context.builder(*font).size(px).variations(weight).hint(false).build())
+        .collect();
     let sources = [Source::Outline];
-    for (id, x, y) in glyphs {
+    for (index, id, x, y) in glyphs {
+        let scaler = &mut scalers[index];
         let origin_x = margin as f32 + x;
         let origin_y = baseline - y;
         let mut render = Render::new(&sources);
         render
             .format(Format::Alpha)
             .offset(swash::zeno::Vector::new(origin_x.fract(), 0.0));
-        let Some(image) = render.render(&mut scaler, id) else { continue };
+        let Some(image) = render.render(scaler, id) else { continue };
         let p = image.placement;
         let left = origin_x.floor() as i32 + p.left;
         let top = origin_y.round() as i32 - p.top;
@@ -163,5 +215,20 @@ mod tests {
             assert!(widest <= 4, "{text:?} has a {widest}px gap");
             assert!(last - first < 90, "{text:?} is {}px wide", last - first);
         }
+    }
+
+    /// Korean, Japanese and Chinese come from fallback fonts rather than
+    /// Segoe UI's empty box, which would draw every letter the same.
+    #[test]
+    fn draws_korean_japanese_and_chinese() {
+        let inked = |text: &str| {
+            let img = super::render(text, 24.0, 0.0, 2).expect("fonts are installed");
+            img.as_slice().iter().filter(|p| p.a > 60).count()
+        };
+        // Two different letters ink differently; two empty boxes do not.
+        assert_ne!(inked("바"), inked("람"));
+        assert_ne!(inked("あ"), inked("ぬ"));
+        assert_ne!(inked("一"), inked("龍"));
+        assert!(inked("Ah-oh 비로소") > inked("Ah-oh"));
     }
 }

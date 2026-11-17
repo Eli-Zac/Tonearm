@@ -113,7 +113,8 @@ export struct LyricRow {
     syllables: [SyllableData],
     start: int,
     end: int,
-    // 0 words, 1 gap between lines, 2 interlude dots, 3 backing vocals
+    // 0 words, 1 gap between lines, 2 interlude dots, 3 backing vocals,
+    // 4 translation
     kind: int,
     line: int,
     // The first row of its line. The view scrolls to it.
@@ -2963,6 +2964,9 @@ export component AppWindow inherits Window {
     // Index into the crossfade lengths: off, 1, 2, 3, 4, 6, 8, 10, 12 s.
     in-out property <int> crossfade-choice: 0;
     callback crossfade-choice-changed(int);
+    // Index into the languages lyrics are translated into; 0 is off.
+    in-out property <int> translate-choice: 0;
+    callback translate-choice-changed(int);
     // Volume levelling: off, quiet, normal or loud.
     in-out property <int> levelling-choice: 2;
     callback levelling-choice-changed(int);
@@ -3476,6 +3480,23 @@ export component AppWindow inherits Window {
                                     options: ["Off", "1 s", "2 s", "3 s", "4 s", "6 s", "8 s", "10 s", "12 s"];
                                     selected <=> root.crossfade-choice;
                                     changed(i) => { root.crossfade-choice-changed(i); }
+                                }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        max-width: 680px;
+                        border-radius: 12px;
+                        background: #ffffff0a;
+                        HorizontalLayout {
+                            padding: 20px;
+                            SettingRow {
+                                title: "Translate lyrics";
+                                subtitle: "Shows a translation under each line of lyrics. The lyrics' own translation is used when they have one, and Google Translate otherwise.";
+                                Dropdown {
+                                    options: ["Off", "English", "Spanish", "French", "German", "Italian", "Portuguese", "Russian", "Japanese", "Korean", "Chinese (Simplified)", "Chinese (Traditional)", "Indonesian"];
+                                    selected <=> root.translate-choice;
+                                    changed(i) => { root.translate-choice-changed(i); }
                                 }
                             }
                         }
@@ -4631,6 +4652,7 @@ export component AppWindow inherits Window {
                 height: row.kind == 1 ? 18px
                     : row.kind == 2 ? (active ? root.lyrics-row : 0px)
                     : row.kind == 3 ? (active ? self.backing-font * 1.5 : 0px)
+                    : row.kind == 4 ? (root.lyrics-synced ? self.backing-font * 1.45 : 20px)
                     : root.lyrics-synced ? root.lyrics-row * self.grow : 24px;
                 animate height { duration: 300ms; easing: ease-out; }
                 if row.kind == 2 && active: HorizontalLayout {
@@ -4691,7 +4713,20 @@ export component AppWindow inherits Window {
                         soft-height: row.soft-height;
                     }
                 }
-                if row.kind == 0 && root.lyrics-synced: TouchArea {
+                if row.kind == 4: Text {
+                    x: 20px;
+                    y: -lyric-row.shift;
+                    width: parent.width - 40px;
+                    height: parent.height;
+                    text: row.text;
+                    color: Theme.text;
+                    opacity: lyric-row.fade * lyric-row.edge * 0.7;
+                    font-size: root.lyrics-synced ? lyric-row.backing-font : 14px;
+                    font-weight: 600;
+                    horizontal-alignment: lyric-row.side;
+                    vertical-alignment: TextVerticalAlignment.top;
+                }
+                if (row.kind == 0 || row.kind == 4) && root.lyrics-synced: TouchArea {
                     y: -lyric-row.shift;
                     mouse-cursor: pointer;
                     clicked => { root.lyrics-seek(row.start); }
