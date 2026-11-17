@@ -54,6 +54,13 @@ VIAddVersionKey "LegalCopyright" "Free software under the GNU GPL v3"
 !define MUI_FINISHPAGE_TEXT "You can find Tonearm in the Start menu. Closing its window keeps the music playing in the tray, which Settings can change."
 !define MUI_FINISHPAGE_RUN "$INSTDIR\tonearm.exe"
 !define MUI_FINISHPAGE_RUN_TEXT "Start Tonearm"
+; The finish page's second tick box makes a desktop shortcut. It is off at
+; first, and a silent update never shows it, so an update leaves the desktop
+; as it was.
+!define MUI_FINISHPAGE_SHOWREADME ""
+!define MUI_FINISHPAGE_SHOWREADME_TEXT "Create a desktop shortcut"
+!define MUI_FINISHPAGE_SHOWREADME_NOTCHECKED
+!define MUI_FINISHPAGE_SHOWREADME_FUNCTION CreateDesktopShortcut
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
@@ -131,6 +138,10 @@ Section "Tonearm"
     Exec '"$INSTDIR\tonearm.exe"'
 SectionEnd
 
+Function CreateDesktopShortcut
+  CreateShortcut "$DESKTOP\Tonearm.lnk" "$INSTDIR\tonearm.exe"
+FunctionEnd
+
 Section "Uninstall"
   !insertmacro CloseTonearm "$INSTDIR\tonearm.exe"
   Delete "$INSTDIR\tonearm.exe"
@@ -139,6 +150,7 @@ Section "Uninstall"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
   Delete "$SMPROGRAMS\Tonearm.lnk"
+  Delete "$DESKTOP\Tonearm.lnk"
   DeleteRegKey HKCU "${UNINSTALL_KEY}"
   ; Settings, sign in, history and downloads stay, in case Tonearm comes
   ; back. They live in the user's AppData, not here.
