@@ -1,6 +1,16 @@
 import { ListView } from "std-widgets.slint";
 import "phosphor.ttf";
 import "phosphor-fill.ttf";
+// Inter, the app's font, shipped with it so it is the same everywhere.
+// The lyrics use Inter Display, its cut for large text, drawn after Apple's
+// SF Pro (which only Apple's own platforms may use). SIL Open Font License,
+// in inter-LICENSE.txt.
+import "Inter-Regular.ttf";
+import "Inter-Medium.ttf";
+import "Inter-SemiBold.ttf";
+import "Inter-Bold.ttf";
+import "Inter-ExtraBold.ttf";
+import "InterDisplay-Bold.ttf";
 
 // A piece of a subtitle. A piece with a browse id opens that page when
 // clicked, such as an artist or an album.
@@ -12,6 +22,20 @@ export struct Run {
 }
 
 // One line of a song's credits: the role, then the names under it.
+// A song at one end of a transition, for the transition editor.
+export struct MixSong {
+    title: string,
+    artist: string,
+    art: image,
+    has-art: bool,
+    bpm: string,
+    camelot: string,
+    key-color: color,
+    // Why the two songs cannot be beat matched, shown on the tempo. Empty
+    // when they can, or beatmatching is off.
+    warning: string,
+}
+
 export struct CreditData {
     role: string,
     names: string,
@@ -39,6 +63,8 @@ export struct ItemData {
     // Being downloaded, or waiting its turn, and how far it has got (0 to 1).
     downloading: bool,
     progress: float,
+    // Marked explicit: an E badge before the subtitle.
+    explicit: bool,
 }
 
 // kind: 0 section header, 1 list item, 2 row of cards, 3 load more marker,
@@ -49,6 +75,8 @@ export struct ItemData {
 export struct RowData {
     kind: int,
     title: string,
+    // kind 8: the line under the heading.
+    subtitle: string,
     item: ItemData,
     cards: [ItemData],
     style: int,
@@ -57,6 +85,17 @@ export struct RowData {
     // kind 0: shows a "Show all" button.
     more: bool,
     more-id: int,
+    // Mix mode: the song's tempo and Camelot key, empty while unknown, and
+    // the key's colour on the wheel.
+    bpm: string,
+    camelot: string,
+    key-color: color,
+    // Mix mode: the transition into the next song, like "Auto". Empty for
+    // the last song.
+    mix: string,
+    // Mix mode: 0 tempo and key known, 1 being analyzed, 2 waiting its
+    // turn, 3 not on this computer yet, so analyzed once it plays.
+    analysis: int,
 }
 
 // The top of a detail page.
@@ -82,6 +121,13 @@ export struct PageHeader {
     followed: bool,
     can-like: bool,
     liked: bool,
+    // A playlist, which can be played in mix mode, and whether it is.
+    can-mix: bool,
+    mixing: bool,
+    // The download button: 0 none, 1 not all saved, 2 downloading,
+    // 3 every song saved. download-progress is how many are saved (0 to 1).
+    download: int,
+    download-progress: float,
 }
 
 // One line of the right click menu. icon is one of the Icons glyphs.
@@ -437,7 +483,7 @@ component SkeletonDetail inherits Rectangle {
     property <length> art-size: Hero.art(compact);
     property <length> hero: Hero.height(1, banner, compact);
     property <length> text-x: banner ? pad : pad + art-size + pad;
-    property <length> buttons-y: hero - pad - 36px;
+    property <length> buttons-y: hero - pad - (compact ? 44px : 56px);
     property <length> meta-y: buttons-y - 10px - 6px - 13px;
     property <length> byline-y: meta-y - 6px - 16px;
     property <length> title-h: compact ? 28px : 40px;
@@ -559,6 +605,32 @@ component IconButton inherits Rectangle {
     }
 }
 
+// A round button with a cross, to close a panel. The icon font has no
+// cross, so it is drawn. As tall as a PillButton, to sit beside one.
+component CloseButton inherits Rectangle {
+    callback clicked;
+    width: 36px;
+    height: 36px;
+    border-radius: 18px;
+    background: touch.has-hover ? #ffffff1c : transparent;
+    animate background { duration: 120ms; }
+    Path {
+        x: 12px;
+        y: 12px;
+        width: 12px;
+        height: 12px;
+        viewbox-width: 12;
+        viewbox-height: 12;
+        commands: "M 1 1 L 11 11 M 11 1 L 1 11";
+        stroke: touch.has-hover ? Theme.text : Theme.dim;
+        stroke-width: 1.75px;
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
 component PillButton inherits Rectangle {
     in property <string> text;
     in property <bool> primary;
@@ -608,36 +680,38 @@ component Field inherits Rectangle {
     callback edited(string);
     public function blur() { input.clear-focus(); }
     public function take-focus() { input.focus(); }
-    height: 40px;
-    border-radius: 20px;
+    // Taller, with a larger icon and text, as search is in the top bar.
+    in property <bool> large;
+    height: root.large ? 48px : 40px;
+    border-radius: self.height / 2;
     background: input.has-focus ? #ffffff1c : #ffffff10;
     border-width: 1px;
     border-color: input.has-focus ? #ffffff40 : transparent;
     animate background, border-color { duration: 150ms; }
     if root.icon != "": Icon {
-        x: 14px;
-        width: 18px;
+        x: root.large ? 16px : 14px;
+        width: root.large ? 22px : 18px;
         text: root.icon;
         color: Theme.dim;
-        font-size: 17px;
+        font-size: root.large ? 22px : 17px;
     }
     Text {
-        x: root.icon != "" ? 42px : 18px;
+        x: root.icon != "" ? (root.large ? 50px : 42px) : 18px;
         width: parent.width - self.x - 18px;
         text: input.text == "" ? root.placeholder : "";
         color: Theme.dim;
-        font-size: 14px;
+        font-size: root.large ? 16px : 14px;
         vertical-alignment: center;
         overflow: elide;
     }
     Rectangle {
-        x: root.icon != "" ? 42px : 18px;
+        x: root.icon != "" ? (root.large ? 50px : 42px) : 18px;
         width: parent.width - self.x - 18px;
         clip: true;
         input := TextInput {
             width: 100%;
             color: Theme.text;
-            font-size: 14px;
+            font-size: root.large ? 16px : 14px;
             single-line: true;
             vertical-alignment: center;
             input-type: root.secret ? InputType.password : InputType.text;
@@ -1337,6 +1411,176 @@ component RunLine inherits Rectangle {
     }
 }
 
+// A small sound wave, as five bars, for a transition set by hand. The
+// icon font has no such glyph, so it is drawn.
+component WaveIcon inherits Rectangle {
+    in property <color> tint: Theme.text;
+    width: 13px;
+    height: 14px;
+    for bar[i] in [0.45, 0.8, 1.0, 0.65, 0.4]: Rectangle {
+        x: i * 2.75px;
+        y: (parent.height - self.height) / 2;
+        width: 1.5px;
+        height: parent.height * bar;
+        border-radius: 0.75px;
+        background: root.tint;
+    }
+}
+
+// The round play button at the top of a page. Usually a solid disc in the
+// accent colour with a dark triangle; in mix mode a brushed metal disc in a
+// glowing ring. The two fade into each other as mix mode turns on or off.
+component PlayDisc inherits Rectangle {
+    in property <bool> playing;
+    in property <bool> mixed;
+    in property <length> size: 56px;
+    callback clicked;
+    width: size;
+    height: size;
+    property <float> mix-level: mixed ? 1 : 0;
+    animate mix-level { duration: 300ms; easing: ease-in-out; }
+    property <bool> hot: touch.has-hover;
+    // The usual look.
+    Rectangle {
+        opacity: 1 - root.mix-level;
+        visible: self.opacity > 0.01;
+        border-radius: root.size / 2;
+        background: touch.pressed ? Theme.accent.darker(0.1) : root.hot ? Theme.accent.brighter(0.12) : Theme.accent;
+        animate background { duration: 120ms; }
+        Icon {
+            text: root.playing ? Icons.pause : Icons.play;
+            fill: true;
+            color: #000000;
+            font-size: root.size * 0.4;
+        }
+    }
+    // Mix mode: the ring glows, and a thin dark line parts it from the
+    // silver rim of the metal.
+    Rectangle {
+        opacity: root.mix-level;
+        visible: self.opacity > 0.01;
+        border-radius: root.size / 2;
+        background: root.hot ? Theme.accent.brighter(0.15) : Theme.accent;
+        drop-shadow-blur: root.hot ? 16px : 11px;
+        drop-shadow-color: Theme.accent.with-alpha(root.hot ? 0.8 : 0.6);
+        animate background, drop-shadow-blur, drop-shadow-color { duration: 150ms; }
+        Rectangle {
+            width: root.size - 6px;
+            height: self.width;
+            border-radius: self.width / 2;
+            background: #141414;
+            // The rim: lit at the top left and the bottom right.
+            Rectangle {
+                width: root.size - 8px;
+                height: self.width;
+                border-radius: self.width / 2;
+                background: @conic-gradient(#8e8e94 0deg, #c9c9ce 45deg, #6a6a70 90deg, #e6e6ea 140deg, #8a8a90 200deg, #5c5c62 270deg, #d8d8dc 315deg, #8e8e94 360deg);
+                // Brushed metal: light bands on the diagonal, dark across the middle.
+                Rectangle {
+                    width: root.size - 12px;
+                    height: self.width;
+                    border-radius: self.width / 2;
+                    background: @conic-gradient(#4a464c 0deg, #5e5a60 30deg, #2a272b 80deg, #1d1b1e 95deg, #6a666c 125deg, #a6a3a8 140deg, #5a565c 170deg, #3e3a40 220deg, #2a272b 265deg, #1d1b1e 275deg, #6a666c 305deg, #a6a3a8 320deg, #5a565c 345deg, #4a464c 360deg);
+                    Icon {
+                        text: root.playing ? Icons.pause : Icons.play;
+                        fill: true;
+                        color: #ffffff;
+                        font-size: root.size * 0.46;
+                    }
+                }
+            }
+        }
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// An icon on its own in the row under a page's title: dim, white under the
+// mouse, in the accent colour when on.
+component HeroIcon inherits Rectangle {
+    in property <string> icon;
+    in property <bool> fill;
+    in property <bool> on;
+    // A small dot under it while on, for a mode like mix.
+    in property <bool> dot;
+    in property <length> size: 26px;
+    out property <bool> hovered: touch.has-hover;
+    out property <color> tint: root.on ? (touch.has-hover ? Theme.accent.brighter(0.15) : Theme.accent) : touch.has-hover ? #ffffff : #ffffffb3;
+    callback clicked;
+    width: 40px;
+    height: 40px;
+    if root.icon != "": Icon {
+        text: root.icon;
+        fill: root.fill;
+        color: root.tint;
+        font-size: root.size;
+        animate color { duration: 120ms; }
+    }
+    @children
+    if root.dot && root.on: Rectangle {
+        x: (parent.width - 4px) / 2;
+        y: parent.height - 3px;
+        width: 4px;
+        height: 4px;
+        border-radius: 2px;
+        background: root.tint;
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Three mixer faders, each with its knob at a different height: the Mix
+// button's icon, as Spotify draws it.
+component SlidersIcon inherits Rectangle {
+    in property <color> tint: Theme.text;
+    in property <length> size: 16px;
+    property <float> k: root.size / 16px;
+    width: size;
+    height: size;
+    for knob[i] in [0.3, 0.7, 0.45]: Rectangle {
+        x: (2px + i * 5.5px) * root.k;
+        Rectangle {
+            x: 0;
+            y: 1px * root.k;
+            width: 1.5px * root.k;
+            height: root.height - 2px * root.k;
+            border-radius: 0.75px * root.k;
+            background: root.tint;
+        }
+        Rectangle {
+            x: -2.25px * root.k;
+            y: (1px + 14px * knob - 1px) * root.k;
+            width: 6px * root.k;
+            height: 2px * root.k;
+            border-radius: 1px * root.k;
+            background: root.tint;
+        }
+    }
+}
+
+// The small E that marks a song explicit, as Spotify draws it.
+component ExplicitBadge inherits VerticalLayout {
+    alignment: center;
+    Rectangle {
+        width: 16px;
+        height: 16px;
+        border-radius: 3px;
+        background: #ffffff1a;
+        Text {
+            text: "E";
+            color: #ebebeb;
+            font-size: 11px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
+
 component SongRow inherits Rectangle {
     in property <ItemData> item;
     in property <bool> current;
@@ -1345,6 +1589,21 @@ component SongRow inherits Rectangle {
     in property <bool> show-art: true;
     // The album in a column before the length, for playlists on a wide window.
     in property <bool> show-album;
+    // Mix mode: BPM and key columns, and the transition chip under the row.
+    in property <bool> mixing;
+    in property <string> bpm;
+    in property <string> camelot;
+    in property <color> key-color;
+    in property <string> mix-label;
+    // How open the gap under the row is, 0 to 1, as mix mode turns on or off.
+    in property <float> mix-level;
+    in property <int> analysis;
+    // A suggestion: an Add button where the length would be.
+    in property <bool> addable;
+    callback add;
+    callback edit-mix;
+    // Plays the end of this song into the next, through the transition.
+    callback preview-mix;
     callback activated;
     // The play button: plays the song, or pauses it if it is playing.
     callback play;
@@ -1370,7 +1629,8 @@ component SongRow inherits Rectangle {
         root.sub-hot = false;
         root.album-hot = false;
     }
-    height: number > 0 && !show-art ? 52px : 60px;
+    property <length> base: number > 0 && !show-art ? 48px : 56px;
+    height: root.base + (root.mix-label != "" ? 22px * root.mix-level : 0px);
     Timer {
         interval: 350ms;
         running: root.hovered;
@@ -1389,6 +1649,8 @@ component SongRow inherits Rectangle {
         }
     }
     HorizontalLayout {
+        y: 0;
+        height: root.base;
         padding-left: 8px;
         padding-right: 14px;
         spacing: 12px;
@@ -1423,8 +1685,8 @@ component SongRow inherits Rectangle {
         if root.show-art: VerticalLayout {
             alignment: center;
             Rectangle {
-                width: 44px;
-                height: 44px;
+                width: 40px;
+                height: 40px;
                 Art {
                     width: 100%;
                     height: 100%;
@@ -1435,7 +1697,7 @@ component SongRow inherits Rectangle {
                 }
                 // With no number column, the play button sits on the art.
                 if root.number == 0 && (root.hovered || root.is-now): Rectangle {
-                    border-radius: item.round ? 22px : 6px;
+                    border-radius: item.round ? 20px : 6px;
                     background: #000000a0;
                     if root.is-now && !art-touch.has-hover: Bars {
                         tint: #ffffff;
@@ -1467,13 +1729,70 @@ component SongRow inherits Rectangle {
                 font-weight: 500;
                 overflow: elide;
             }
-            if item.subtitle != "": RunLine {
+            if item.subtitle != "" || item.explicit: HorizontalLayout {
                 height: 18px;
-                text: item.subtitle;
-                runs: root.show-album ? item.short-runs : item.runs;
-                changed hovered => { root.sub-hot = self.hovered; }
-                open(b) => { root.open(b); }
-                menu(x, y) => { root.menu(x, y); }
+                spacing: 5px;
+                if item.explicit: ExplicitBadge {}
+                // A badge alone would cap the title column at its own width.
+                if item.subtitle == "": Rectangle { horizontal-stretch: 1; }
+                if item.subtitle != "": RunLine {
+                    text: item.subtitle;
+                    runs: root.show-album ? item.short-runs : item.runs;
+                    changed hovered => { root.sub-hot = self.hovered; }
+                    open(b) => { root.open(b); }
+                    menu(x, y) => { root.menu(x, y); }
+                }
+            }
+        }
+        if root.mixing && root.analysis == 0: Text {
+            width: 52px;
+            text: root.bpm;
+            color: Theme.dim;
+            font-size: 14px;
+            vertical-alignment: center;
+        }
+        // Not known yet: the tempo and key columns say why, as one.
+        if root.mixing && root.analysis != 0: HorizontalLayout {
+            width: 52px + 12px + 44px;
+            spacing: 6px;
+            if root.analysis == 1: Rectangle {
+                width: 22px;
+                for dot[i] in 3: Rectangle {
+                    x: i * 8px;
+                    y: (parent.height - self.height) / 2;
+                    width: 5px;
+                    height: 5px;
+                    border-radius: 2.5px;
+                    background: Theme.accent;
+                    // Each dot pulses a third of a turn after the last.
+                    opacity: 0.25 + 0.75 * max(0, sin((animation-tick() / 1s) * 360deg - i * 120deg));
+                }
+            }
+            Text {
+                text: root.analysis == 1 ? "Analysing" : root.analysis == 2 ? "Queued" : "After a play";
+                color: root.analysis == 1 ? Theme.text : Theme.faint;
+                font-size: 13px;
+                font-italic: root.analysis == 3;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+        if root.mixing && root.analysis == 0: VerticalLayout {
+            width: 44px;
+            alignment: center;
+            if root.camelot != "": Rectangle {
+                width: key-text.preferred-width + 10px;
+                height: 20px;
+                border-radius: 5px;
+                background: root.key-color;
+                key-text := Text {
+                    text: root.camelot;
+                    color: #101014;
+                    font-size: 12px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
             }
         }
         if root.show-album: LinkText {
@@ -1484,9 +1803,37 @@ component SongRow inherits Rectangle {
             open(b) => { root.open(b); }
             menu(x, y) => { root.menu(x, y); }
         }
+        // As wide as the download slot and the length, so the columns
+        // before it line up with the list above.
+        if root.addable: VerticalLayout {
+            width: 14px + 12px + 40px;
+            alignment: center;
+            Rectangle {
+                x: parent.width - self.width;
+                width: 62px;
+                height: 32px;
+                border-radius: 16px;
+                border-width: 1px;
+                border-color: add-touch.has-hover ? Theme.text : #ffffff80;
+                background: add-touch.pressed ? #ffffff14 : transparent;
+                Text {
+                    text: "Add";
+                    color: Theme.text;
+                    font-size: 14px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                add-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    changed has-hover => { root.album-hot = self.has-hover; }
+                    clicked => { root.add(); }
+                }
+            }
+        }
         // Saved on this computer. The slot is always there, so a downloaded
         // song does not push its album out of line with the rows around it.
-        VerticalLayout {
+        if !root.addable: VerticalLayout {
             alignment: center;
             width: 14px;
             if item.downloaded: Icon {
@@ -1500,13 +1847,88 @@ component SongRow inherits Rectangle {
                 progress: item.progress;
             }
         }
-        Text {
+        if !root.addable: Text {
             width: 40px;
             text: item.duration;
             color: Theme.dim;
             font-size: 14px;
             horizontal-alignment: right;
             vertical-alignment: center;
+        }
+    }
+    // The transition into the next song, in the gap under this one: a line
+    // from this song's art down to the next one's, with the chip on it.
+    if root.mix-level > 0.01 && root.mix-label != "": Rectangle {
+        opacity: root.mix-level;
+        property <length> art-x: root.number > 0 ? 8px + 28px + 12px : 8px;
+        property <length> art-bottom: (root.base + 40px) / 2;
+        Rectangle {
+            x: parent.art-x + 20px;
+            y: parent.art-bottom;
+            width: 1px;
+            // On to where the next song's art starts.
+            height: root.height - parent.art-bottom + (root.base - 40px) / 2;
+            background: #ffffff59;
+        }
+        // In the number column, beside the chip, while the row has the mouse.
+        if root.number > 0 && (root.hovered || chip-touch.has-hover || preview-touch.has-hover): Rectangle {
+            x: 8px;
+            y: root.base + (root.height - root.base - self.height) / 2;
+            width: 28px;
+            height: 20px;
+            border-radius: 10px;
+            background: preview-touch.has-hover ? #ffffff24 : transparent;
+            Icon {
+                text: Icons.play;
+                fill: true;
+                color: preview-touch.has-hover ? Theme.text : Theme.dim;
+                font-size: 11px;
+            }
+        }
+        preview-touch := TouchArea {
+            x: 8px;
+            y: root.base;
+            width: root.number > 0 ? 28px : 0px;
+            height: root.height - root.base;
+            mouse-cursor: pointer;
+            clicked => { root.preview-mix(); }
+        }
+        Rectangle {
+            x: parent.art-x;
+            y: root.base + (root.height - root.base - self.height) / 2;
+            // Padding, the icon, a gap, the label, padding.
+            width: 9px + 12px + 5px + chip-label.preferred-width + 10px;
+            height: 20px;
+            border-radius: 10px;
+            background: chip-touch.pressed ? #3a3a42 : chip-touch.has-hover ? #34343b : #26262c;
+            border-width: 1px;
+            border-color: chip-touch.has-hover ? #ffffff30 : #ffffff14;
+            animate background, border-color { duration: 120ms; }
+            if root.mix-label == "Auto": Icon {
+                x: 9px;
+                width: 12px;
+                text: Icons.sparkle;
+                fill: false;
+                color: Theme.accent;
+                font-size: 11px;
+            }
+            if root.mix-label != "Auto": WaveIcon {
+                x: 9px;
+                tint: Theme.text;
+            }
+            chip-label := Text {
+                x: 9px + 12px + 5px;
+                width: self.preferred-width;
+                text: root.mix-label;
+                color: Theme.text;
+                font-size: 12px;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+            chip-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.edit-mix(); }
+            }
         }
     }
 }
@@ -1758,7 +2180,7 @@ component SearchBox inherits Rectangle {
     callback picked(int);
     // An artist or album name in a row was clicked.
     callback open-link(string);
-    height: showing ? 46px + list.preferred-height : 40px;
+    height: showing ? 54px + list.preferred-height : 48px;
 
     // Closes the list and lets go of focus. A focused box opens its list
     // whenever focus comes back to it, for instance when a popup closes.
@@ -1781,7 +2203,7 @@ component SearchBox inherits Rectangle {
 
     keys := FocusScope {
         y: 0;
-        height: 40px;
+        height: 48px;
         focus-on-click: false;
         capture-key-pressed(event) => {
             if !root.showing {
@@ -1806,6 +2228,7 @@ component SearchBox inherits Rectangle {
             reject
         }
         field := Field {
+            large: true;
             icon: Icons.search;
             placeholder: "Search songs, albums, artists";
             text <=> root.text;
@@ -1827,7 +2250,7 @@ component SearchBox inherits Rectangle {
     }
 
     if root.showing: Rectangle {
-        y: 46px;
+        y: 54px;
         height: list.preferred-height;
         border-radius: 12px;
         background: Theme.raised;
@@ -1840,7 +2263,7 @@ component SearchBox inherits Rectangle {
         TouchArea { }
     }
     list := VerticalLayout {
-        y: 46px;
+        y: 54px;
         height: self.preferred-height;
         visible: root.showing;
         padding: 6px;
@@ -2108,6 +2531,49 @@ component Carousel inherits Rectangle {
     }
 }
 
+// A thin bar at the right edge of a scrolling area, as Spotify draws it,
+// in place of the style's own. Drag it, or click above or below it to jump.
+component ScrollThumb inherits Rectangle {
+    in-out property <length> content-y;
+    in property <length> content-height;
+    in property <length> view-height;
+    // Space kept free at each end, so a rounded corner never cuts it.
+    in property <length> inset: 10px;
+    property <length> track: max(1px, root.height - root.inset * 2);
+    property <length> range: max(0px, root.content-height - root.view-height);
+    property <length> thumb: root.range > 0 ? max(40px, root.track * (root.view-height / root.content-height)) : 0px;
+    property <length> travel: max(1px, root.track - root.thumb);
+    property <length> at: root.range > 0 ? max(0px, min(root.travel, -root.content-y / root.range * root.travel)) : 0px;
+    property <length> drag-from;
+    width: 14px;
+    visible: root.range > 1px;
+    Rectangle {
+        x: parent.width - self.width - 3px;
+        y: root.inset + root.at;
+        width: 8px;
+        height: root.thumb;
+        border-radius: self.width / 2;
+        background: touch.pressed ? #ffffff8c : touch.has-hover ? #ffffff66 : #ffffff40;
+        animate background { duration: 120ms; }
+    }
+    touch := TouchArea {
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                // Off the thumb: it jumps there, centred on the click.
+                if self.mouse-y < root.inset + root.at || self.mouse-y > root.inset + root.at + root.thumb {
+                    root.content-y = -max(0px, min(root.range, (self.mouse-y - root.inset - root.thumb / 2) / root.travel * root.range));
+                }
+                root.drag-from = -root.content-y;
+            }
+        }
+        moved => {
+            if self.pressed {
+                root.content-y = -max(0px, min(root.range, root.drag-from + (self.mouse-y - self.pressed-y) / root.travel * root.range));
+            }
+        }
+    }
+}
+
 component Appear inherits Rectangle {
     callback appeared;
     init => { root.appeared(); }
@@ -2187,7 +2653,11 @@ component ColumnTitle inherits Rectangle {
 component TrackColumns inherits Rectangle {
     in property <bool> show-art;
     in property <bool> show-album;
-    // The column the list is sorted by: 0 #, 1 title, 2 album.
+    in property <bool> mixing;
+    // Where the BPM and key columns start: before the album, or before the
+    // download slot and the length without one.
+    property <length> key-x: root.width - 14px - 40px - 12px - 14px - 12px - (root.show-album ? root.width * 0.24 + 12px : 0px) - 44px;
+    // The column the list is sorted by: 0 #, 1 title, 2 album, 3 BPM, 4 key.
     in property <int> sort-column;
     in property <bool> sort-descending;
     callback sort(int);
@@ -2203,12 +2673,28 @@ component TrackColumns inherits Rectangle {
         clicked => { root.sort(0); }
     }
     ColumnTitle {
-        x: root.show-art ? 8px + 28px + 12px + 44px + 12px : 8px + 28px + 12px;
+        x: root.show-art ? 8px + 28px + 12px + 40px + 12px : 8px + 28px + 12px;
         width: 160px;
         height: parent.height;
         text: "Title";
         order: root.sort-column == 1 ? (root.sort-descending ? 2 : 1) : 0;
         clicked => { root.sort(1); }
+    }
+    if root.mixing: ColumnTitle {
+        x: root.key-x - 12px - 52px;
+        width: 52px;
+        height: parent.height;
+        text: "BPM";
+        order: root.sort-column == 3 ? (root.sort-descending ? 2 : 1) : 0;
+        clicked => { root.sort(3); }
+    }
+    if root.mixing: ColumnTitle {
+        x: root.key-x;
+        width: 44px;
+        height: parent.height;
+        text: "Key";
+        order: root.sort-column == 4 ? (root.sort-descending ? 2 : 1) : 0;
+        clicked => { root.sort(4); }
     }
     if root.show-album: ColumnTitle {
         // padding, length, the download slot and the gaps between them.
@@ -2230,15 +2716,18 @@ component TrackColumns inherits Rectangle {
 component MoreButton inherits Rectangle {
     // Window coordinates of the button's bottom left corner.
     callback clicked(length, length);
-    width: 36px;
-    height: 36px;
+    // Just the dots, dim until the mouse is on them.
+    in property <bool> bare;
+    width: bare ? 40px : 36px;
+    height: bare ? 40px : 36px;
     border-radius: 18px;
-    background: touch.has-hover ? #ffffff24 : #ffffff14;
+    background: bare ? transparent : touch.has-hover ? #ffffff24 : #ffffff14;
     animate background { duration: 120ms; }
     Icon {
         text: Icons.dots;
         fill: true;
-        font-size: 20px;
+        font-size: root.bare ? 26px : 20px;
+        color: !root.bare || touch.has-hover ? #ffffff : #ffffffb3;
     }
     touch := TouchArea {
         mouse-cursor: pointer;
@@ -2255,6 +2744,8 @@ component DetailHeader inherits Rectangle {
     in property <bool> compact;
     callback play();
     callback shuffle();
+    callback mix();
+    callback download();
     callback follow();
     callback like();
     callback byline-clicked();
@@ -2267,7 +2758,7 @@ component DetailHeader inherits Rectangle {
     property <length> text-x: side-art ? pad + art-size + pad : pad;
     // Softer text for the label and the line under the byline.
     property <color> soft: #ffffffc0;
-    border-radius: Theme.radius;
+    border-radius: 0px;
     background: @linear-gradient(180deg, root.tint.with-alpha(0.78) 0%, root.tint.with-alpha(0.14) 100%);
 
     TouchArea {
@@ -2279,7 +2770,7 @@ component DetailHeader inherits Rectangle {
     }
 
     if root.banner && root.data.has-art: Rectangle {
-        border-radius: Theme.radius;
+        border-radius: 0px;
         clip: true;
         Image {
             width: 100%;
@@ -2290,7 +2781,7 @@ component DetailHeader inherits Rectangle {
     }
     // Darkens the bottom of the banner so the text on it reads.
     if root.banner: Rectangle {
-        border-radius: Theme.radius;
+        border-radius: 0px;
         background: @linear-gradient(180deg, #00000000 20%, #000000d8 100%);
     }
 
@@ -2368,52 +2859,84 @@ component DetailHeader inherits Rectangle {
                 font-size: 14px;
                 overflow: elide;
             }
+            // Spotify's row: the big round play button, then icons alone.
             HorizontalLayout {
-                height: 46px;
-                padding-top: 10px;
-                spacing: 10px;
+                property <length> play-size: root.compact ? 44px : 56px;
+                height: play-size + (root.compact ? 2px : 10px);
+                padding-top: root.compact ? 2px : 10px;
+                spacing: 8px;
                 alignment: start;
-                if root.data.can-play: PillButton {
-                    property <bool> page-now: Now.page != "" && Now.page == Now.from;
-                    text: page-now && Now.playing ? "Pause" : page-now ? "Resume" : "Play";
-                    bars: page-now;
-                    bars-running: Now.playing;
-                    primary: true;
-                    clicked => { root.play(); }
+                if root.data.can-play: VerticalLayout {
+                    alignment: center;
+                    padding-right: 8px;
+                    PlayDisc {
+                        size: play-size;
+                        playing: Now.page != "" && Now.page == Now.from && Now.playing;
+                        mixed: root.data.mixing;
+                        clicked => { root.play(); }
+                    }
                 }
-                if root.data.can-shuffle && !root.compact: PillButton {
-                    text: "Shuffle";
-                    clicked => { root.shuffle(); }
-                }
-                if root.data.can-shuffle && root.compact: Rectangle {
-                    width: 36px;
-                    height: 36px;
-                    border-radius: 18px;
-                    background: #ffffff14;
-                    IconButton {
+                if root.data.can-shuffle: VerticalLayout {
+                    alignment: center;
+                    HeroIcon {
                         icon: Icons.shuffle;
+                        size: 28px;
                         clicked => { root.shuffle(); }
                     }
                 }
-                if root.data.can-follow: PillButton {
-                    text: root.data.followed ? "Following" : "Follow";
-                    clicked => { root.follow(); }
+                if root.data.can-mix: VerticalLayout {
+                    alignment: center;
+                    mix-button := HeroIcon {
+                        on: root.data.mixing;
+                        dot: true;
+                        SlidersIcon {
+                            size: 22px;
+                            tint: mix-button.tint;
+                        }
+                        clicked => { root.mix(); }
+                    }
                 }
-                if root.data.can-like: Rectangle {
-                    width: 36px;
-                    height: 36px;
-                    border-radius: 18px;
-                    background: #ffffff14;
-                    IconButton {
+                if root.data.can-follow: VerticalLayout {
+                    alignment: center;
+                    PillButton {
+                        text: root.data.followed ? "Following" : "Follow";
+                        clicked => { root.follow(); }
+                    }
+                }
+                if root.data.can-like: VerticalLayout {
+                    alignment: center;
+                    HeroIcon {
                         icon: Icons.heart;
                         fill: root.data.liked;
-                        tint: root.data.liked ? Theme.accent : Theme.text;
+                        on: root.data.liked;
+                        size: 28px;
                         clicked => { root.like(); }
                     }
                 }
-                // The page menu offers playing, downloading and the artist.
-                if root.data.can-play || root.data.can-shuffle || root.data.byline-browsable: MoreButton {
-                    clicked(x, y) => { root.menu(x, y); }
+                // Saves every song on the page. Filled once all are saved, a
+                // ring of how far while they download.
+                if root.data.download != 0: VerticalLayout {
+                    alignment: center;
+                    download-button := HeroIcon {
+                        icon: root.data.download == 2 ? "" : Icons.download;
+                        fill: root.data.download == 3;
+                        on: root.data.download == 3;
+                        size: 28px;
+                        if root.data.download == 2: DownloadRing {
+                            width: 24px;
+                            height: 24px;
+                            progress: root.data.download-progress;
+                        }
+                        clicked => { root.download(); }
+                    }
+                }
+                // The page menu offers playing and the artist.
+                if root.data.can-play || root.data.can-shuffle || root.data.byline-browsable: VerticalLayout {
+                    alignment: center;
+                    MoreButton {
+                        bare: true;
+                        clicked(x, y) => { root.menu(x, y); }
+                    }
                 }
             }
         }
@@ -2534,7 +3057,8 @@ component SyllableView inherits Rectangle {
         text: syllable.text;
         color: active ? #ffffff66 : #ffffff;
         font-size: root.font-size;
-        font-weight: 800;
+        font-family: "Inter Display";
+        font-weight: 700;
         vertical-alignment: center;
     }
     Rectangle {
@@ -2550,7 +3074,8 @@ component SyllableView inherits Rectangle {
             text: syllable.text;
             color: #ffffff;
             font-size: root.font-size;
-            font-weight: 800;
+            font-family: "Inter Display";
+            font-weight: 700;
             vertical-alignment: center;
         }
     }
@@ -2563,7 +3088,8 @@ component SyllableView inherits Rectangle {
 component BlurText inherits Rectangle {
     in property <string> text;
     in property <length> font-size: 24px;
-    in property <int> font-weight: 800;
+    in property <int> font-weight: 700;
+    in property <string> font-family: "Inter Display";
     in property <color> text-color: #ffffff;
     in property <TextHorizontalAlignment> align: left;
     in property <float> level;
@@ -2578,6 +3104,7 @@ component BlurText inherits Rectangle {
     // Slint lay the line out.
     measure := Text {
         text: root.text;
+        font-family: root.font-family;
         font-size: root.font-size;
         font-weight: root.font-weight;
         visible: false;
@@ -2591,6 +3118,7 @@ component BlurText inherits Rectangle {
         text: root.text;
         color: root.text-color;
         opacity: root.drawn ? 1 - root.level : 1;
+        font-family: root.font-family;
         font-size: root.font-size;
         font-weight: root.font-weight;
         horizontal-alignment: root.align;
@@ -2626,6 +3154,143 @@ component Dot inherits Rectangle {
     border-radius: 5px;
     background: #ffffff;
     opacity: 0.25 + 0.75 * clamp(level, 0, 1);
+}
+
+// A layer of the transition picture, drawn at its own size.
+component MixPath inherits Path {
+    width: 100%;
+    height: 100%;
+    viewbox-width: self.width / 1px;
+    viewbox-height: self.height / 1px;
+    fill: transparent;
+    stroke-width: 0px;
+}
+
+// One end of a transition in the editor: art, name, tempo and key.
+component MixSongLine inherits HorizontalLayout {
+    in property <MixSong> song;
+    height: 32px;
+    spacing: 10px;
+    Art {
+        width: 32px;
+        height: 32px;
+        corner: 4px;
+        source: root.song.art;
+        has: root.song.has-art;
+    }
+    Text {
+        text: root.song.title + (root.song.artist != "" ? "  \u{2022}  " + root.song.artist : "");
+        color: Theme.text;
+        font-size: 14px;
+        font-weight: 600;
+        overflow: elide;
+        vertical-alignment: center;
+        horizontal-stretch: 1;
+    }
+    // The tempo, in orange with a warning mark when the songs cannot be
+    // beat matched. The reason shows above it on hover.
+    Rectangle {
+        width: tempo-row.preferred-width;
+        tempo-row := HorizontalLayout {
+            spacing: 5px;
+            if root.song.warning != "": VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 14px;
+                    height: 14px;
+                    border-radius: 7px;
+                    background: #f5a524;
+                    Text {
+                        text: "!";
+                        color: #101014;
+                        font-size: 11px;
+                        font-weight: 800;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+            Text {
+                text: root.song.bpm;
+                color: root.song.warning != "" ? #f5a524 : Theme.dim;
+                font-size: 13px;
+                font-weight: root.song.warning != "" ? 600 : 400;
+                vertical-alignment: center;
+            }
+        }
+        tempo-touch := TouchArea { }
+        if tempo-touch.has-hover && root.song.warning != "": Rectangle {
+            x: parent.width - self.width;
+            y: -self.height - 6px;
+            width: tip.preferred-width + 20px;
+            height: 28px;
+            border-radius: 6px;
+            background: #2a2a30;
+            border-width: 1px;
+            border-color: Theme.line;
+            drop-shadow-blur: 10px;
+            drop-shadow-color: #00000080;
+            tip := Text {
+                text: root.song.warning;
+                color: Theme.text;
+                font-size: 12px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+    if root.song.camelot != "": VerticalLayout {
+        alignment: center;
+        Rectangle {
+            width: camelot-text.preferred-width + 10px;
+            height: 20px;
+            border-radius: 5px;
+            background: root.song.key-color;
+            camelot-text := Text {
+                text: root.song.camelot;
+                color: #101014;
+                font-size: 12px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+// A part of a transition and how it is set, as a row with a menu.
+component MixChoice inherits Rectangle {
+    in property <string> title;
+    in property <color> accent;
+    in property <[string]> options;
+    in-out property <int> selected;
+    callback changed(int);
+    height: 52px;
+    border-radius: 12px;
+    background: #ffffff0a;
+    Rectangle {
+        x: 14px;
+        y: (parent.height - self.height) / 2;
+        width: 3px;
+        height: 16px;
+        border-radius: 1.5px;
+        background: root.accent;
+    }
+    Text {
+        x: 26px;
+        text: root.title;
+        color: Theme.text;
+        font-size: 15px;
+        font-weight: 600;
+        vertical-alignment: center;
+    }
+    Dropdown {
+        x: parent.width - self.width - 9px;
+        y: (parent.height - self.height) / 2;
+        options: root.options;
+        selected <=> root.selected;
+        changed(i) => { root.changed(i); }
+    }
 }
 
 export component AppWindow inherits Window {
@@ -2676,6 +3341,107 @@ export component AppWindow inherits Window {
     callback byline-clicked();
     callback toggle-follow();
     callback toggle-like-page();
+    // Mix mode on the open playlist, and the transition chip of a song.
+    callback toggle-mix();
+    // The download button on a page's hero.
+    callback download-page();
+    callback edit-mix(int);
+    // Plays a song's end into the next through its transition.
+    callback preview-mix(int);
+    // The editor's play button: the same, with the choices on screen.
+    callback mix-preview();
+
+    // The transition editor. Rust fills it from the two songs and redraws
+    // the picture whenever a choice changes.
+    // The panel it replaced, to go back to.
+    property <int> mix-back;
+    public function open-mix-panel() {
+        if root.panel != 4 {
+            root.mix-back = root.panel;
+        }
+        root.panel = 4;
+        root.shown-panel = 4;
+    }
+    public function close-mix-panel() {
+        root.panel = root.mix-back;
+        if root.panel != 0 {
+            root.shown-panel = root.panel;
+        }
+    }
+    // Leaving the editor with changes not saved asks first. discard-then is
+    // what to do after a Discard: -1 close the editor, else open that panel.
+    in-out property <bool> discard-open;
+    property <int> discard-then: -1;
+    function leave-mix-panel(then: int) {
+        if root.mix-changed {
+            root.discard-then = then;
+            root.discard-open = true;
+        } else if then < 0 {
+            root.close-mix-panel();
+        } else {
+            root.switch-panel(then);
+        }
+    }
+    in property <MixSong> mix-from;
+    in property <MixSong> mix-to;
+    // Into `mix-presets`, or -1 for a choice made by hand.
+    in property <int> mix-preset;
+    in property <[string]> mix-presets;
+    in property <[string]> mix-volumes;
+    in property <[string]> mix-eqs;
+    in property <[string]> mix-filters;
+    in-out property <int> mix-volume;
+    in-out property <int> mix-eq;
+    in-out property <int> mix-filter;
+    in property <bool> mix-beatmatch;
+    // A preview is starting, so the play button shows a spinner, and the
+    // spinner's running piece, in a 52 by 40 box.
+    in property <bool> mix-loading;
+    in property <string> mix-spinner;
+    // Seconds across the picture.
+    in property <float> mix-span: 1;
+    // Whether the two songs can be beat matched at all.
+    in property <bool> mix-can-beatmatch: true;
+    // A song dragged along by `seconds` of the transition: 0 the one going
+    // out, 1 the one coming in. Exact, with Shift held, skips the snap to
+    // the nearest beat.
+    callback mix-dragged(int, float, bool);
+    in property <bool> mix-changed;
+    // Paths in the picture: the song going out above, coming in below. Each
+    // song's sound, and its bass alone.
+    in property <string> mix-out-wave;
+    in property <string> mix-out-low;
+    in property <string> mix-in-wave;
+    in property <string> mix-in-low;
+    // Where the transition starts and ends across the picture, 0 to 1.
+    in property <float> mix-card-from;
+    in property <float> mix-card-to;
+    in property <string> mix-volume-path;
+    in property <string> mix-bass-path;
+    in property <string> mix-filter-path;
+
+    // Faint lines down the picture, fixed to the transition: bars, and the
+    // beats between them.
+    in property <string> mix-bars-path;
+    in property <string> mix-beats-path;
+    // A preview's playhead: where it was, 0 to 1 across the picture, how
+    // far it moves a second, and when. Below -5 when none plays.
+    in-out property <float> mix-head-at: -10;
+    in-out property <float> mix-head-rate;
+    in-out property <duration> mix-head-stamp;
+    public function set-playhead(at: float, rate: float) {
+        root.mix-head-at = at;
+        root.mix-head-rate = rate;
+        root.mix-head-stamp = animation-tick();
+    }
+    // A preview of this transition is playing.
+    in property <bool> mix-previewing;
+    callback mix-preset-picked(int);
+    callback mix-volume-picked(int);
+    callback mix-eq-picked(int);
+    callback mix-filter-picked(int);
+    callback mix-beatmatch-toggled();
+    callback mix-save();
     // Opens a page by browse id, for artist and album names.
     callback open-browse(string);
     // The right click menu. Rust fills menu-entries for the item: source 0
@@ -2743,6 +3509,9 @@ export component AppWindow inherits Window {
     // The moving cover or Spotify Canvas. It fades in over the still
     // cover, which stays underneath, and fades out to it again.
     in property <image> track-motion;
+    // A heavy blur of the moving cover or Canvas, or of the still cover
+    // when there is neither. The expanded view's background.
+    in property <image> track-backdrop;
     in property <bool> track-motion-on;
     // The song going out during a crossfade. Its cover and name stay on
     // show and fade out over the crossfade, as its sound does, while the new
@@ -2762,12 +3531,12 @@ export component AppWindow inherits Window {
     property <float> xfade: root.xfade-length > 0ms ? clamp((animation-tick() - root.xfade-start) / root.xfade-length, 0, 1) : 1;
     // Eased at both ends, for the covers' fade.
     property <float> xfade-eased: root.xfade * root.xfade * (3 - 2 * root.xfade);
-    // The names swap halfway through the crossfade, when the new song is
-    // the louder: the old one slides up and out, then the new one slides up
-    // into place. Quick, and never both at once.
+    // The names swap as the crossfade starts, when the seek bar moves on to
+    // the new song: the old one slides up and out, then the new one slides
+    // up into place. Quick, and never both at once.
     property <duration> xfade-elapsed: root.xfade-length > 0ms ? animation-tick() - root.xfade-start : 1000s;
-    property <float> name-out-raw: clamp((root.xfade-elapsed - root.xfade-length / 2) / 180ms, 0, 1);
-    property <float> name-in-raw: clamp((root.xfade-elapsed - root.xfade-length / 2 - 140ms) / 280ms, 0, 1);
+    property <float> name-out-raw: clamp(root.xfade-elapsed / 180ms, 0, 1);
+    property <float> name-in-raw: clamp((root.xfade-elapsed - 140ms) / 280ms, 0, 1);
     // Eased out, so each starts quick and settles.
     property <float> name-out: 1 - (1 - root.name-out-raw) * (1 - root.name-out-raw);
     property <float> name-in: 1 - (1 - root.name-in-raw) * (1 - root.name-in-raw);
@@ -2797,6 +3566,8 @@ export component AppWindow inherits Window {
     in property <int> repeat;
     // The playing song's credits, as YouTube Music lists them.
     in property <[CreditData]> track-credits;
+    // The playing song's tempo and key, once Tonearm has worked them out.
+    in property <[CreditData]> track-sound;
     in property <bool> buffering;
     in property <bool> liked;
     in property <float> progress;
@@ -2888,6 +3659,10 @@ export component AppWindow inherits Window {
     callback load-more();
     // A click on a track list's column title.
     callback sort-by(int);
+    // A suggestion under a playlist: its Add button, by item id, and the
+    // section's Refresh.
+    callback recommend-add(int);
+    callback recommend-refresh();
     in property <int> sort-column;
     in property <bool> sort-descending;
     callback play-page(bool);
@@ -2964,6 +3739,9 @@ export component AppWindow inherits Window {
     // Index into the crossfade lengths: off, 1, 2, 3, 4, 6, 8, 10, 12 s.
     in-out property <int> crossfade-choice: 0;
     callback crossfade-choice-changed(int);
+    // Beat matching: off or on.
+    in-out property <int> beat-match-choice: 1;
+    callback beat-match-choice-changed(int);
     // Index into the languages lyrics are translated into; 0 is off.
     in-out property <int> translate-choice: 0;
     callback translate-choice-changed(int);
@@ -2979,7 +3757,9 @@ export component AppWindow inherits Window {
     property <length> side: 216px;
     property <length> panel-width: 380px;
     property <length> player-height: 76px;
-    property <length> body-height: root.height - player-height - gap * 3;
+    // The bar across the top of the window: back, home and search.
+    property <length> top-bar: 64px;
+    property <length> body-height: root.height - player-height - gap * 2 - top-bar;
     // How open the side panel is, from 0 to 1. It slides rather than pops,
     // and the page beside it narrows along with it.
     property <float> panel-t: panel != 0 ? 1 : 0;
@@ -2991,7 +3771,8 @@ export component AppWindow inherits Window {
     property <float> queue-t: shown-panel == 1 ? 1 : 0;
     property <float> lyrics-t: shown-panel == 2 ? 1 : 0;
     property <float> np-t: shown-panel == 3 ? 1 : 0;
-    animate queue-t, lyrics-t, np-t { duration: 220ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+    property <float> mix-t: shown-panel == 4 ? 1 : 0;
+    animate queue-t, lyrics-t, np-t, mix-t { duration: 220ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
     // How far a panel's content sits to the right while it fades in or out.
     pure function panel-slide(t: float) -> length {
         return (1 - t) * 24px;
@@ -3001,21 +3782,33 @@ export component AppWindow inherits Window {
     // halfway through the slide.
     property <length> settled-width: root.width - side - gap * 3 - (panel != 0 ? panel-width + gap : 0px);
     // The search box lives at window level; the header keeps a gap for it.
-    property <length> search-width: min(460px, main-width - 78px - 16px);
+    property <length> search-width: min(480px, max(220px, root.width - 440px));
     // Narrow windows get a smaller hero.
     property <bool> compact: settled-width < 700px;
     // Playlists show the album in its own column when there is room.
     property <bool> show-album: settled-width >= 760px;
     property <length> hero-height: Hero.height(header.kind, header.banner, compact);
+    // The bottom of a detail page's hero, in window coordinates, as it
+    // scrolls. Far down until a hero shows.
+    property <length> hero-bottom: 100000px;
+    // A new page starts with its hero in view.
+    changed rows => { root.hero-bottom = 100000px; }
 
-    pure function row-height(kind: int, style: int) -> length {
+    // How far mix mode is on, eased, so rows open and close the room for
+    // their transition chips smoothly.
+    property <float> mix-level: header.mixing ? 1 : 0;
+    animate mix-level { duration: 280ms; easing: ease-in-out; }
+    // A song in mix mode also has room under it for the transition chip.
+    pure function row-height(kind: int, style: int, mix: string) -> length {
         return kind == 0 ? 56px
-            : kind == 1 ? (style == 1 ? 52px : 60px)
+            : kind == 1 ? (style == 1 ? 48px : 56px) + (style == 2 && mix != "" ? 22px * mix-level : 0px)
             : kind == 2 ? 236px
             : kind == 4 ? hero-height + 12px
             : kind == 5 ? 84px
             : kind == 6 ? 32px
             : kind == 7 ? 156px
+            : kind == 8 ? 104px
+            : kind == 9 ? 64px
             : 120px;
     }
 
@@ -3030,6 +3823,14 @@ export component AppWindow inherits Window {
     }
 
     function show-panel(which: int) {
+        if root.panel == 4 && which != 4 {
+            root.leave-mix-panel(which);
+            return;
+        }
+        root.switch-panel(which);
+    }
+
+    function switch-panel(which: int) {
         root.panel = root.panel == which ? 0 : which;
         if root.panel != 0 {
             root.shown-panel = root.panel;
@@ -3057,11 +3858,13 @@ export component AppWindow inherits Window {
     // How far the Now playing panel is scrolled. Zero or less.
     property <length> np-scroll;
     // The expanded cover: its size and place in the window.
-    property <length> wide-art: max(120px, min(root.wide-width * root.art-share - 96px, body-height - 64px - 200px));
+    // Whole pixels, like its place: a size with a fraction left the last
+    // column only part covered, a dark line down the cover's right side.
+    property <length> wide-art: round(max(120px, min(root.wide-width * root.art-share - 96px, body-height - 64px - 200px)) / 1px) * 1px;
     property <length> wide-art-x: root.wide-x + round((root.wide-width * root.art-share - root.wide-art) / 2 / 1px) * 1px;
-    property <length> wide-art-y: gap + 64px + round((body-height - 64px - root.wide-art - 84px) / 2 / 1px) * 1px;
+    property <length> wide-art-y: top-bar + 64px + round((body-height - 64px - root.wide-art - 84px) / 2 / 1px) * 1px;
     // The panel's cover in the window.
-    property <length> np-art-y: gap + root.np-scroll;
+    property <length> np-art-y: top-bar + root.np-scroll;
     property <length> np-art-h: panel-width * 1.2;
     // How wide the lyrics will be once the view settles. Rust breaks lines
     // to fit it, and again whenever it changes.
@@ -3073,7 +3876,8 @@ export component AppWindow inherits Window {
     property <length> lyrics-row: lyrics-font * 1.5;
     // The line being sung stands out larger. Rust breaks lines to fit
     // this size, so a line growing never runs out of room.
-    out property <float> lyrics-grow: 1.2;
+    // A touch, as Apple Music does: it is lit, not much larger.
+    out property <float> lyrics-grow: 1.04;
     // About how wide a character of synced lyrics is, for Rust to break
     // lines to fit `lyrics-width`.
     out property <float> lyrics-char-px: lyrics-wide ? 18 : 13.5;
@@ -3081,16 +3885,31 @@ export component AppWindow inherits Window {
     // row follows it on its own, a little later the further down it is, so
     // the lines ripple up the way Apple Music's do.
     in-out property <length> lyrics-scroll;
+    // Scrolled by hand: every line sharp, and the view stays put until
+    // Sync takes it back to the line being sung.
+    in-out property <bool> lyrics-free;
+    // How far the lines are moved to follow along. Freed, they are not:
+    // the view itself scrolls, over every line.
+    property <length> lyrics-at: lyrics-free ? 0px : lyrics-scroll;
     callback lyrics-width-changed();
     changed lyrics-width => { root.lyrics-width-changed(); }
 
-    // A new line in view takes back any scrolling by hand.
+    // A new line in view takes back any scrolling by hand, unless the
+    // view was freed.
     changed lyrics-scroll => {
-        lyrics-view.content-y = 0;
+        if !root.lyrics-free {
+            lyrics-view.content-y = 0;
+        }
     }
-    // New lyrics start at the top.
+    // New lyrics start at the top, following along.
     changed lyrics-state => {
+        root.lyrics-free = false;
+        lyrics-view.content-y = 0;
         root.lyrics-scroll = 0;
+    }
+    function sync-lyrics() {
+        root.lyrics-free = false;
+        lyrics-view.content-y = 0;
     }
 
     // Every island has a fixed place. Nothing here feeds the window's own
@@ -3099,7 +3918,7 @@ export component AppWindow inherits Window {
     // sidebar
     Rectangle {
         x: gap;
-        y: gap;
+        y: top-bar;
         width: side;
         height: body-height;
         border-radius: Theme.radius;
@@ -3174,94 +3993,24 @@ export component AppWindow inherits Window {
                 }
             }
         }
-        Rectangle {
-            x: 12px;
-            y: parent.height - 56px;
-            width: parent.width - 24px;
-            height: 44px;
-            border-radius: 10px;
-            background: root.nav == 5 ? #ffffff1f : account-touch.has-hover ? #ffffff14 : #ffffff0a;
-            animate background { duration: 120ms; }
-            // The account's picture once it is in, a dot until then.
-            if root.signed-in && root.account-has-art: Art {
-                x: 8px;
-                width: 24px;
-                height: 24px;
-                source: root.account-art;
-                has: true;
-                round: true;
-            }
-            if !(root.signed-in && root.account-has-art): Rectangle {
-                x: 10px;
-                width: 8px;
-                height: 8px;
-                border-radius: 4px;
-                background: root.signed-in ? #3ddc84 : #6b6b75;
-            }
-            Text {
-                x: root.signed-in && root.account-has-art ? 40px : 28px;
-                width: parent.width - self.x - 10px;
-                text: root.signed-in ? root.account-name : "Not signed in";
-                color: root.nav == 5 ? Theme.text : Theme.dim;
-                font-size: 14px;
-                vertical-alignment: center;
-                overflow: elide;
-            }
-            account-touch := TouchArea {
-                mouse-cursor: pointer;
-                clicked => {
-                    root.np-expanded = false;
-                    root.open-profile();
-                }
-            }
-        }
     }
 
     // main island
     Rectangle {
         x: side + gap * 2;
-        y: gap;
+        y: top-bar;
         width: main-width;
         height: body-height;
         border-radius: Theme.radius;
         background: Theme.island;
         clip: true;
         VerticalLayout {
-            HorizontalLayout {
-                height: 64px;
-                padding-left: 16px;
-                padding-right: 16px;
-                spacing: 10px;
-                VerticalLayout {
-                    alignment: center;
-                    IconButton {
-                        icon: Icons.back;
-                        size: 20px;
-                        tint: root.can-back || root.nav == 3 || root.nav == 5 ? Theme.text : #55555e;
-                        clicked => {
-                            if root.nav == 3 && root.settings-page != 0 {
-                                root.settings-page = 0;
-                            } else {
-                                root.back();
-                            }
-                        }
-                    }
-                }
-                Rectangle {
-                    width: root.search-width;
-                }
-                Rectangle {
-                    horizontal-stretch: 1;
-                }
-            }
-
             if root.nav != 3 && root.nav != 5: VerticalLayout {
-                padding-left: 16px;
-                padding-right: 6px;
                 if root.header.kind == 0 && root.page-title != "": HorizontalLayout {
                     height: 72px;
                     spacing: 12px;
-                    padding-left: 8px;
+                    padding-left: 24px;
+                    padding-right: 16px;
                     VerticalLayout {
                         alignment: center;
                         horizontal-stretch: 1;
@@ -3308,7 +4057,7 @@ export component AppWindow inherits Window {
                 // Search results by kind, as Spotify sorts them.
                 if root.search-tab >= 0: HorizontalLayout {
                     height: 48px;
-                    padding-left: 8px;
+                    padding-left: 24px;
                     padding-bottom: 8px;
                     spacing: 8px;
                     alignment: start;
@@ -3335,97 +4084,257 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
-                ListView {
+                page-box := Rectangle {
                     vertical-stretch: 1;
-                    for row in root.rows: Rectangle {
-                        height: root.row-height(row.kind, row.style);
-                        if row.kind == 0: SectionHeader {
-                            width: parent.width - 10px;
-                            title: row.title;
-                            more: row.more;
-                            more-clicked => { root.show-all(row.more-id); }
+                    page-list := ListView {
+                        width: 100%;
+                        height: 100%;
+                        vertical-scrollbar-policy: always-off;
+                        for row in root.rows: Rectangle {
+                            height: root.row-height(row.kind, row.style, row.mix);
+                            if row.kind == 0: SectionHeader {
+                                x: 16px;
+                                width: parent.width - 32px;
+                                title: row.title;
+                                more: row.more;
+                                more-clicked => { root.show-all(row.more-id); }
+                            }
+                            if row.kind == 1: SongRow {
+                                x: 16px;
+                                width: parent.width - 32px;
+                                item: row.item;
+                                number: row.number;
+                                show-art: row.style != 1;
+                                show-album: row.style >= 2 && root.show-album && row.item.album != "";
+                                mixing: root.header.mixing && row.style >= 2;
+                                addable: row.style == 3;
+                                add => { root.recommend-add(row.item.id); }
+                                bpm: row.bpm;
+                                camelot: row.camelot;
+                                key-color: row.key-color;
+                                mix-label: row.mix;
+                                mix-level: row.style >= 2 ? root.mix-level : 0;
+                                analysis: row.analysis;
+                                edit-mix => { root.edit-mix(row.item.id); }
+                                preview-mix => { root.preview-mix(row.item.id); }
+                                activated => { root.item-activated(row.item.id); }
+                                rested => { root.item-rested(row.item.id); }
+                                play => { root.item-play(row.item.id); }
+                                open(b) => { root.open-browse(b); }
+                                menu(x, y) => { root.show-menu(0, row.item.id, x, y); }
+                            }
+                            if row.kind == 7: TopResult {
+                                y: 0;
+                                x: 16px;
+                                width: parent.width - 32px;
+                                height: 144px;
+                                item: row.item;
+                                activated => { root.item-activated(row.item.id); }
+                                play => { root.item-play(row.item.id); }
+                                menu(x, y) => { root.show-menu(0, row.item.id, x, y); }
+                            }
+                            if row.kind == 2: Carousel {
+                                x: 16px;
+                                width: parent.width - 32px;
+                                cards: row.cards;
+                                activated(id) => { root.item-activated(id); }
+                                rested(id) => { root.item-rested(id); }
+                                play(id) => { root.item-play(id); }
+                                open(b) => { root.open-browse(b); }
+                                menu(id, x, y) => { root.show-menu(0, id, x, y); }
+                            }
+                            if row.kind == 4: DetailHeader {
+                                // Where the hero ends in the window, for the
+                                // bar that sticks once it has scrolled away.
+                                // The list's own scroll offset is only a guess
+                                // once the hero is out of view.
+                                property <length> bottom: self.absolute-position.y + self.height + 12px;
+                                changed bottom => { root.hero-bottom = self.bottom; }
+                                init => { root.hero-bottom = self.bottom; }
+                                y: 0;
+                                width: parent.width;
+                                height: root.hero-height;
+                                data: root.header;
+                                tint: root.shown-page-tint;
+                                compact: root.compact;
+                                play => { root.play-page(false); }
+                                shuffle => { root.play-page(true); }
+                                mix => { root.toggle-mix(); }
+                                download => { root.download-page(); }
+                                follow => { root.toggle-follow(); }
+                                like => { root.toggle-like-page(); }
+                                byline-clicked => { root.byline-clicked(); }
+                                menu(x, y) => { root.show-menu(3, 0, x, y); }
+                            }
+                            if row.kind == 5: Text {
+                                x: 24px;
+                                y: 0;
+                                width: parent.width - 48px;
+                                height: 72px;
+                                text: row.title;
+                                color: Theme.dim;
+                                font-size: 14px;
+                                wrap: word-wrap;
+                                overflow: elide;
+                            }
+                            // "Recommended", under a playlist of the user's own.
+                            if row.kind == 8: VerticalLayout {
+                                x: 24px;
+                                width: parent.width - 48px;
+                                padding-top: 40px;
+                                spacing: 4px;
+                                Text {
+                                    text: row.title;
+                                    color: Theme.text;
+                                    font-size: 24px;
+                                    font-weight: 700;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: row.subtitle;
+                                    color: Theme.dim;
+                                    font-size: 14px;
+                                    overflow: elide;
+                                }
+                            }
+                            if row.kind == 9: Rectangle {
+                                x: parent.width - 16px - self.width - 8px;
+                                y: 16px;
+                                width: refresh-label.preferred-width + 28px;
+                                height: 36px;
+                                border-radius: 18px;
+                                background: refresh-touch.has-hover && !row.more ? #ffffff14 : transparent;
+                                animate background { duration: 120ms; }
+                                refresh-label := Text {
+                                    text: row.more ? "Finding songs…" : "Refresh";
+                                    color: refresh-touch.has-hover && !row.more ? Theme.text : Theme.dim;
+                                    font-size: 14px;
+                                    font-weight: 700;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                refresh-touch := TouchArea {
+                                    enabled: !row.more;
+                                    mouse-cursor: pointer;
+                                    clicked => { root.recommend-refresh(); }
+                                }
+                            }
+                            if row.kind == 6: TrackColumns {
+                                x: 16px;
+                                width: parent.width - 32px;
+                                show-art: row.style == 2;
+                                show-album: row.style == 2 && root.show-album;
+                                mixing: root.header.mixing;
+                                sort-column: root.sort-column;
+                                sort-descending: root.sort-descending;
+                                sort(c) => { root.sort-by(c); }
+                            }
+                            if row.kind == 3: Appear {
+                                appeared => { root.load-more(); }
+                                SkeletonRow {
+                                    y: 0;
+                                    x: 16px;
+                                    width: parent.width - 32px;
+                                    seed: 1;
+                                }
+                                SkeletonRow {
+                                    y: 60px;
+                                    x: 16px;
+                                    width: parent.width - 32px;
+                                    seed: 4;
+                                }
+                            }
                         }
-                        if row.kind == 1: SongRow {
-                            width: parent.width - 10px;
-                            item: row.item;
-                            number: row.number;
-                            show-art: row.style != 1;
-                            show-album: row.style == 2 && root.show-album && row.item.album != "";
-                            activated => { root.item-activated(row.item.id); }
-                            rested => { root.item-rested(row.item.id); }
-                            play => { root.item-play(row.item.id); }
-                            open(b) => { root.open-browse(b); }
-                            menu(x, y) => { root.show-menu(0, row.item.id, x, y); }
+                    }
+                    // Where the bottom of the hero is in the list, as it scrolls.
+                    // The hero's last place stands once it is gone from the
+                    // list, far out of view.
+                    property <length> hero-left: root.hero-bottom - page-list.absolute-position.y;
+                    // As Spotify does it: the bar at the top darkens bit by bit
+                    // as the hero scrolls away. The page's name and play button
+                    // come in once the hero's own play button passes under it,
+                    // and the column titles stick when they reach it.
+                    property <float> bar-t: max(0, min(1, 1 - (self.hero-left - 64px) / max(1px, root.hero-height + 12px - 64px)));
+                    property <bool> named: self.hero-left < 64px + 60px;
+                    property <bool> stuck: self.hero-left < 64px;
+                    property <int> columns: root.rows.length > 1 && root.rows[1].kind == 6 ? root.rows[1].style : 0;
+                    if root.header.kind != 0 && page-box.bar-t > 0: Rectangle {
+                        y: 0;
+                        width: page-list.width;
+                        height: 64px;
+                        background: root.shown-page-tint.darker(0.45).with-alpha(page-box.bar-t);
+                        // Once it shows the name, clicks stop at the bar.
+                        if page-box.named: TouchArea { }
+                    }
+                    if root.header.kind != 0 && page-box.bar-t > 0: sticky-name := Rectangle {
+                        y: 0;
+                        width: page-list.width;
+                        height: 64px;
+                        opacity: page-box.named ? 1 : 0;
+                        animate opacity { duration: 180ms; easing: ease-out; }
+                        if root.header.can-play: Rectangle {
+                            x: 16px;
+                            y: 10px;
+                            width: 44px;
+                            height: 44px;
+                            border-radius: 22px;
+                            background: sticky-play.has-hover ? Theme.accent.brighter(0.1) : Theme.accent;
+                            Icon {
+                                text: Now.page != "" && Now.page == Now.from && Now.playing ? Icons.pause : Icons.play;
+                                fill: true;
+                                color: #08080a;
+                                font-size: 20px;
+                            }
+                            sticky-play := TouchArea {
+                                enabled: page-box.named;
+                                mouse-cursor: pointer;
+                                clicked => { root.play-page(false); }
+                            }
                         }
-                        if row.kind == 7: TopResult {
+                        Text {
+                            x: root.header.can-play ? 72px : 24px;
                             y: 0;
-                            width: parent.width - 10px;
-                            height: 144px;
-                            item: row.item;
-                            activated => { root.item-activated(row.item.id); }
-                            play => { root.item-play(row.item.id); }
-                            menu(x, y) => { root.show-menu(0, row.item.id, x, y); }
-                        }
-                        if row.kind == 2: Carousel {
-                            width: parent.width - 10px;
-                            cards: row.cards;
-                            activated(id) => { root.item-activated(id); }
-                            rested(id) => { root.item-rested(id); }
-                            play(id) => { root.item-play(id); }
-                            open(b) => { root.open-browse(b); }
-                            menu(id, x, y) => { root.show-menu(0, id, x, y); }
-                        }
-                        if row.kind == 4: DetailHeader {
-                            y: 0;
-                            width: parent.width - 10px;
-                            height: root.hero-height;
-                            data: root.header;
-                            tint: root.shown-page-tint;
-                            compact: root.compact;
-                            play => { root.play-page(false); }
-                            shuffle => { root.play-page(true); }
-                            follow => { root.toggle-follow(); }
-                            like => { root.toggle-like-page(); }
-                            byline-clicked => { root.byline-clicked(); }
-                            menu(x, y) => { root.show-menu(3, 0, x, y); }
-                        }
-                        if row.kind == 5: Text {
-                            x: 8px;
-                            y: 0;
-                            width: parent.width - 26px;
-                            height: 72px;
-                            text: row.title;
-                            color: Theme.dim;
-                            font-size: 14px;
-                            wrap: word-wrap;
+                            height: 64px;
+                            width: parent.width - self.x - 16px;
+                            text: root.header.title;
+                            color: Theme.text;
+                            font-size: 24px;
+                            font-weight: 800;
+                            vertical-alignment: center;
                             overflow: elide;
                         }
-                        if row.kind == 6: TrackColumns {
-                            width: parent.width - 10px;
-                            show-art: row.style == 2;
-                            show-album: row.style == 2 && root.show-album;
+                    }
+                    if root.header.kind != 0 && page-box.stuck && page-box.columns > 0: Rectangle {
+                        y: 64px;
+                        width: page-list.width;
+                        height: 36px;
+                        background: Theme.island;
+                        TouchArea { }
+                        // A slightly lighter strip, as Spotify has it.
+                        Rectangle { background: #ffffff0a; }
+                        TrackColumns {
+                            x: 16px;
+                            y: 2px;
+                            width: parent.width - 32px;
+                            show-art: page-box.columns == 2;
+                            show-album: page-box.columns == 2 && root.show-album;
+                            mixing: root.header.mixing;
                             sort-column: root.sort-column;
                             sort-descending: root.sort-descending;
                             sort(c) => { root.sort-by(c); }
                         }
-                        if row.kind == 3: Appear {
-                            appeared => { root.load-more(); }
-                            SkeletonRow {
-                                y: 0;
-                                width: parent.width - 10px;
-                                seed: 1;
-                            }
-                            SkeletonRow {
-                                y: 60px;
-                                width: parent.width - 10px;
-                                seed: 4;
-                            }
-                        }
+                    }
+                    ScrollThumb {
+                        x: parent.width - self.width;
+                        height: parent.height;
+                        content-y <=> page-list.content-y;
+                        content-height: page-list.content-height;
+                        view-height: page-list.visible-height;
                     }
                 }
             }
 
-            if root.nav == 3 && root.settings-page == 0: Flickable {
+            if root.nav == 3 && root.settings-page == 0: settings-flick := Flickable {
                 content-height: settings.preferred-height;
                 settings := VerticalLayout {
                     padding: 28px;
@@ -3480,6 +4389,23 @@ export component AppWindow inherits Window {
                                     options: ["Off", "1 s", "2 s", "3 s", "4 s", "6 s", "8 s", "10 s", "12 s"];
                                     selected <=> root.crossfade-choice;
                                     changed(i) => { root.crossfade-choice-changed(i); }
+                                }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        max-width: 680px;
+                        border-radius: 12px;
+                        background: #ffffff0a;
+                        HorizontalLayout {
+                            padding: 20px;
+                            SettingRow {
+                                title: "Beat matching";
+                                subtitle: "With crossfade on, songs with a steady beat and close tempos mix on the beat, like a DJ would. The next song speeds up or slows down a little to match, then eases back. Other songs fade as usual.";
+                                Dropdown {
+                                    options: ["Off", "On"];
+                                    selected <=> root.beat-match-choice;
+                                    changed(i) => { root.beat-match-choice-changed(i); }
                                 }
                             }
                         }
@@ -3605,13 +4531,26 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
+                ScrollThumb {
+                    x: settings-flick.width - self.width;
+                    y: -settings-flick.content-y;
+                    height: settings-flick.height;
+                    content-y <=> settings-flick.content-y;
+                    content-height: settings-flick.content-height;
+                    view-height: settings-flick.height;
+                }
             }
 
             // The profile: who is signed in, what you play, and what
             // Tonearm reports to.
-            if root.nav == 5: Flickable {
+            if root.nav == 5: profile-flick := Flickable {
+                // Its content would otherwise set its width, leaving the
+                // rest of the island empty with the scrollbar mid-page.
+                width: 100%;
+                content-width: self.width;
                 content-height: profile.preferred-height;
                 profile := VerticalLayout {
+                    width: profile-flick.width;
                     padding: 28px;
                     padding-top: 12px;
                     spacing: 28px;
@@ -3800,10 +4739,18 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
+                ScrollThumb {
+                    x: profile-flick.width - self.width;
+                    y: -profile-flick.content-y;
+                    height: profile-flick.height;
+                    content-y <=> profile-flick.content-y;
+                    content-height: profile-flick.content-height;
+                    view-height: profile-flick.height;
+                }
             }
 
             // Settings sub page: the YouTube Music sign in.
-            if root.nav == 3 && root.settings-page == 2: Flickable {
+            if root.nav == 3 && root.settings-page == 2: account-flick := Flickable {
                 content-height: account.preferred-height;
                 account := VerticalLayout {
                     padding: 28px;
@@ -3859,10 +4806,18 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
+                ScrollThumb {
+                    x: account-flick.width - self.width;
+                    y: -account-flick.content-y;
+                    height: account-flick.height;
+                    content-y <=> account-flick.content-y;
+                    content-height: account-flick.content-height;
+                    view-height: account-flick.height;
+                }
             }
 
             // Settings sub page: the services Tonearm can report to.
-            if root.nav == 3 && root.settings-page == 1: Flickable {
+            if root.nav == 3 && root.settings-page == 1: connections-flick := Flickable {
                 content-height: connections.preferred-height;
                 connections := VerticalLayout {
                     padding: 28px;
@@ -3990,6 +4945,14 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
+                ScrollThumb {
+                    x: connections-flick.width - self.width;
+                    y: -connections-flick.content-y;
+                    height: connections-flick.height;
+                    content-y <=> connections-flick.content-y;
+                    content-height: connections-flick.content-height;
+                    view-height: connections-flick.height;
+                }
             }
         }
         if root.loading && root.rows.length == 0 && root.nav != 3 && root.nav != 5 && root.header.kind == 0: SkeletonPage {
@@ -4016,12 +4979,21 @@ export component AppWindow inherits Window {
     if root.panel-t > 0: Rectangle {
         // Slides in from the right edge as it opens.
         x: root.width - (panel-width + gap) * root.panel-t;
-        y: gap;
+        y: top-bar;
         width: panel-width;
         height: body-height;
         border-radius: Theme.radius;
-        background: root.panel-color;
         clip: true;
+        // The panel's colour. Under Now playing's cover it starts a little
+        // below the cover's top, so it never reaches the rounded corners the
+        // cover fills: at those edge pixels it showed through as a pale rim.
+        Rectangle {
+            property <bool> under-cover: root.np-t >= 1 && root.expand-t <= 0 && root.track-has-art;
+            y: self.under-cover ? max(0px, root.np-art-h + root.np-scroll - 24px) : 0px;
+            height: parent.height - self.y;
+            border-radius: Theme.radius;
+            background: root.panel-color;
+        }
         if root.queue-t > 0: Text {
             x: 20px + root.panel-slide(root.queue-t);
             y: 14px;
@@ -4043,6 +5015,13 @@ export component AppWindow inherits Window {
             font-size: 20px;
             font-weight: 700;
             vertical-alignment: center;
+        }
+        // Back to Now playing, which shows the lyrics too.
+        if root.lyrics-t > 0: CloseButton {
+            x: parent.width - self.width - 14px + root.panel-slide(root.lyrics-t);
+            y: 12px;
+            opacity: root.lyrics-t;
+            clicked => { root.show-panel(3); }
         }
 
         // Queue: what plays now, then what plays next. Drag to reorder.
@@ -4078,11 +5057,20 @@ export component AppWindow inherits Window {
                 y: 100px;
                 text: "Next up";
             }
+            ScrollThumb {
+                x: 8px + (parent.width - 12px) - self.width;
+                y: 128px;
+                height: parent.height - 136px;
+                content-y <=> root.drag-scroll;
+                content-height: next-list.content-height;
+                view-height: next-list.visible-height;
+            }
             next-list := ListView {
                 x: 8px;
                 y: 128px;
                 width: parent.width - 12px;
                 height: parent.height - 136px;
+                vertical-scrollbar-policy: always-off;
                 content-y <=> root.drag-scroll;
                 init => {
                     root.drag-view = self.height;
@@ -4120,11 +5108,291 @@ export component AppWindow inherits Window {
             }
         }
 
+        // The transition editor, for a chip on a playlist in mix mode.
+        if root.mix-t > 0: Rectangle {
+            x: root.panel-slide(root.mix-t);
+            opacity: root.mix-t;
+            editor-flick := Flickable {
+                content-height: editor-body.preferred-height;
+                editor-body := VerticalLayout {
+                    padding: 20px;
+                    spacing: 14px;
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Text {
+                            text: "Edit transition";
+                            color: Theme.text;
+                            font-size: 18px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                        }
+                        // The editor is new, and still changing.
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: beta-text.preferred-width + 12px;
+                                height: 20px;
+                                border-radius: 5px;
+                                background: #1ed760;
+                                beta-text := Text {
+                                    text: "Beta";
+                                    color: #08080a;
+                                    font-size: 12px;
+                                    font-weight: 700;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                        Rectangle {
+                            horizontal-stretch: 1;
+                        }
+                        PillButton {
+                            text: "Save";
+                            primary: root.mix-changed;
+                            clicked => { root.mix-save(); }
+                        }
+                        // As tall as Save, and centred on the same line.
+                        VerticalLayout {
+                            alignment: center;
+                            CloseButton {
+                                clicked => { root.leave-mix-panel(-1); }
+                            }
+                        }
+                    }
+                    MixSongLine { song: root.mix-from; }
+                    // Both songs over the mix, as Spotify draws it: the card
+                    // behind the transition itself, with each song's sound
+                    // running on past it, and the lines that show what the
+                    // transition does to each. 340 by 230, the size
+                    // `PICTURE_WIDTH` and `PICTURE_HEIGHT` draw at in Rust.
+                    Rectangle {
+                        height: 230px;
+                        Rectangle {
+                            x: parent.width * root.mix-card-from;
+                            width: parent.width * (root.mix-card-to - root.mix-card-from);
+                            border-radius: 12px;
+                            background: #ffffff0f;
+                        }
+                        // How far each song is being dragged, snapped.
+                        property <length> out-drag;
+                        property <length> in-drag;
+
+                        // The grid, fixed to the transition. Songs snap to it.
+                        MixPath { commands: root.mix-beats-path; stroke: #ffffff0c; stroke-width: 1px; }
+                        MixPath { commands: root.mix-bars-path; stroke: #ffffff22; stroke-width: 1px; }
+                        // The song going out. Both songs are drawn three
+                        // pictures wide, so dragging brings more of them into
+                        // view.
+                        Rectangle {
+                            x: parent.out-drag - parent.width;
+                            width: parent.width * 3;
+                            height: parent.height;
+                            MixPath { commands: root.mix-out-wave; fill: #efe6dc; }
+                            MixPath { commands: root.mix-out-low; fill: #e0884a; }
+                        }
+                        Rectangle {
+                            x: parent.in-drag - parent.width;
+                            width: parent.width * 3;
+                            height: parent.height;
+                            MixPath { commands: root.mix-in-wave; fill: #2f62e0; }
+                            MixPath { commands: root.mix-in-low; fill: #e0884a; }
+                        }
+                        // Drag a song along to change where they meet.
+                        TouchArea {
+                            // Without a y, Slint would centre it.
+                            y: 0;
+                            height: parent.height / 2;
+                            mouse-cursor: self.pressed ? MouseCursor.grabbing : MouseCursor.grab;
+                            moved => {
+                                if self.pressed {
+                                    parent.out-drag = self.mouse-x - self.pressed-x;
+                                }
+                            }
+                            pointer-event(event) => {
+                                if event.kind == PointerEventKind.up && parent.out-drag != 0 {
+                                    root.mix-dragged(0, -parent.out-drag / parent.width * root.mix-span, event.modifiers.shift);
+                                    parent.out-drag = 0;
+                                }
+                            }
+                        }
+                        TouchArea {
+                            y: parent.height / 2;
+                            height: parent.height / 2;
+                            mouse-cursor: self.pressed ? MouseCursor.grabbing : MouseCursor.grab;
+                            moved => {
+                                if self.pressed {
+                                    parent.in-drag = self.mouse-x - self.pressed-x;
+                                }
+                            }
+                            pointer-event(event) => {
+                                if event.kind == PointerEventKind.up && parent.in-drag != 0 {
+                                    root.mix-dragged(1, -parent.in-drag / parent.width * root.mix-span, event.modifiers.shift);
+                                    parent.in-drag = 0;
+                                }
+                            }
+                        }
+                        MixPath { commands: root.mix-filter-path; stroke: #c58af9; stroke-width: 2px; }
+                        MixPath { commands: root.mix-bass-path; stroke: #f5c542; stroke-width: 2px; }
+                        MixPath { commands: root.mix-volume-path; stroke: #4fb3ff; stroke-width: 2px; }
+                        // The playhead, moved on by the clock between updates.
+                        if root.mix-head-at > -5: Rectangle {
+                            property <float> head: root.mix-head-rate == 0 ? root.mix-head-at
+                                : root.mix-head-at + root.mix-head-rate * ((animation-tick() - root.mix-head-stamp) / 1s);
+                            visible: self.head >= 0 && self.head <= 1;
+                            x: parent.width * self.head - 1px;
+                            width: 2px;
+                            background: #1ed760;
+                        }
+                        // While it waits: a faint outline, and a bright piece of
+                        // it running round, drawn by Rust each frame.
+                        if root.mix-loading: Rectangle {
+                            width: 52px;
+                            height: 40px;
+                            border-radius: 13px;
+                            border-width: 2px;
+                            border-color: #ffffff1f;
+                            MixPath {
+                                commands: root.mix-spinner;
+                                stroke: #ffffff;
+                                stroke-width: 2px;
+                            }
+                        }
+                        Rectangle {
+                            width: 44px;
+                            height: 32px;
+                            border-radius: 9px;
+                            background: play-touch.pressed ? #ffffff40 : play-touch.has-hover ? #ffffff38 : #ffffff26;
+                            animate background { duration: 120ms; }
+                            if !root.mix-previewing: Icon {
+                                text: Icons.play;
+                                fill: true;
+                                font-size: 16px;
+                            }
+                            // Stop.
+                            if root.mix-previewing: Rectangle {
+                                width: 11px;
+                                height: 11px;
+                                border-radius: 2px;
+                                background: #ffffff;
+                            }
+                            play-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.mix-preview(); }
+                            }
+                        }
+                    }
+                    MixSongLine { song: root.mix-to; }
+                    Text {
+                        text: "Presets";
+                        color: Theme.faint;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                            for name[i] in root.mix-presets: Rectangle {
+                                height: 36px;
+                                width: (i == 0 ? 14px + 6px : 0px) + preset-label.preferred-width + 24px;
+                                border-radius: 10px;
+                                background: i == root.mix-preset ? #f0f0f3 : preset-touch.has-hover ? #ffffff24 : #ffffff14;
+                                animate background { duration: 120ms; }
+                                if i == 0: Icon {
+                                    x: 12px;
+                                    width: 14px;
+                                    text: Icons.sparkle;
+                                    fill: false;
+                                    color: i == root.mix-preset ? #08080a : Theme.accent;
+                                    font-size: 14px;
+                                }
+                                preset-label := Text {
+                                    x: i == 0 ? 12px + 14px + 6px : 12px;
+                                    width: self.preferred-width;
+                                    text: name;
+                                    color: i == root.mix-preset ? #08080a : Theme.text;
+                                    font-size: 14px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                            preset-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.mix-preset-picked(i); }
+                            }
+                        }
+                    }
+                    MixChoice {
+                        title: "Volume";
+                        accent: #4fb3ff;
+                        options: root.mix-volumes;
+                        selected <=> root.mix-volume;
+                        changed(i) => { root.mix-volume-picked(i); }
+                    }
+                    MixChoice {
+                        title: "EQ";
+                        accent: #f5c542;
+                        options: root.mix-eqs;
+                        selected <=> root.mix-eq;
+                        changed(i) => { root.mix-eq-picked(i); }
+                    }
+                    MixChoice {
+                        title: "Filter";
+                        accent: #c58af9;
+                        options: root.mix-filters;
+                        selected <=> root.mix-filter;
+                        changed(i) => { root.mix-filter-picked(i); }
+                    }
+                    Rectangle {
+                        height: 52px;
+                        border-radius: 12px;
+                        background: #ffffff0a;
+                            Text {
+                                x: 16px;
+                                text: "Beatmatching";
+                                color: root.mix-can-beatmatch ? Theme.text : Theme.faint;
+                            font-size: 15px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                        Rectangle {
+                            x: parent.width - self.width - 16px;
+                            width: 42px;
+                            height: 24px;
+                            border-radius: 12px;
+                                background: root.mix-beatmatch && root.mix-can-beatmatch ? Theme.accent : #ffffff30;
+                                opacity: root.mix-can-beatmatch ? 1 : 0.4;
+                            animate background { duration: 150ms; }
+                            Rectangle {
+                                    x: root.mix-beatmatch && root.mix-can-beatmatch ? parent.width - self.width - 3px : 3px;
+                                animate x { duration: 150ms; easing: ease-out; }
+                                width: 18px;
+                                height: 18px;
+                                border-radius: 9px;
+                                background: #ffffff;
+                            }
+                                TouchArea {
+                                    enabled: root.mix-can-beatmatch;
+                                    mouse-cursor: pointer;
+                                    clicked => { root.mix-beatmatch-toggled(); }
+                                }
+                        }
+                    }
+                }
+                ScrollThumb {
+                    x: editor-flick.width - self.width;
+                    y: -editor-flick.content-y;
+                    height: editor-flick.height;
+                    content-y <=> editor-flick.content-y;
+                    content-height: editor-flick.content-height;
+                    view-height: editor-flick.height;
+                }
+            }
+        }
+
         // Now playing: the cover large, the song, a look at the lyrics and
         // what comes next. Nothing else.
         // The cover runs to the panel's edges, under the heading, and fades
         // into the panel at the bottom where the song's name sits on it.
-        if root.np-t > 0: Flickable {
+        if root.np-t > 0: np-flick := Flickable {
             x: root.panel-slide(root.np-t);
             y: 0;
             opacity: root.np-t;
@@ -4142,7 +5410,9 @@ export component AppWindow inherits Window {
                 Rectangle {
                     // Taller than wide, as the cover is cropped to fill.
                     height: root.panel-width * 1.2;
-                    background: root.panel-color;
+                    // Only while there is no cover, so it never shows round
+                    // the cover's edge at the corners.
+                    background: root.track-has-art || root.motion-t > 0 ? transparent : root.panel-color;
                     // The moving cover stands in for it while Now playing
                     // expands or comes back.
                     opacity: root.expand-t > 0 ? 0 : 1;
@@ -4343,6 +5613,37 @@ export component AppWindow inherits Window {
                         menu(x, y) => { root.show-menu(1, root.queue-index + 1, x, y); }
                     }
                 }
+                // The song's tempo and key.
+                if root.track-sound.length > 0: Rectangle {
+                    height: sound-list.preferred-height;
+                    border-radius: 12px;
+                    background: #ffffff0d;
+                    sound-list := VerticalLayout {
+                        padding: 16px;
+                        spacing: 12px;
+                        Text {
+                            text: "Sound";
+                            color: Theme.text;
+                            font-size: 14px;
+                            font-weight: 700;
+                        }
+                        for row in root.track-sound: VerticalLayout {
+                            spacing: 2px;
+                            Text {
+                                text: row.role;
+                                color: Theme.dim;
+                                font-size: 12px;
+                            }
+                            Text {
+                                text: row.names;
+                                color: Theme.text;
+                                font-size: 14px;
+                                font-weight: 600;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
                 // Who wrote and produced the song.
                 if root.track-credits.length > 0: Rectangle {
                     height: credits-list.preferred-height;
@@ -4418,13 +5719,25 @@ export component AppWindow inherits Window {
     if root.expand-t > 0: Rectangle {
         // It stays put and fades. The cover is what moves, on its own layer.
         x: root.wide-x;
-        y: gap;
+        y: top-bar;
         width: root.wide-width;
         opacity: root.expand-t;
         height: body-height;
         border-radius: Theme.radius;
         background: @linear-gradient(160deg, root.shown-tint.mix(Theme.island, 0.55) 0%, Theme.island 75%);
         clip: true;
+        // The cover, or its Canvas as it plays, blurred to fill the view,
+        // and darkened so the cover and words stand out on it.
+        Image {
+            width: 100%;
+            height: 100%;
+            source: root.track-backdrop;
+            image-fit: cover;
+            image-rendering: smooth;
+        }
+        Rectangle {
+            background: @linear-gradient(180deg, #00000038 0%, #00000070 100%);
+        }
         // Catches clicks, so nothing underneath reacts.
         TouchArea { }
         // Takes the keyboard as it opens, so Escape puts it back.
@@ -4489,7 +5802,7 @@ export component AppWindow inherits Window {
                 height: 100%;
                 source: root.track-motion;
                 image-fit: cover;
-                opacity: root.motion-t;
+                opacity: root.motion-t * (1 - root.expand-t);
             }
             // The panel's shading, which the expanded cover does without.
             Rectangle {
@@ -4514,7 +5827,7 @@ export component AppWindow inherits Window {
         // The panel's heading, expand button and heart fade as it leaves.
         Text {
             x: root.panel-x + 20px;
-            y: gap + 14px;
+            y: top-bar + 14px;
             height: 32px;
             opacity: 1 - parent.t;
             text: "Now playing";
@@ -4525,7 +5838,7 @@ export component AppWindow inherits Window {
         }
         Icon {
             x: root.panel-x + panel-width - 48px;
-            y: gap + 12px;
+            y: top-bar + 12px;
             width: 36px;
             height: 36px;
             opacity: (1 - parent.t) * 0.7;
@@ -4570,11 +5883,20 @@ export component AppWindow inherits Window {
         visible: (root.lyrics-t > 0 && root.panel-t > 0) || wide;
         opacity: wide ? root.expand-t : root.lyrics-t;
         x: wide ? root.wide-x + root.wide-width * root.art-share : root.panel-x + root.panel-slide(root.lyrics-t);
-        y: wide ? gap + 72px : gap + 56px;
+        y: wide ? top-bar + 72px : top-bar + 56px;
         width: wide ? root.wide-width * (1 - root.art-share) - 32px : panel-width;
         height: wide ? body-height - 104px : body-height - 64px;
         content-height: max(self.height, lines.preferred-height);
-        animate content-y { duration: 600ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+        // Freed, it moves with the wheel at once. Sync glides back.
+        animate content-y { duration: root.lyrics-free ? 0ms : 600ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+        flicked => {
+            if !root.lyrics-free && root.lyrics-synced {
+                // The lines' own shift becomes scrolling, so nothing jumps
+                // and the whole song can be scrolled through.
+                root.lyrics-free = true;
+                self.content-y = max(-(self.content-height - self.height), min(0px, self.content-y - root.lyrics-scroll));
+            }
+        }
         lines := VerticalLayout {
             alignment: start;
             padding-top: 8px;
@@ -4606,7 +5928,7 @@ export component AppWindow inherits Window {
                 // Puts this row a third of the way down the view, from where
                 // the layout really has it.
                 function bring-in() {
-                    root.lyrics-scroll = clamp(self.y - lyrics-view.height * 0.3, 0px, max(0px, lines.preferred-height - lyrics-view.height));
+                    root.lyrics-scroll = clamp(self.y - lyrics-view.height * 0.2, 0px, max(0px, lines.preferred-height - lyrics-view.height));
                 }
                 changed active => {
                     if self.active && row.first {
@@ -4620,25 +5942,35 @@ export component AppWindow inherits Window {
                 }
                 // This row's own copy of the scroll. Lines below the sung one
                 // follow a beat later each.
-                property <length> shift: root.lyrics-scroll;
+                property <length> shift: root.lyrics-at;
+                // Apple Music's ripple, as AMLL measures it. Each line rides
+                // a spring (mass 0.9, stiffness about 190, damping its root
+                // times 2.2), drawn here as the curve that fits it to within
+                // 1%. The wave starts at the top of the view, not at the sung
+                // line: the line above the sung one moves first, and each line
+                // under it 50 ms after the last, the step shrinking by 5% a
+                // line from the sung one down.
+                property <int> rel: row.line - root.lyrics-line;
                 animate shift {
-                    duration: 750ms;
-                    delay: clamp(row.line - root.lyrics-line, 0, 8) * 40ms;
-                    easing: cubic-bezier(0.2, 0.85, 0.25, 1);
+                    duration: root.lyrics-free ? 0ms : 800ms;
+                    delay: root.lyrics-free || self.rel < 0 ? 0ms
+                        : 50ms + 1050ms * (1 - pow(1 / 1.05, self.rel));
+                    easing: cubic-bezier(0.228, 0.481, 0.069, 1.05);
                 }
                 // Lines fade with distance from the one being sung.
-                property <float> fade: !root.lyrics-synced || active ? 1 : clamp(0.5 - 0.09 * distance, 0.16, 0.5);
+                property <float> fade: !root.lyrics-synced || active ? 1 : root.lyrics-free ? 0.6 : clamp(0.42 - 0.03 * distance, 0.28, 0.42);
                 animate fade { duration: 350ms; easing: ease-out; }
                 // Rows fade out as they pass the top or bottom of the view,
                 // rather than being cut off there. The top only fades once
                 // the lyrics have scrolled, so the first line starts whole.
-                property <length> top: self.y - self.shift;
+                // Where the row is in the view, scrolled by hand or not.
+                property <length> top: self.y - self.shift + lyrics-view.content-y;
                 property <length> half: max(1px, self.height / 2);
-                property <float> edge: clamp((self.top + self.half) / (self.half + min(28px, self.shift)), 0, 1)
+                property <float> edge: clamp((self.top + self.half) / (self.half + min(28px, self.shift - lyrics-view.content-y)), 0, 1)
                     * clamp((lyrics-view.height - self.top - self.height + self.half) / (self.half + 28px), 0, 1);
                 // Synced lines go out of focus with distance from the one
                 // being sung: 0 sharp, 1 a little, 2 a lot.
-                property <float> blur: root.lyrics-synced && row.kind == 0 && distance > 0 ? min(2, 0.5 + 0.5 * distance) : 0;
+                property <float> blur: root.lyrics-synced && !root.lyrics-free && row.kind == 0 && distance > 1 ? min(2, 0.6 * (distance - 1)) : 0;
                 animate blur { duration: 400ms; easing: ease-out; }
                 // The sung line grows.
                 property <float> grow: active && row.kind == 0 ? root.lyrics-grow : 1;
@@ -4704,7 +6036,8 @@ export component AppWindow inherits Window {
                         text: row.text;
                         text-color: Theme.text;
                         font-size: root.lyrics-synced ? root.lyrics-font * lyric-row.grow : 16px;
-                        font-weight: root.lyrics-synced ? 800 : 400;
+                        font-weight: root.lyrics-synced ? 700 : 400;
+                        font-family: root.lyrics-synced ? "Inter Display" : "Inter";
                         align: lyric-row.side;
                         level: lyric-row.blur;
                         soft: row.soft;
@@ -4714,6 +6047,7 @@ export component AppWindow inherits Window {
                     }
                 }
                 if row.kind == 4: Text {
+                    font-family: "Inter Display";
                     x: 20px;
                     y: -lyric-row.shift;
                     width: parent.width - 40px;
@@ -4740,6 +6074,38 @@ export component AppWindow inherits Window {
                 font-size: 12px;
                 vertical-alignment: bottom;
             }
+        }
+    }
+
+    // Back to following the sung line, once the lyrics were scrolled.
+    if root.lyrics-free && root.lyrics-synced && lyrics-view.visible: Rectangle {
+        x: lyrics-view.x + (lyrics-view.width - self.width) / 2;
+        y: lyrics-view.y + lyrics-view.height - self.height - 24px;
+        width: 18px + 18px + 10px + sync-label.preferred-width + 24px;
+        height: 44px;
+        border-radius: 22px;
+        opacity: lyrics-view.opacity;
+        background: sync-touch.pressed ? #dcdcdc : sync-touch.has-hover ? #f4f4f4 : #ffffff;
+        drop-shadow-blur: 16px;
+        drop-shadow-color: #00000066;
+        animate background { duration: 120ms; }
+        WaveIcon {
+            x: 20px;
+            width: 13px;
+            height: 18px;
+            tint: #08080a;
+        }
+        sync-label := Text {
+            x: 18px + 18px + 10px;
+            text: "Sync";
+            color: #08080a;
+            font-size: 15px;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+        sync-touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.sync-lyrics(); }
         }
     }
 
@@ -4864,30 +6230,36 @@ export component AppWindow inherits Window {
 
         // centre: transport over the timeline. The buttons and the
         // timeline's track sit as one block, centred in the island.
-        property <length> transport-y: (self.height - 48px) / 2;
+        // Spotify's measures: 32px buttons with 16px icons, play a 32px
+        // circle, centres 40px then 48px apart, the timeline under them.
+        property <length> transport-y: (self.height - 50px) / 2;
         IconButton {
-            x: parent.width / 2 - 112px;
+            x: parent.width / 2 - 88px - 16px;
             y: transport-y;
+            width: 32px;
+            height: 32px;
             icon: root.smart-shuffle ? Icons.sparkle : Icons.shuffle;
-            size: 19px;
+            size: 16px;
             tint: root.shuffle ? Theme.accent : Theme.dim;
             dot: root.shuffle;
             clicked => { root.toggle-shuffle(); }
         }
         IconButton {
-            x: parent.width / 2 - 66px;
+            x: parent.width / 2 - 48px - 16px;
             y: transport-y;
+            width: 32px;
+            height: 32px;
             icon: Icons.prev;
             fill: true;
-            size: 18px;
+            size: 16px;
             tint: Theme.text;
             clicked => { root.previous(); }
         }
         IconButton {
-            x: parent.width / 2 - 18px;
+            x: parent.width / 2 - 16px;
             y: transport-y;
-            width: 36px;
-            height: 36px;
+            width: 32px;
+            height: 32px;
             icon: root.buffering ? "" : root.playing ? Icons.pause : Icons.play;
             fill: true;
             size: 16px;
@@ -4899,37 +6271,41 @@ export component AppWindow inherits Window {
             }
         }
         IconButton {
-            x: parent.width / 2 + 30px;
+            x: parent.width / 2 + 48px - 16px;
             y: transport-y;
+            width: 32px;
+            height: 32px;
             icon: Icons.next;
             fill: true;
-            size: 18px;
+            size: 16px;
             tint: Theme.text;
             clicked => { root.next(); }
         }
         IconButton {
-            x: parent.width / 2 + 76px;
+            x: parent.width / 2 + 88px - 16px;
             y: transport-y;
+            width: 32px;
+            height: 32px;
             icon: root.repeat == 2 ? Icons.repeat-one : Icons.repeat;
-            size: 19px;
+            size: 16px;
             tint: root.repeat != 0 ? Theme.accent : Theme.dim;
             dot: root.repeat != 0;
             clicked => { root.cycle-repeat(); }
         }
         Text {
             x: side;
-            y: transport-y + 38px;
+            y: transport-y + 34px;
             width: 40px;
             height: 16px;
             text: root.position-text;
             color: Theme.dim;
-            font-size: 12px;
+            font-size: 11px;
             horizontal-alignment: right;
             vertical-alignment: center;
         }
         Bar {
             x: side + 50px;
-            y: transport-y + 38px;
+            y: transport-y + 34px;
             width: centre - 100px;
             value: root.progress;
             zone-from: root.fade-from;
@@ -4937,12 +6313,12 @@ export component AppWindow inherits Window {
         }
         Text {
             x: side + centre - 40px;
-            y: transport-y + 38px;
+            y: transport-y + 34px;
             width: 40px;
             height: 16px;
             text: root.duration-text;
             color: Theme.dim;
-            font-size: 12px;
+            font-size: 11px;
             vertical-alignment: center;
         }
 
@@ -5177,15 +6553,186 @@ export component AppWindow inherits Window {
         }
     }
 
+    // Asked on leaving the transition editor with changes not saved.
+    if root.discard-open: Rectangle {
+        background: #00000090;
+        TouchArea {
+            clicked => { root.discard-open = false; }
+        }
+        FocusScope {
+            init => { self.focus(); }
+            key-pressed(event) => {
+                if event.text == Key.Escape {
+                    root.discard-open = false;
+                    return accept;
+                }
+                reject
+            }
+            Rectangle {
+                x: (root.width - self.width) / 2;
+                y: (root.height - self.height) / 2;
+                width: 400px;
+                height: 164px;
+                border-radius: 16px;
+                background: Theme.raised;
+                border-width: 1px;
+                border-color: Theme.line;
+                drop-shadow-blur: 30px;
+                drop-shadow-color: #000000a0;
+                // Keeps clicks on the box from closing it.
+                TouchArea { }
+                Text {
+                    x: 24px;
+                    y: 22px;
+                    text: "Discard changes?";
+                    color: Theme.text;
+                    font-size: 24px;
+                    font-weight: 800;
+                }
+                Text {
+                    x: 24px;
+                    y: 60px;
+                    width: parent.width - 48px;
+                    text: "If you go back now, you'll lose your changes.";
+                    color: Theme.dim;
+                    font-size: 14px;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    x: 24px;
+                    y: parent.height - 24px - 44px;
+                    width: parent.width - 48px;
+                    height: 44px;
+                    alignment: end;
+                    spacing: 8px;
+                    Rectangle {
+                        width: keep-text.preferred-width + 32px;
+                        border-radius: 22px;
+                        background: keep-touch.has-hover ? #ffffff14 : transparent;
+                        animate background { duration: 120ms; }
+                        keep-text := Text {
+                            text: "Keep editing";
+                            horizontal-alignment: center;
+                            color: Theme.text;
+                            font-size: 15px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                        }
+                        keep-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.discard-open = false; }
+                        }
+                    }
+                    Rectangle {
+                        width: discard-text.preferred-width + 48px;
+                        border-radius: 22px;
+                        background: discard-touch.pressed ? #c8102a : discard-touch.has-hover ? #ff2a40 : #e91429;
+                        animate background { duration: 120ms; }
+                        discard-text := Text {
+                            text: "Discard";
+                            horizontal-alignment: center;
+                            color: #ffffff;
+                            font-size: 15px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                        }
+                        discard-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.discard-open = false;
+                                if root.discard-then < 0 {
+                                    root.close-mix-panel();
+                                } else {
+                                    root.switch-panel(root.discard-then);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // While the search list is open, or the box is focused with nothing
     // typed, a click anywhere else closes it and lets go of focus.
     if search.showing || (search.focused && root.search-text == ""): TouchArea {
         clicked => { search.close(); }
     }
 
+    IconButton {
+        x: gap + 6px;
+        y: (top-bar - self.height) / 2;
+        icon: Icons.back;
+        size: 20px;
+        tint: root.can-back || root.nav == 3 || root.nav == 5 ? Theme.text : #55555e;
+        clicked => {
+            if root.nav == 3 && root.settings-page != 0 {
+                root.settings-page = 0;
+            } else {
+                root.back();
+            }
+        }
+    }
+    Rectangle {
+        x: search.x - self.width - 8px;
+        y: (top-bar - self.height) / 2;
+        width: 48px;
+        height: 48px;
+        border-radius: 24px;
+        // The search field's own colours, so the two read as one control.
+        background: home-touch.has-hover ? #ffffff1c : #ffffff10;
+        animate background { duration: 120ms; }
+        Icon {
+            text: Icons.home;
+            fill: root.nav == 0;
+            color: root.nav == 0 || home-touch.has-hover ? Theme.text : Theme.dim;
+            font-size: 24px;
+        }
+        home-touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => {
+                root.np-expanded = false;
+                root.navigate(0);
+            }
+        }
+    }
+
+    // The account, at the right of the top bar as Spotify has it: the
+    // picture in a dark ring, or a person until there is one.
+    Rectangle {
+        x: root.width - gap - 6px - self.width;
+        y: (top-bar - self.height) / 2;
+        width: 48px;
+        height: 48px;
+        border-radius: 24px;
+        background: account-touch.has-hover || root.nav == 5 ? #ffffff1c : #ffffff10;
+        animate background { duration: 120ms; }
+        if root.signed-in && root.account-has-art: Art {
+            x: 8px;
+            y: 8px;
+            width: 32px;
+            height: 32px;
+            source: root.account-art;
+            has: true;
+            round: true;
+        }
+        if !(root.signed-in && root.account-has-art): Icon {
+            text: Icons.artist;
+            color: account-touch.has-hover ? Theme.text : Theme.dim;
+            font-size: 22px;
+        }
+        account-touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => {
+                root.np-expanded = false;
+                root.open-profile();
+            }
+        }
+    }
+
     search := SearchBox {
-        x: side + gap * 2 + 62px;
-        y: gap + 12px;
+        x: (root.width - root.search-width) / 2 + 26px;
+        y: (top-bar - 48px) / 2;
         // It stays over expanded Now playing too. A search puts that back.
         width: root.search-width;
         text <=> root.search-text;

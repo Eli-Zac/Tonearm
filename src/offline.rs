@@ -127,6 +127,14 @@ pub fn local_file(video_id: &str) -> Option<PathBuf> {
     Some(path)
 }
 
+/// The download or cached copy of a song, to read without counting it as
+/// a play.
+pub fn saved_file(video_id: &str) -> Option<PathBuf> {
+    download_file(video_id)
+        .filter(|p| is_downloaded(video_id) && p.is_file())
+        .or_else(|| cache_file(video_id).filter(|p| p.is_file()))
+}
+
 pub fn is_downloaded(video_id: &str) -> bool {
     state().downloads.contains_key(video_id)
 }
@@ -214,6 +222,11 @@ pub fn set_cache_limit_mb(mb: u64) {
 
 /// Keeps a fully fetched track for next time. Downloads already have it.
 pub fn store_cache(video_id: &str, bytes: &[u8]) {
+    // Every whole song fetched comes through here, kept or not, so this is
+    // where songs get their beat and key worked out.
+    if !bytes.is_empty() {
+        crate::analysis::submit(video_id, bytes);
+    }
     if bytes.is_empty() || cache_limit_mb() == 0 || is_downloaded(video_id) {
         return;
     }
@@ -353,6 +366,7 @@ fn load_index(state: &mut State) {
             params: s(e, "params"),
             artists: Item::artists_from_json(e.get("artist_links")),
             album: Item::album_from_json(e.get("album")),
+            explicit: e.get("explicit").and_then(Value::as_bool).unwrap_or(false),
             ..Item::default()
         };
         state.downloads.insert(
@@ -385,6 +399,7 @@ fn save_index(state: &State) {
                 "params": i.params,
                 "artist_links": artist_links,
                 "album": album,
+                "explicit": i.explicit,
                 "seconds": s.seconds,
                 "at": s.at,
             })
@@ -463,6 +478,7 @@ pub fn download(
         let bytes =
             crate::audio::fetch_all_with(&stream.url, &stream.headers, Some(Box::new(report)))?;
         write_atomic(&target, &bytes).map_err(|e| format!("Could not save the song: {e}"))?;
+        crate::analysis::submit(video_id, &bytes);
     }
     save_cover(http, item, video_id);
     let mut state = state();

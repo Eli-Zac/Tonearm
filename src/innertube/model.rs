@@ -33,6 +33,8 @@ pub struct Item {
     /// An album or playlist that can be saved to the library: the playlist
     /// behind it, and whether it is saved already.
     pub library: Option<(String, bool)>,
+    /// Marked explicit by YouTube Music.
+    pub explicit: bool,
 }
 
 impl Item {
@@ -94,6 +96,7 @@ impl Item {
             "params": self.params,
             "artist_links": artist_links,
             "album": album,
+            "explicit": self.explicit,
         })
     }
 
@@ -112,6 +115,7 @@ impl Item {
             params: s("params"),
             artists: Item::artists_from_json(e.get("artist_links")),
             album: Item::album_from_json(e.get("album")),
+            explicit: e.get("explicit").and_then(Value::as_bool).unwrap_or(false),
             ..Item::default()
         }
     }

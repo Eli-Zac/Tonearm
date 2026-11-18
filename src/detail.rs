@@ -323,7 +323,7 @@ impl App {
             let page = self.page.borrow();
             for (item, place) in page.items.iter().zip(&page.places) {
                 match place {
-                    Place::Row(row) => {
+                    Place::Row(row) | Place::Extra(row) => {
                         let Some(m) = marks(item) else { continue };
                         if let Some(mut data) = page.rows.row_data(*row) {
                             if apply(&mut data.item, m) {
@@ -332,6 +332,7 @@ impl App {
                         }
                     }
                     Place::Card(model, index) => mark(model, *index, item),
+                    Place::Gone => {}
                 }
             }
         }
@@ -339,6 +340,60 @@ impl App {
         for (index, item) in player.queue.iter().enumerate() {
             mark(&player.model, index, item);
         }
+        drop(player);
+        self.show_download_header();
+    }
+
+    /// Sets the hero's download button from the songs on the page: hidden
+    /// with none (and on artists), filled once all are saved, and how far
+    /// while any download.
+    pub fn show_download_header(&self) {
+        let mut data = self.ui.get_header();
+        if data.kind == 0 {
+            return;
+        }
+        let ids: Vec<String> = if data.kind == 1 {
+            Vec::new()
+        } else {
+            self.page_songs()
+                .into_iter()
+                .filter_map(|(_, s)| s.video_id)
+                .collect()
+        };
+        let saved = ids.iter().filter(|id| crate::offline::is_downloaded(id)).count();
+        let busy = ids.iter().any(|id| {
+            !crate::offline::is_downloaded(id) && crate::offline::is_downloading(id)
+        });
+        let (download, progress) = if ids.is_empty() {
+            (0, 0.0)
+        } else if saved == ids.len() {
+            (3, 1.0)
+        } else if busy {
+            (2, saved as f32 / ids.len() as f32)
+        } else {
+            (1, 0.0)
+        };
+        if data.download != download || (data.download_progress - progress).abs() > f32::EPSILON {
+            data.download = download;
+            data.download_progress = progress;
+            self.ui.set_header(data);
+        }
+    }
+
+    /// The hero's download button: saves every song on the page.
+    pub fn download_page(self: &Rc<Self>) {
+        let missing: Vec<Item> = self
+            .page_songs()
+            .into_iter()
+            .map(|(_, s)| s)
+            .filter(|s| !s.video_id.as_deref().is_some_and(crate::offline::is_downloaded))
+            .collect();
+        if missing.is_empty() {
+            self.toast("Every song here is downloaded");
+            return;
+        }
+        self.download_items(missing);
+        self.show_download_header();
     }
 }
 

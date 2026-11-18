@@ -471,11 +471,14 @@ impl Drop for Clip {
 }
 
 impl Clip {
-    /// Starts looping the clip at `path`, handing each frame to `show`.
+    /// Starts looping the clip at `path`, handing each frame to `show`
+    /// with a heavy blur of it for a background. The clip loops from its
+    /// start; the blur goes back and forth, so a clip that does not loop
+    /// cleanly never jumps behind the expanded view.
     /// `failed` runs once if the clip cannot be decoded at all.
     pub fn play(
         path: PathBuf,
-        show: impl Fn(Pixels) + Send + 'static,
+        show: impl Fn(Pixels, Pixels) + Send + 'static,
         failed: impl FnOnce(String) + Send + 'static,
     ) -> Clip {
         let stop = Arc::new(AtomicBool::new(false));
@@ -510,7 +513,7 @@ mod video {
         path: &Path,
         stop: &AtomicBool,
         paused: &AtomicBool,
-        show: &dyn Fn(Pixels),
+        show: &dyn Fn(Pixels, Pixels),
     ) -> Result<(), String> {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -526,7 +529,7 @@ mod video {
         path: &Path,
         stop: &AtomicBool,
         paused: &AtomicBool,
-        show: &dyn Fn(Pixels),
+        show: &dyn Fn(Pixels, Pixels),
     ) -> Result<(), String> {
         let err = |e: windows::core::Error| e.to_string();
         let mut attributes: Option<IMFAttributes> = None;
@@ -578,6 +581,12 @@ mod video {
         // How far into the clip the last frame was, to resume from there.
         let mut last = Duration::ZERO;
         let mut was_paused = false;
+        // The blurs of the first pass, kept to play back and forth after.
+        // A few kilobytes each.
+        let mut blurs: Vec<Pixels> = Vec::new();
+        // Times through the clip so far, and frames into this one.
+        let mut pass = 0usize;
+        let mut step = 0usize;
         while !stop.load(Ordering::SeqCst) {
             if paused.load(Ordering::SeqCst) {
                 std::thread::sleep(Duration::from_millis(100));
@@ -603,6 +612,8 @@ mod video {
                     .SetCurrentPosition(&windows::core::GUID::zeroed(), &PROPVARIANT::from(0i64))
                     .map_err(err)?;
                 loop_start = Instant::now();
+                pass += 1;
+                step = 0;
                 continue;
             }
             let Some(sample) = sample else { continue };
@@ -617,7 +628,18 @@ mod video {
                 break;
             }
             let pixels = frame(&sample, width, height, stride).map_err(err)?;
-            show(pixels);
+            let blur = if pass == 0 {
+                let blur = crate::blur::backdrop(&pixels);
+                blurs.push(blur.clone());
+                blur
+            } else {
+                // Backwards on odd passes, forwards on even ones.
+                let last = blurs.len() - 1;
+                let at = step.min(last);
+                blurs[if pass % 2 == 1 { last - at } else { at }].clone()
+            };
+            step += 1;
+            show(pixels, blur);
             shown_any = true;
         }
         Ok(())
@@ -681,7 +703,7 @@ mod video {
     use std::path::Path;
     use std::sync::atomic::AtomicBool;
 
-    pub fn run(_: &Path, _: &AtomicBool, _: &AtomicBool, _: &dyn Fn(Pixels)) -> Result<(), String> {
+    pub fn run(_: &Path, _: &AtomicBool, _: &AtomicBool, _: &dyn Fn(Pixels, Pixels)) -> Result<(), String> {
         Err("Canvas plays on Windows only".into())
     }
 }

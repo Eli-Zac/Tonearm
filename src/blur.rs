@@ -9,21 +9,25 @@ use swash::shape::ShapeContext;
 use swash::zeno::Format;
 use swash::FontRef;
 
-/// The fonts lines are drawn in, first choice first. Segoe UI Bold is close
-/// to the window's font. (Not the variable Segoe UI the window uses: swash
-/// gives some of its letters, such as r, far too wide an advance. The image
-/// is stretched to the window's own width of the line.) Segoe UI has no
-/// Korean, Japanese or Chinese, so those come from the fonts Windows itself
-/// falls back to for them, in bold.
+/// The fonts lines are drawn in, first choice first. Inter Display
+/// Bold is the window's own lyric font, shipped with the app. Segoe UI
+/// Bold covers what Inter lacks. (Not the variable Segoe UI: swash gives
+/// some of its letters, such as r, far too wide an advance. The image is
+/// stretched to the window's own width of the line.) Neither has Korean,
+/// Japanese or Chinese, so those come from the fonts Windows itself falls
+/// back to for them, in bold.
 fn fonts() -> &'static [Vec<u8>] {
     static DATA: OnceLock<Vec<Vec<u8>>> = OnceLock::new();
     DATA.get_or_init(|| {
         let dir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into()) + r"\Fonts\";
-        let mut fonts: Vec<Vec<u8>> = ["segoeuib.ttf", "SegUIVar.ttf"]
-            .iter()
-            .find_map(|name| std::fs::read(dir.clone() + name).ok())
-            .into_iter()
-            .collect();
+        // The window's lyric font first, so blurred lines match the sharp
+        // one. Segoe UI stands in for anything it lacks.
+        let mut fonts: Vec<Vec<u8>> = vec![include_bytes!("../ui/InterDisplay-Bold.ttf").to_vec()];
+        fonts.extend(
+            ["segoeuib.ttf", "SegUIVar.ttf"]
+                .iter()
+                .find_map(|name| std::fs::read(dir.clone() + name).ok()),
+        );
         for name in ["malgunbd.ttf", "YuGothB.ttc", "msyhbd.ttc", "msjhbd.ttc", "seguisym.ttf"] {
             if let Ok(data) = std::fs::read(dir.clone() + name) {
                 fonts.push(data);
@@ -231,4 +235,73 @@ mod tests {
         assert_ne!(inked("一"), inked("龍"));
         assert!(inked("Ah-oh 비로소") > inked("Ah-oh"));
     }
+}
+/// How many pixels a side the backdrop is worked out at. The window
+/// stretches it over the whole expanded view, and that smooths it into a
+/// soft blur of the cover's colours.
+const BACKDROP: usize = 32;
+
+/// A very blurred copy of `src`, for the expanded Now playing view to fill
+/// its background with: the picture shrunk to a few dozen pixels by
+/// averaging, then softened twice more so no block edges show when it is
+/// stretched.
+pub fn backdrop(src: &SharedPixelBuffer<Rgba8Pixel>) -> SharedPixelBuffer<Rgba8Pixel> {
+    let (w, h) = (src.width() as usize, src.height() as usize);
+    let n = BACKDROP;
+    let mut small = vec![[0f32; 3]; n * n];
+    if w > 0 && h > 0 {
+        let pixels = src.as_slice();
+        for y in 0..n {
+            let (y0, y1) = (y * h / n, ((y + 1) * h / n).max(y * h / n + 1).min(h));
+            for x in 0..n {
+                let (x0, x1) = (x * w / n, ((x + 1) * w / n).max(x * w / n + 1).min(w));
+                let mut sum = [0f32; 3];
+                for yy in y0..y1 {
+                    for p in &pixels[yy * w + x0..yy * w + x1] {
+                        sum[0] += p.r as f32;
+                        sum[1] += p.g as f32;
+                        sum[2] += p.b as f32;
+                    }
+                }
+                let count = ((y1 - y0) * (x1 - x0)).max(1) as f32;
+                small[y * n + x] = [sum[0] / count, sum[1] / count, sum[2] / count];
+            }
+        }
+    }
+    // Two passes of a 5 by 5 box, edges held.
+    for _ in 0..2 {
+        let before = small.clone();
+        for y in 0..n {
+            for x in 0..n {
+                let mut sum = [0f32; 3];
+                for dy in -2i32..=2 {
+                    for dx in -2i32..=2 {
+                        let yy = (y as i32 + dy).clamp(0, n as i32 - 1) as usize;
+                        let xx = (x as i32 + dx).clamp(0, n as i32 - 1) as usize;
+                        let p = before[yy * n + xx];
+                        sum[0] += p[0];
+                        sum[1] += p[1];
+                        sum[2] += p[2];
+                    }
+                }
+                small[y * n + x] = [sum[0] / 25.0, sum[1] / 25.0, sum[2] / 25.0];
+            }
+        }
+    }
+    // A light cover would make a light background, and white words on it
+    // hard to read. Each pixel is held to a brightness the words stand out
+    // on, keeping its colour; darker covers are left as they are.
+    const BRIGHTEST: f32 = 96.0;
+    let mut out = SharedPixelBuffer::<Rgba8Pixel>::new(n as u32, n as u32);
+    for (d, s) in out.make_mut_slice().iter_mut().zip(&small) {
+        let luma = 0.2126 * s[0] + 0.7152 * s[1] + 0.0722 * s[2];
+        let k = if luma > BRIGHTEST { BRIGHTEST / luma } else { 1.0 };
+        *d = Rgba8Pixel {
+            r: (s[0] * k) as u8,
+            g: (s[1] * k) as u8,
+            b: (s[2] * k) as u8,
+            a: 255,
+        };
+    }
+    out
 }

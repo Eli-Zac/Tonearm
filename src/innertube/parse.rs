@@ -167,6 +167,20 @@ fn apply_endpoint(ep: &Value, item: &mut Item) {
     }
 }
 
+/// Whether the renderer carries YouTube Music's explicit badge, among its
+/// own badges or its subtitle's.
+fn is_explicit(r: &Value) -> bool {
+    ["badges", "subtitleBadges"].iter().any(|key| {
+        r.get(*key)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .any(|b| {
+                find(b, "iconType").and_then(Value::as_str) == Some("MUSIC_EXPLICIT_BADGE")
+            })
+    })
+}
+
 fn list_item(r: &Value) -> Item {
     let columns: Vec<String> = r
         .get("flexColumns")
@@ -191,6 +205,7 @@ fn list_item(r: &Value) -> Item {
             .collect::<Vec<_>>()
             .join(" • "),
         thumb: r.get("thumbnail").map(thumb).unwrap_or_default(),
+        explicit: is_explicit(r),
         ..Item::default()
     };
     if let Some(fixed) = r.get("fixedColumns").and_then(|f| find(f, "text")) {
@@ -246,6 +261,7 @@ fn two_row_item(r: &Value) -> Item {
         title: r.get("title").map(text).unwrap_or_default(),
         subtitle: clean(r.get("subtitle").map(text).unwrap_or_default()),
         thumb: r.get("thumbnailRenderer").map(thumb).unwrap_or_default(),
+        explicit: is_explicit(r),
         ..Item::default()
     };
     if let Some(ep) = r.get("navigationEndpoint") {
@@ -268,6 +284,7 @@ fn panel_item(r: &Value) -> Item {
         subtitle: clean(byline.map(text).unwrap_or_default()),
         thumb: r.get("thumbnail").map(thumb).unwrap_or_default(),
         duration: r.get("lengthText").map(text).unwrap_or_default(),
+        explicit: is_explicit(r),
         ..Item::default()
     };
     if let Some(ep) = r.get("navigationEndpoint") {

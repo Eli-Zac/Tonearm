@@ -37,7 +37,6 @@ pub enum Action {
     /// A watch endpoint, such as the shuffle on the artist page open now.
     Endpoint(Item),
     PlayPage(bool),
-    DownloadPage,
     /// Lists the user's playlists in the menu, to add a song to one.
     AddToPlaylist(Item),
     /// Adds a song to a playlist: playlist id, its title, the song.
@@ -282,19 +281,10 @@ impl App {
         let Some(header) = header else { return };
         let songs = self.page_songs();
         let icons = &lines.icons;
-        let (play, shuffle, radio, download, artist) = (
-            icons.get_play(),
-            icons.get_shuffle(),
-            icons.get_radio(),
-            icons.get_download(),
-            icons.get_artist(),
-        );
+        let (play, radio, artist) = (icons.get_play(), icons.get_radio(), icons.get_artist());
         if header.kind == PageKind::Artist {
             if !songs.is_empty() {
                 lines.glyph("Play", play, Action::PlayPage(false));
-            }
-            if let Some(endpoint) = header.shuffle.clone() {
-                lines.glyph("Shuffle", shuffle, Action::Endpoint(endpoint));
             }
             if let Some(endpoint) = header.radio.clone() {
                 lines.glyph("Start radio", radio, Action::Endpoint(endpoint));
@@ -303,13 +293,6 @@ impl App {
         }
         if !songs.is_empty() {
             lines.glyph("Play", play, Action::PlayPage(false));
-            lines.glyph("Shuffle", shuffle, Action::PlayPage(true));
-            let all_saved = songs.iter().all(|(_, s)| {
-                s.video_id.as_deref().is_some_and(offline::is_downloaded)
-            });
-            if !all_saved {
-                lines.glyph("Download all", download, Action::DownloadPage);
-            }
         }
         if let Some(id) = header.byline_browse_id.clone() {
             lines.glyph("Go to artist", artist, Action::Browse(id));
@@ -370,10 +353,6 @@ impl App {
             Action::Artist(id, shuffle) => self.artist_mix(id, shuffle),
             Action::Endpoint(endpoint) => self.play_endpoint(endpoint),
             Action::PlayPage(shuffle) => self.play_page(shuffle),
-            Action::DownloadPage => {
-                let songs = self.page_songs().into_iter().map(|(_, s)| s).collect();
-                self.download_items(songs);
-            }
             Action::AddToPlaylist(item) => self.playlist_menu(item),
             Action::IntoPlaylist(playlist, title, item) => {
                 let Some(video_id) = item.video_id.clone() else { return };

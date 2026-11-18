@@ -1,5 +1,6 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod analysis;
 mod audio;
 mod blur;
 mod canvas;
@@ -9,12 +10,19 @@ mod history;
 mod home;
 mod images;
 mod innertube;
+mod library;
 mod lyrics;
 #[cfg(windows)]
 mod media_keys;
 mod menu;
+mod mix;
+mod mixing;
+mod recommend;
+mod transition;
 #[cfg(windows)]
 mod shell;
+#[cfg(windows)]
+mod single;
 #[cfg(windows)]
 mod taskbar;
 mod motion;
@@ -144,6 +152,11 @@ const SUGGEST_FRESH: Duration = Duration::from_secs(300);
 enum Place {
     Row(usize),
     Card(Rc<VecModel<ItemData>>, usize),
+    /// A row after the track list, such as a suggestion under a playlist.
+    /// Not one of the page's songs: a click plays its radio.
+    Extra(usize),
+    /// A row taken off the page.
+    Gone,
 }
 
 #[derive(Default)]
@@ -169,6 +182,8 @@ struct PageState {
     /// What the track list is sorted by, from its column titles: 0 its own
     /// order, 1 title, 2 album; and whether it runs backwards.
     sort: (i32, bool),
+    /// "Recommended" under a playlist of the user's own.
+    recommend: Option<recommend::Recommend>,
 }
 
 #[derive(Default)]
@@ -300,6 +315,14 @@ struct FadeNext {
     armed: bool,
 }
 
+/// The mix from one song into the next, and the settings it came from.
+struct Planned {
+    from: String,
+    into: String,
+    settings: transition::Settings,
+    plan: mix::Transition,
+}
+
 /// Volume levelling choices in Settings: the loudness each aims for, in
 /// LKFS, and how far it may lift a quiet song, in dB. Off is first.
 const LEVELLING: [(f32, f32); 4] = [(0.0, 0.0), (-19.0, 0.0), (-14.0, 0.0), (-11.0, 4.0)];
@@ -345,6 +368,21 @@ const CROSSFADE_CHOICES: [u32; 9] = [0, 1, 2, 3, 4, 6, 8, 10, 12];
 const PREPARE_AHEAD: f32 = 30.0;
 /// A fade shorter than this, left after a late start, is not worth it.
 const SHORTEST_FADE: f32 = 0.5;
+/// How long before a beat matched mix the player hands it to the engine,
+/// which then starts it to the frame. Covers the slow tick and the audio
+/// thread's position reports.
+const MIX_LEAD: f32 = 0.5;
+/// Opening the next song this far ahead leaves time to fetch and analyze
+/// it before a beat matched mix, which can start well before the end.
+const PREPARE_AHEAD_MIXING: f32 = 75.0;
+/// How long mixes last in a playlist's mix mode when crossfade is off.
+const MIX_MODE_SECONDS: f32 = 8.0;
+
+/// Whether crossfades are beat matched where the songs allow. On unless
+/// turned off.
+fn load_beat_match() -> bool {
+    store::load("beat-match").map_or(true, |text| text.trim() != "0")
+}
 
 /// The crossfade length saved in Settings. Off when none is saved.
 fn load_crossfade() -> u32 {
@@ -423,7 +461,31 @@ struct App {
     clock: Cell<(u64, Instant)>,
     /// Seconds a song crossfades into the next one over. Zero is off.
     crossfade: Cell<u32>,
-    /// The language lyrics are translated into: an index into
+    /// Whether crossfades are beat matched where the songs allow.
+    beat_match: Cell<bool>,
+    /// Songs' analyses read from the library, by video id.
+    analyses: RefCell<HashMap<String, Rc<analysis::Analysis>>>,
+    /// Songs looked for in the library and not found, so the next tick does
+    /// not look again. Cleared for a song when its analysis comes in.
+    unanalyzed: RefCell<HashSet<String>>,
+    /// The mix into the next song, once worked out.
+    planned: RefCell<Option<Planned>>,
+    /// Playlists with mix mode on, by page key.
+    mixed_playlists: RefCell<HashSet<String>>,
+    /// The transition open in the editor.
+    editing: RefCell<Option<mixing::Editing>>,
+    /// Unsaved choices from the editor, played in place of the saved ones
+    /// between these two songs, for a preview.
+    previewing: RefCell<Option<(String, String, transition::Settings)>>,
+    /// The preview playing, to move the editor's playhead.
+    preview_track: RefCell<Option<mixing::PreviewTrack>>,
+    /// The playhead's last place in seconds of the transition, and when.
+    /// It runs on this clock and leans towards the reports, which come in
+    /// steps.
+    playhead_clock: Cell<Option<(f64, Instant)>>,
+    /// When the preview's spinner started turning.
+    spinner_from: Cell<Option<Instant>>,
+/// The language lyrics are translated into: an index into
     /// `TRANSLATE_CHOICES`, zero for off.
     translate: Cell<usize>,
     /// The next song, being opened ahead for a crossfade.
@@ -729,7 +791,7 @@ impl App {
                     return;
                 }
                 match page.places.get(id) {
-                    Some(Place::Row(row)) => {
+                    Some(Place::Row(row) | Place::Extra(row)) => {
                         if let Some(mut data) = page.rows.row_data(*row) {
                             data.item.art = image;
                             data.item.has_art = true;
@@ -737,7 +799,7 @@ impl App {
                         }
                     }
                     Some(Place::Card(model, index)) => set(model, *index),
-                    None => {}
+                    Some(Place::Gone) | None => {}
                 }
             }
             Target::Queue { generation, index } => {
@@ -765,6 +827,9 @@ impl App {
                 // Canvas play in a layer of their own on top of it.
                 if self.player.borrow().generation == generation {
                     self.set_tint(&image);
+                    if !self.ui.get_track_motion_on() {
+                        self.backdrop_of(&image);
+                    }
                     self.ui.set_track_art(image);
                     self.ui.set_track_has_art(true);
                 }
@@ -830,6 +895,7 @@ impl App {
                 !offline::is_downloaded(id) && offline::is_downloading(id)
             }),
             progress: item.video_id.as_deref().map(offline::progress).unwrap_or(0.0),
+            explicit: item.explicit,
         }
     }
 
@@ -984,6 +1050,7 @@ impl App {
         if header.kind == PageKind::Artist && !header.banner {
             data.round = true;
         }
+        self.show_mix_header(&mut data, header.kind == PageKind::Playlist);
         let art = if header.banner {
             self.wide_thumb(&header.thumb, 1280, Target::Hero { generation })
         } else {
@@ -1179,6 +1246,8 @@ impl App {
             self.apply_sort();
             self.load_more();
         }
+        self.show_mix_rows();
+        self.offer_recommended();
         self.ui.set_page_playable(playable);
         if kind.is_some() {
             let mut data = self.ui.get_header();
@@ -1187,6 +1256,7 @@ impl App {
             let podcast = kind == Some(PageKind::Podcast);
             data.can_shuffle = (playable && !podcast) || artist_shuffle;
             self.ui.set_header(data);
+            self.show_download_header();
         }
     }
 
@@ -1251,6 +1321,7 @@ impl App {
         self.ui.set_sort_column(next.0);
         self.ui.set_sort_descending(next.1);
         self.apply_sort();
+        self.show_mix_rows();
         if next != (0, false) {
             self.load_more();
         }
@@ -1288,6 +1359,8 @@ impl App {
             let key = match column {
                 1 => data.item.title.to_lowercase(),
                 2 => data.item.album.to_lowercase(),
+                3 => mixing::bpm_sort_key(&data.bpm),
+                4 => mixing::key_sort_key(&data.camelot),
                 _ => String::new(),
             };
             list.push((id, key, data));
@@ -1337,7 +1410,7 @@ impl App {
             };
             (
                 item.clone(),
-                page.radio_on_click || matches!(page.places[id], Place::Card(..)),
+                page.radio_on_click || matches!(page.places[id], Place::Card(..) | Place::Extra(_)),
             )
         };
         if item.video_id.is_some() && !radio {
@@ -1787,10 +1860,25 @@ impl App {
 
     /// Plays `items` from `index`, as started from the item keyed `from`.
     fn set_queue_from(self: &Rc<Self>, items: Vec<Item>, index: usize, from: String) {
+        self.start_queue(items, index, from, true, None);
+    }
+
+    /// As `set_queue_from`. Without `shuffle` the songs keep their order
+    /// even with shuffle on, and with `at` the first starts that many
+    /// seconds in.
+    fn start_queue(
+        self: &Rc<Self>,
+        items: Vec<Item>,
+        index: usize,
+        from: String,
+        shuffle: bool,
+        at: Option<f32>,
+    ) {
         *self.playing_from.borrow_mut() = from;
+        let first = items.get(index).and_then(|i| i.video_id.clone());
         let (items, index) = {
             let mut player = self.player.borrow_mut();
-            if player.shuffle {
+            if player.shuffle && shuffle {
                 player.unshuffled = Some(items.clone());
                 (shuffled_from(items, index), 0)
             } else {
@@ -1804,7 +1892,7 @@ impl App {
             player.queue_generation += 1;
             player.model = Rc::new(VecModel::default());
             player.extending = false;
-            player.resume_at = None;
+            player.resume_at = first.zip(at);
             self.ui.set_queue(ModelRc::from(player.model.clone()));
         }
         self.extend_queue(items);
@@ -2023,11 +2111,19 @@ impl App {
             self.set_tint(image);
         }
         ui.set_track_has_art(art.is_some());
+        match &art {
+            Some(image) => self.backdrop_of(image),
+            None => ui.set_track_backdrop(Image::default()),
+        }
         ui.set_track_art(art.unwrap_or_default());
         self.load_cover(&item.title, &artist, generation);
         self.stop_canvas();
         self.load_canvas(&item.title, &artist, generation);
         self.load_credits(item.video_id.clone(), generation);
+        if let Some(video_id) = &item.video_id {
+            analysis::request(video_id);
+        }
+        self.show_sound();
         if matches!(ui.get_panel(), 2 | 3) {
             self.load_lyrics();
         }
@@ -2488,7 +2584,98 @@ impl App {
         self.disk.run(move || {
             let _ = store::save("crossfade", &seconds.to_string());
         });
+        self.forget_plan();
     }
+
+    fn set_beat_match_choice(&self, choice: i32) {
+        let on = choice != 0;
+        self.beat_match.set(on);
+        self.disk.run(move || {
+            let _ = store::save("beat-match", if on { "1" } else { "0" });
+        });
+        self.forget_plan();
+    }
+
+    /// A setting changed, so the mix into the next song is worked out again.
+    fn forget_plan(&self) {
+        self.planned.borrow_mut().take();
+    }
+
+    // ------------------------------------------------------------- analysis
+
+    /// A song's analysis, once the analyzer has been through it.
+    fn analysis_of(&self, video_id: &str) -> Option<Rc<analysis::Analysis>> {
+        if let Some(found) = self.analyses.borrow().get(video_id) {
+            return Some(found.clone());
+        }
+        if self.unanalyzed.borrow().contains(video_id) {
+            return None;
+        }
+        match library::analysis(video_id) {
+            Some(found) => {
+                let found = Rc::new(found);
+                self.analyses.borrow_mut().insert(video_id.to_string(), found.clone());
+                Some(found)
+            }
+            None => {
+                self.unanalyzed.borrow_mut().insert(video_id.to_string());
+                None
+            }
+        }
+    }
+
+    /// The analyzer started on a song.
+    fn analysis_started(&self, _video_id: &str) {
+        if self.ui.get_header().mixing {
+            self.refresh_mix_rows();
+        }
+    }
+
+    /// The analyzer finished a song, or gave up on it.
+    fn analysis_ready(&self, video_id: &str) {
+        self.unanalyzed.borrow_mut().remove(video_id);
+        // The mix may now be beat matched.
+        let involved = self
+            .planned
+            .borrow()
+            .as_ref()
+            .is_some_and(|p| p.from == video_id || p.into == video_id);
+        if involved {
+            self.forget_plan();
+        }
+        if self.playing_id().as_deref() == Some(video_id) {
+            self.show_sound();
+        }
+        if self.ui.get_header().mixing {
+            self.refresh_mix_rows();
+        }
+    }
+
+    fn playing_id(&self) -> Option<String> {
+        let player = self.player.borrow();
+        player.queue.get(player.index)?.video_id.clone()
+    }
+
+    /// Shows the playing song's tempo and key in Now playing, once known.
+    fn show_sound(&self) {
+        let found = self.playing_id().and_then(|id| self.analysis_of(&id));
+        let mut rows = Vec::new();
+        if let Some(a) = found {
+            if a.bpm > 0.0 {
+                let bpm = format!("{:.0} BPM", a.bpm);
+                let names = if a.steady() { bpm } else { format!("About {bpm}, and it moves") };
+                rows.push(CreditData { role: "Tempo".into(), names: names.into() });
+            }
+            if let (Some(camelot), Some(name)) = (a.camelot(), a.key_name()) {
+                if a.key_confidence >= 0.4 {
+                    rows.push(CreditData { role: "Key".into(), names: format!("{name} · {camelot}").into() });
+                }
+            }
+        }
+        self.ui.set_track_sound(ModelRc::new(VecModel::from(rows)));
+    }
+
+    // ------------------------------------------------------------ crossfade
 
     /// The queue position and video id of the song the playing one runs
     /// into at its end, when that can be a crossfade. Never under repeat
@@ -2514,14 +2701,80 @@ impl App {
         Some((next, video_id))
     }
 
+
+    /// Whether the queue was started from a playlist with mix mode on.
+    fn mix_mode(&self) -> bool {
+        self.mixed_playlists.borrow().contains(self.playing_from.borrow().as_str())
+    }
+
+    /// About how long mixes into the next song last, in seconds. Zero when
+    /// songs do not mix: gapless. Mix mode mixes even with crossfade off.
+    fn mix_seconds(&self) -> f32 {
+        match self.crossfade.get() {
+            0 if self.mix_mode() => MIX_MODE_SECONDS,
+            seconds => seconds as f32,
+        }
+    }
+
+    /// The transition from `from` into `to`: one being previewed from the
+    /// editor, the one chosen by hand, or Auto's pick for the two songs.
+    fn transition_settings(&self, from: &str, to: &str) -> transition::Settings {
+        if let Some((a, b, settings)) = self.previewing.borrow().as_ref() {
+            if a == from && b == to {
+                return *settings;
+            }
+        }
+        library::transition(from, to).unwrap_or_else(|| {
+            let out = self.analysis_of(from);
+            let inn = self.analysis_of(to);
+            let beat_match = self.beat_match.get() || self.mix_mode();
+            transition::Settings::auto(out.as_deref(), inn.as_deref(), beat_match)
+        })
+    }
+
+    /// The mix from the playing song into the next one. Beat matched once
+    /// both songs are analyzed, usually soon after the song starts, as the
+    /// next one is fetched ahead. Kept until the songs or a setting change.
+    fn mix_plan(&self, next_id: &str, duration: f32) -> Option<(transition::Settings, mix::Transition)> {
+        let seconds = self.mix_seconds();
+        if seconds <= 0.0 {
+            return None;
+        }
+        let playing = self.playing_id()?;
+        if let Some(p) = self.planned.borrow().as_ref() {
+            if p.from == playing && p.into == next_id {
+                return Some((p.settings, p.plan.clone()));
+            }
+        }
+        let settings = self.transition_settings(&playing, next_id);
+        let out = self.analysis_of(&playing);
+        let inn = self.analysis_of(next_id);
+        let plan = transition::plan(settings, out.as_deref(), duration as f64, inn.as_deref(), seconds as f64);
+        *self.planned.borrow_mut() = Some(Planned {
+            from: playing,
+            into: next_id.to_string(),
+            settings,
+            plan: plan.clone(),
+        });
+        Some((settings, plan))
+    }
+
+    /// Where the mix into the next song starts, in seconds of the playing
+    /// one. None when nothing will mix in.
+    fn mix_start(&self, duration: f32) -> Option<f32> {
+        let (_, next_id) = self.crossfade_target()?;
+        let (_, plan) = self.mix_plan(&next_id, duration)?;
+        let start = plan.out_at.map_or(duration - plan.length as f32, |at| at as f32);
+        (start > duration * 0.25).then_some(start)
+    }
+
     /// Called each tick while a song plays. Opens the next song ahead of
-    /// the fade, and once the playing song is within the crossfade of its
-    /// end, fades into it. Returns whether it moved on to the next song.
+    /// the mix, and once the playing song reaches it, mixes into it.
+    /// Returns whether it moved on to the next song.
     ///
     /// If the next song is not open in time, nothing happens here: the
     /// song ends and the next one starts the usual way.
     fn crossfade_check(self: &Rc<Self>, generation: u64, duration: f32) -> bool {
-        let fade = self.crossfade.get() as f32;
         if duration <= 0.0 {
             return false;
         }
@@ -2533,7 +2786,9 @@ impl App {
             return false;
         };
         let status = &self.audio.status;
-        let left = duration - status.position_ms.load(Ordering::SeqCst) as f32 / 1000.0;
+        let position = status.position_ms.load(Ordering::SeqCst) as f32 / 1000.0;
+        let left = duration - position;
+        let planned = self.mix_plan(&video_id, duration);
         let opened = self
             .fade_next
             .borrow()
@@ -2541,15 +2796,25 @@ impl App {
             .filter(|n| n.generation == generation && n.index == index && n.video_id == video_id)
             .map(|n| (n.token, n.duration, n.armed));
         let Some((token, next_duration, armed)) = opened else {
-            // Also opens it again when the queue changed underneath.
-            if left <= fade + PREPARE_AHEAD {
+            // Also opens it again when the queue changed underneath. A beat
+            // matched mix may start well before the end, and one not yet
+            // planned needs time to fetch and analyze the next song.
+            let ahead = match planned.as_ref().map(|(_, p)| (p.out_at, p.length)) {
+                Some((Some(at), _)) => duration - at as f32 + PREPARE_AHEAD,
+                Some((None, length)) if self.beat_match.get() || self.mix_mode() => {
+                    length as f32 + PREPARE_AHEAD_MIXING
+                }
+                Some((None, length)) => length as f32 + PREPARE_AHEAD,
+                None => PREPARE_AHEAD,
+            };
+            if left <= ahead {
                 self.prepare_next(generation, index, video_id);
             }
             return false;
         };
-        // Crossfade off: gapless. The engine starts the next song the
-        // moment this one ends, and `tick` catches up when it has.
-        if fade == 0.0 {
+        // Mixing off: gapless. The engine starts the next song the moment
+        // this one ends, and `tick` catches up when it has.
+        let Some((settings, plan)) = planned else {
             if !armed && status.prepared.load(Ordering::SeqCst) == token {
                 self.look_up_loudness(&video_id);
                 self.audio.follow(token, self.gain_for(&video_id));
@@ -2558,16 +2823,44 @@ impl App {
                 }
             }
             return false;
+        };
+        let ready = status.prepared.load(Ordering::SeqCst) == token;
+        // Beat matched: handed over just before its downbeat, and the
+        // engine starts it to the frame.
+        if let Some(at) = plan.out_at {
+            let at = at as f32;
+            if position < at - MIX_LEAD {
+                return false;
+            }
+            if ready && position <= at {
+                self.crossfade_into(index, token, plan, next_duration);
+                return true;
+            }
+            // Reached too late, as after a seek: the same style, unmatched.
         }
-        if left > fade || status.prepared.load(Ordering::SeqCst) != token {
+        // A cut not on the beat comes at the very end of the song, which is
+        // a gapless start. The engine makes that to the frame. A tick could
+        // not, and missed it, so the next song loaded afresh after a gap.
+        if settings.volume == transition::Volume::Cut {
+            if !armed && ready {
+                self.look_up_loudness(&video_id);
+                self.audio.follow(token, self.gain_for(&video_id));
+                if let Some(next) = self.fade_next.borrow_mut().as_mut() {
+                    next.armed = true;
+                }
+            }
             return false;
         }
-        // Reached late, as after a seek near the end, it fades over what
-        // is left rather than cutting the old song short.
-        if left < SHORTEST_FADE {
+        let length = plan.length as f32;
+        if left > length || !ready || left < SHORTEST_FADE.min(length) {
             return false;
         }
-        self.crossfade_into(index, token, left.min(fade), next_duration);
+        // Reached late, it mixes over what is left rather than cutting the
+        // old song short.
+        let mut unmatched = settings;
+        unmatched.beatmatch = false;
+        let plan = transition::plan(unmatched, None, duration as f64, None, left.min(length) as f64);
+        self.crossfade_into(index, token, plan, next_duration);
         true
     }
 
@@ -2584,6 +2877,7 @@ impl App {
             armed: false,
         });
         if let Some(path) = offline::local_file(&video_id) {
+            analysis::request(&video_id);
             self.audio.prepare(audio::Input::File(path), token);
             return;
         }
@@ -2618,10 +2912,10 @@ impl App {
         });
     }
 
-    /// Fades into the prepared song at `index` over `seconds`. The player,
-    /// Now playing, lyrics and media keys switch to it as the fade starts,
-    /// the same way as when a song starts.
-    fn crossfade_into(self: &Rc<Self>, index: usize, token: u64, seconds: f32, duration: f32) {
+    /// Mixes into the prepared song at `index` by `plan`. The player, Now
+    /// playing, lyrics and media keys switch to it as the mix starts, the
+    /// same way as when a song starts.
+    fn crossfade_into(self: &Rc<Self>, index: usize, token: u64, plan: mix::Transition, duration: f32) {
         // The song going out stays on show and fades as its sound does,
         // its Canvas or moving cover still playing.
         let ui = &self.ui;
@@ -2633,8 +2927,9 @@ impl App {
         let motion_on = ui.get_track_motion_on();
         let cover = self.cover.borrow_mut().take();
         let canvas = self.canvas.borrow_mut().take();
+        let seconds = plan.length as f32;
         self.moved_on(index, duration, |app, generation| {
-            app.audio.crossfade(token, generation, seconds);
+            app.audio.crossfade(token, generation, plan);
         });
         // After the move, which ends any crossfade still going.
         *self.outgoing.borrow_mut() = Some(Outgoing {
@@ -2781,7 +3076,7 @@ impl App {
                 };
                 let clip = canvas::Clip::play(
                     path,
-                    move |pixels| {
+                    move |pixels, blur| {
                         on_ui(move |app| {
                             let live = app
                                 .canvas
@@ -2789,6 +3084,7 @@ impl App {
                                 .as_ref()
                                 .is_some_and(|(g, _)| *g == generation);
                             if live {
+                                app.ui.set_track_backdrop(Image::from_rgba8(blur));
                                 app.ui.set_track_motion(Image::from_rgba8(pixels));
                                 app.ui.set_track_motion_on(true);
                             } else if app
@@ -2829,6 +3125,16 @@ impl App {
         // Dropping the clip stops its thread.
         self.canvas.borrow_mut().take();
         self.ui.set_track_motion_on(false);
+        let still = self.ui.get_track_art();
+        self.backdrop_of(&still);
+    }
+
+    /// Fills the expanded view's background with a blur of `image`.
+    fn backdrop_of(&self, image: &Image) {
+        match image.to_rgba8() {
+            Some(pixels) => self.ui.set_track_backdrop(Image::from_rgba8(blur::backdrop(&pixels))),
+            None => self.ui.set_track_backdrop(Image::default()),
+        }
     }
 
     /// Shows the playing track's still cover again.
@@ -2839,6 +3145,7 @@ impl App {
             (item.thumb.clone(), player.generation)
         };
         if let Some(image) = self.thumb(&thumb, 544, Target::Track { generation }) {
+            self.backdrop_of(&image);
             self.ui.set_track_art(image);
             self.ui.set_track_has_art(true);
         }
@@ -3352,13 +3659,9 @@ impl App {
                 time = base;
             }
             let seconds = time as f32 / 1000.0;
-            // Marks where the next song will start to fade in.
-            let fade = self.crossfade.get() as f32;
-            let fade_from = if fade > 0.0 && duration > fade * 2.0 && self.crossfade_target().is_some() {
-                (duration - fade) / duration
-            } else {
-                1.0
-            };
+            self.show_playhead(seconds);
+            // Marks where the next song will start to mix in.
+            let fade_from = self.mix_start(duration).map_or(1.0, |at| (at / duration).clamp(0.0, 1.0));
             ui.set_fade_from(fade_from);
             ui.set_position_text(clock_text(seconds));
             ui.set_progress(if duration > 0.0 {
@@ -3400,6 +3703,7 @@ impl App {
                 animating = true;
                 if Instant::now() >= cover.due {
                     let frame = &cover.frames[cover.index];
+                    ui.set_track_backdrop(Image::from_rgba8(blur::backdrop(&frame.pixels)));
                     ui.set_track_motion(Image::from_rgba8(frame.pixels.clone()));
                     ui.set_track_motion_on(true);
                     cover.due = Instant::now() + frame.delay;
@@ -3433,7 +3737,12 @@ impl App {
         }
 
         // Tick fast only while something on screen is moving.
-        let fast = animating || fading || (lyrics_live && state == audio::PLAYING);
+        // A preview's playhead moves smoothly only on the quick tick.
+        let fast = animating
+            || fading
+            || (lyrics_live && state == audio::PLAYING)
+            || self.ui.get_mix_previewing()
+            || self.ui.get_mix_loading();
         if fast != self.fast.replace(fast) {
             self.timer
                 .set_interval(if fast { FAST_TICK } else { SLOW_TICK });
@@ -4079,15 +4388,6 @@ fn wrap(line: &lyrics::Line, columns: usize) -> Vec<(String, Vec<lyrics::Syllabl
     rows
 }
 
-#[cfg(windows)]
-fn set_font(ui: &AppWindow) {
-    ui.global::<Theme>()
-        .set_font("Segoe UI Variable Display".into());
-}
-
-#[cfg(not(windows))]
-fn set_font(_ui: &AppWindow) {}
-
 /// `tonearm --probe search <query>` and friends print parsed results, so we
 /// can check the parsers against the live service without the UI.
 fn probe(args: &[String]) {
@@ -4267,7 +4567,7 @@ fn probe(args: &[String]) {
             let arg_owned = arg(2).to_string();
             let clip = canvas::Clip::play(
                 std::path::PathBuf::from(arg(1)),
-                move |p| {
+                move |p, _blur| {
                     let mut seen = seen.lock().unwrap();
                     if seen.is_empty() && !arg_owned.is_empty() {
                         let _ = image::save_buffer(&arg_owned, p.as_bytes(), p.width(), p.height(), image::ExtendedColorType::Rgba8);
@@ -4424,10 +4724,14 @@ fn main() -> Result<(), slint::PlatformError> {
         probe(&args[1..]);
         return Ok(());
     }
+    // Already running, perhaps in the tray: that copy comes forward instead.
+    #[cfg(windows)]
+    let Some(instance) = single::claim() else {
+        return Ok(());
+    };
 
     update::clean_up();
     let ui = AppWindow::new()?;
-    set_font(&ui);
     ui.set_app_version(update::VERSION.trim_start_matches('v').into());
     let client = Arc::new(Client::new());
     let session = store::load("session");
@@ -4470,7 +4774,17 @@ fn main() -> Result<(), slint::PlatformError> {
         outgoing: RefCell::new(None),
         clock: Cell::new((0, Instant::now())),
         crossfade: Cell::new(load_crossfade()),
-        translate: Cell::new(load_translate()),
+        beat_match: Cell::new(load_beat_match()),
+        analyses: RefCell::new(HashMap::new()),
+        unanalyzed: RefCell::new(HashSet::new()),
+        planned: RefCell::new(None),
+        mixed_playlists: RefCell::new(library::mixed_playlists()),
+        editing: RefCell::new(None),
+        previewing: RefCell::new(None),
+        preview_track: RefCell::new(None),
+        playhead_clock: Cell::new(None),
+        spinner_from: Cell::new(None),
+translate: Cell::new(load_translate()),
         fade_next: RefCell::new(None),
         fade_token: Cell::new(0),
         levelling: Cell::new(load_levelling()),
@@ -4542,6 +4856,8 @@ fn main() -> Result<(), slint::PlatformError> {
         .play_index(index as usize));
     on!(on_load_more, |app| app.load_more());
     on!(on_sort_by, |app, column| app.sort_by(column));
+    on!(on_recommend_add, |app, id| app.add_recommended(id as usize));
+    on!(on_recommend_refresh, |app| app.refresh_recommended());
     on!(on_play_page, |app, shuffle| app.play_page(shuffle));
     on!(on_toggle_play, |app| app.toggle_play());
     on!(on_next, |app| app.next());
@@ -4597,6 +4913,19 @@ fn main() -> Result<(), slint::PlatformError> {
     on!(on_cache_choice_changed, |app, choice| app.set_cache_choice(choice));
     on!(on_clear_cache, |app| app.clear_cache());
     on!(on_crossfade_choice_changed, |app, choice| app.set_crossfade_choice(choice));
+    on!(on_toggle_mix, |app| app.toggle_mix());
+    on!(on_download_page, |app| app.download_page());
+    on!(on_edit_mix, |app, id| app.edit_mix(id as usize));
+    on!(on_preview_mix, |app, id| app.preview_row_mix(id as usize));
+    on!(on_mix_preview, |app| app.preview_editing());
+    on!(on_mix_preset_picked, |app, i| app.mix_preset_picked(i as usize));
+    on!(on_mix_volume_picked, |app, i| app.mix_choice_picked(0, i as usize));
+    on!(on_mix_eq_picked, |app, i| app.mix_choice_picked(1, i as usize));
+    on!(on_mix_filter_picked, |app, i| app.mix_choice_picked(2, i as usize));
+    on!(on_mix_beatmatch_toggled, |app| app.mix_beatmatch_toggled());
+    on!(on_mix_save, |app| app.mix_save());
+    on!(on_mix_dragged, |app, side, seconds, exact| app.mix_dragged(side, seconds as f64, exact));
+    on!(on_beat_match_choice_changed, |app, choice| app.set_beat_match_choice(choice));
     on!(on_translate_choice_changed, |app, choice| app.set_translate_choice(choice));
     // detail pages, links and the right click menu
     on!(on_show_all, |app, id| app.show_all(id as usize));
@@ -4613,6 +4942,7 @@ fn main() -> Result<(), slint::PlatformError> {
             .position(|&c| c == app.crossfade.get())
             .unwrap_or(0) as i32,
     );
+    app.ui.set_beat_match_choice(if app.beat_match.get() { 1 } else { 0 });
     app.ui.set_translate_choice(app.translate.get() as i32);
     app.ui.set_levelling_choice(app.levelling.get());
     app.ui.set_close_choice(if app.close_to_tray.get() { 0 } else { 1 });
@@ -4646,6 +4976,8 @@ fn main() -> Result<(), slint::PlatformError> {
     app.repair_downloads();
     app.check_update(true);
     // Not `run`, which quits as soon as the window hides in the tray.
+    #[cfg(windows)]
+    instance.listen(|| on_ui(|app| app.show_window()));
     app.ui.show()?;
     let result = slint::run_event_loop_until_quit();
     let _ = app.ui.hide();
@@ -4659,6 +4991,9 @@ fn main() -> Result<(), slint::PlatformError> {
     });
     let _ = wait.recv_timeout(Duration::from_secs(3));
     APP.with(|slot| slot.borrow_mut().take());
+    // Let go first, so an updated copy started now is not turned away.
+    #[cfg(windows)]
+    drop(instance);
     update::relaunch_if_updated();
     result
 }

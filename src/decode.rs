@@ -22,7 +22,7 @@ use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
 use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
-use symphonia::core::units::Time;
+use symphonia::core::units::{Time, TimeBase};
 
 /// Bad packets in a row before we give up on a track.
 const MAX_BAD_PACKETS: usize = 8;
@@ -42,6 +42,14 @@ pub struct Track {
     position: f64,
     /// Input frames per output frame.
     step: f64,
+    /// Input frames per output frame at normal speed, and the speed the
+    /// track plays at. `step` is their product.
+    base_step: f64,
+    speed: f64,
+    /// The track's time base, to turn packet times into frames.
+    time_base: Option<TimeBase>,
+    /// When the first packet decoded since the last restart starts.
+    first_ts: Option<u64>,
     output_rate: u32,
     /// The output frame being handed out, and how far through it we are.
     frame: Vec<f32>,
@@ -71,6 +79,7 @@ impl Track {
             .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
             .ok_or("The stream has no audio track")?;
         let track_id = track.id;
+        let time_base = track.codec_params.time_base;
         let duration = track
             .codec_params
             .time_base
@@ -92,6 +101,10 @@ impl Track {
             input: Vec::new(),
             position: 1.0,
             step: 1.0,
+            base_step: 1.0,
+            speed: 1.0,
+            time_base,
+            first_ts: None,
             output_rate,
             frame: Vec::new(),
             channel: 0,
@@ -126,6 +139,7 @@ impl Track {
                     if decoded.frames() == 0 {
                         continue;
                     }
+                    self.first_ts.get_or_insert(packet.ts());
                     let mut samples = SampleBuffer::<f32>::new(decoded.capacity() as u64, spec);
                     samples.copy_interleaved_ref(decoded);
                     if self.channels == 0 {
@@ -137,7 +151,8 @@ impl Track {
                             self.output_rate
                         };
                         self.output_rate = rate;
-                        self.step = spec.rate as f64 / rate as f64;
+                        self.base_step = spec.rate as f64 / rate as f64;
+                        self.step = self.base_step * self.speed;
                     }
                     let channels = spec.channels.count().max(1);
                     if channels == self.channels {
@@ -166,14 +181,38 @@ impl Track {
         self.frame.clear();
         self.channel = 0;
         self.ended = false;
+        self.first_ts = None;
         if !self.decode_more(skip_before)? {
             self.ended = true;
             return Ok(false);
+        }
+        // The packet starts at or before `skip_before`. Drop the frames
+        // ahead of it, so a seek lands on the very frame asked for. Beat
+        // matching lines songs up by these positions.
+        if let (Some(base), Some(first)) = (self.time_base, self.first_ts) {
+            if skip_before > first {
+                let early = base.calc_time(skip_before - first);
+                let frames = ((early.seconds as f64 + early.frac) * self.spec.rate as f64).round() as usize;
+                let frames = frames.min(self.frames().saturating_sub(1));
+                self.input.drain(..frames * self.channels);
+            }
         }
         let first = self.input[..self.channels].to_vec();
         self.input.splice(0..0, first);
         self.position = 1.0;
         Ok(true)
+    }
+
+    /// Plays faster or slower, by `speed` times. The pitch moves with it,
+    /// as on a turntable. Takes effect from the next frame.
+    pub fn set_speed(&mut self, speed: f64) {
+        self.speed = speed.clamp(0.5, 2.0);
+        self.step = self.base_step * self.speed;
+    }
+
+    /// The rate the track was recorded at, in frames a second.
+    pub fn source_rate(&self) -> u32 {
+        self.spec.rate
     }
 
     fn frames(&self) -> usize {
