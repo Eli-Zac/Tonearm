@@ -35,6 +35,19 @@ pub struct Item {
     pub library: Option<(String, bool)>,
     /// Marked explicit by YouTube Music.
     pub explicit: bool,
+    /// On a chart, how the song's place moved since the last one.
+    pub trend: Trend,
+}
+
+/// A chart song's move, as YouTube Music marks it beside the rank.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Trend {
+    /// Not on a chart.
+    #[default]
+    None,
+    Up,
+    Down,
+    Same,
 }
 
 impl Item {

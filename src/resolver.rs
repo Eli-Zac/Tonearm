@@ -1,8 +1,15 @@
 //! Turns a video id into an audio stream URL.
 //!
 //! YouTube has no public API that hands out audio streams, and the tricks
-//! for getting one change every few weeks. yt-dlp keeps up with them, so we
-//! use it. On first play Tonearm downloads yt-dlp from its GitHub releases
+//! for getting one change every few weeks. We ask InnerTube's `player`
+//! endpoint ourselves first (`innertube::player`), as a few clients that
+//! need no proof-of-origin token, and solve the player script's challenges
+//! with `innertube::challenge`. That is quick and needs nothing installed.
+//! When it gives up, for any reason, we fall back to yt-dlp, which keeps up
+//! with the tricks we do not. `TONEARM_RESOLVER=native` or `ytdlp` uses
+//! only one of the two, for testing.
+//!
+//! The yt-dlp fallback: on first play Tonearm downloads yt-dlp from its GitHub releases
 //! into the app's local data folder and checks it against GitHub's SHA-256
 //! digest. On Windows that is the unpacked build, a folder with a small
 //! `yt-dlp.exe` in it, because the single-file exe spends about a second
@@ -62,7 +69,112 @@ pub fn default() -> Option<Box<dyn Resolver>> {
     if let Ok(url) = std::env::var("TONEARM_TEST_STREAM") {
         return Some(Box::new(Fixed(url)));
     }
-    Some(Box::new(Cached::new(Box::new(YtDlp::new()))))
+    let inner: Box<dyn Resolver> = match std::env::var("TONEARM_RESOLVER").as_deref() {
+        Ok("native") => Box::new(Native::new()),
+        Ok("ytdlp") => Box::new(YtDlp::new()),
+        _ => Box::new(Chain {
+            native: Native::new(),
+            fallback: YtDlp::new(),
+        }),
+    };
+    Some(Box::new(Cached::new(inner)))
+}
+
+// ------------------------------------------------------------------ native
+
+/// Which resolver served the last link: 1 native, 2 yt-dlp. For the debug
+/// command.
+static LAST_PATH: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn last_path() -> &'static str {
+    match LAST_PATH.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => "native",
+        2 => "yt-dlp",
+        _ => "none",
+    }
+}
+
+fn note_path(which: u8) {
+    LAST_PATH.store(which, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Asks InnerTube directly, with no yt-dlp.
+struct Native {
+    http: ureq::Agent,
+    cookie: Mutex<Option<String>>,
+}
+
+impl Native {
+    fn new() -> Self {
+        Native {
+            http: crate::innertube::agent(Duration::from_secs(15)),
+            cookie: Mutex::new(None),
+        }
+    }
+
+    fn attempt(&self, video_id: &str) -> Result<Stream, crate::innertube::player::Miss> {
+        let cookie = self.cookie.lock().unwrap().clone();
+        crate::innertube::player::resolve(&self.http, cookie.as_deref(), video_id)
+    }
+}
+
+impl Resolver for Native {
+    fn resolve(&self, video_id: &str) -> Result<Stream, String> {
+        match self.attempt(video_id) {
+            Ok(stream) => {
+                note_path(1);
+                Ok(stream)
+            }
+            Err(miss) => Err(format!("Cannot play this track: {miss}")),
+        }
+    }
+
+    fn set_cookie(&self, cookie: Option<String>) {
+        let cookie = cookie.filter(|c| !c.trim().is_empty());
+        let signing_in = cookie.is_some() && self.cookie.lock().unwrap().is_none();
+        *self.cookie.lock().unwrap() = cookie;
+        // Signed in, the first clients asked need the player's challenges
+        // solved. Getting the player ready now saves the first song a few
+        // seconds.
+        if signing_in {
+            let http = self.http.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = crate::innertube::challenge::warm(&http) {
+                    eprintln!("native resolver: warming the player failed: {e}");
+                }
+            });
+        }
+    }
+}
+
+/// Native first, yt-dlp when native gives up. yt-dlp is only installed or
+/// started when it is needed, so a prefetch that resolves natively never
+/// touches it.
+struct Chain {
+    native: Native,
+    fallback: YtDlp,
+}
+
+impl Resolver for Chain {
+    fn resolve(&self, video_id: &str) -> Result<Stream, String> {
+        match self.native.attempt(video_id) {
+            Ok(stream) => {
+                note_path(1);
+                return Ok(stream);
+            }
+            Err(miss) => eprintln!("native resolver gave up on {video_id} ({miss}), using yt-dlp"),
+        }
+        let stream = self.fallback.resolve(video_id)?;
+        note_path(2);
+        Ok(stream)
+    }
+
+    fn set_cookie(&self, cookie: Option<String>) {
+        self.native.set_cookie(cookie.clone());
+        // Not `set_cookie`: that fetches Deno at once, which only yt-dlp
+        // needs. yt-dlp fetches it itself when it first runs.
+        *self.fallback.cookie.lock().unwrap() = cookie.filter(|c| !c.trim().is_empty());
+    }
 }
 
 // ------------------------------------------------------------------- cache

@@ -1,0 +1,40 @@
+{
+ "playabilityStatus": {
+  "status": "OK"
+ },
+ "streamingData": {
+  "expiresInSeconds": "21540",
+  "adaptiveFormats": [
+   {
+    "itag": 139,
+    "mimeType": "audio/mp4; codecs=\"mp4a.40.5\"",
+    "bitrate": 50152,
+    "contentLength": "1300631",
+    "approxDurationMs": "213159",
+    "audioQuality": "AUDIO_QUALITY_LOW"
+   },
+   {
+    "itag": 140,
+    "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"",
+    "bitrate": 130677,
+    "contentLength": "3449447",
+    "approxDurationMs": "213089",
+    "audioQuality": "AUDIO_QUALITY_MEDIUM",
+    "signatureCipher": "s=SCRAMBLED_SIG%3D%3D&sp=sig&url=https%3A%2F%2Frr1---sn-placeholder.googlevideo.com%2Fvideoplayback%3Fexpire%3D1795024732%26ei%3DEI_PLACEHOLDER%26ip%3D0.0.0.0%26id%3DID_PLACEHOLDER%26itag%3D140%26source%3Dyoutube%26requiressl%3Dyes%26xpc%3DEgVo2aDSNQ%253D%253D%26cps%3D1167%26met%3D1795003132%252C%26mh%3Dxx%26mm%3D18%252C26%26mn%3Dsn-placeholder%26ms%3Daub%252Conr%26mv%3Dm%26mvi%3D2%26pl%3D17%26rms%3Daub%252Caub%26pcm2%3Dno%26initcwndbps%3D2355250%26bui%3DBUI_PLACEHOLDER%26spc%3DSPC_PLACEHOLDER%26vprv%3D1%26svpuc%3D1%26mime%3Daudio%252Fmp4%26rqh%3D1%26gir%3Dyes%26clen%3D3449447%26dur%3D213.089%26lmt%3D1766955925572207%26mt%3D1795002571%26fvip%3D1%26epbp%3D1%26keepalive%3Dyes%26fexp%3D51565116%26c%3DANDROID_VR%26txp%3D5532534%26sparams%3Dexpire%252Cei%252Cip%252Cid%252Citag%252Csource%252Crequiressl%252Cxpc%252Cpcm2%252Cbui%252Cspc%252Cvprv%252Csvpuc%252Cmime%252Crqh%252Cgir%252Cclen%252Cdur%252Clmt%26sig%3DSIG_PLACEHOLDER%26lsparams%3Dcps%252Cmet%252Cmh%252Cmm%252Cmn%252Cms%252Cmv%252Cmvi%252Cpl%252Crms%252Cinitcwndbps%26lsig%3DLSIG_PLACEHOLDER%26n%3DNVALUE_SCRAMBLED"
+   },
+   {
+    "itag": 251,
+    "mimeType": "audio/webm; codecs=\"opus\"",
+    "bitrate": 136544,
+    "contentLength": "3433755",
+    "approxDurationMs": "213061",
+    "audioQuality": "AUDIO_QUALITY_MEDIUM"
+   }
+  ],
+  "serverAbrStreamingUrl": "https://example.invalid/sabr"
+ },
+ "videoDetails": {
+  "videoId": "dQw4w9WgXcQ",
+  "lengthSeconds": "213"
+ }
+}

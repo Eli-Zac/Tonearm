@@ -1,0 +1,39 @@
+{
+ "playabilityStatus": {
+  "status": "OK"
+ },
+ "streamingData": {
+  "expiresInSeconds": "21540",
+  "adaptiveFormats": [
+   {
+    "itag": 139,
+    "mimeType": "audio/mp4; codecs=\"mp4a.40.5\"",
+    "bitrate": 50152,
+    "contentLength": "1300631",
+    "approxDurationMs": "213159",
+    "audioQuality": "AUDIO_QUALITY_LOW"
+   },
+   {
+    "itag": 140,
+    "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"",
+    "bitrate": 130677,
+    "contentLength": "3449447",
+    "approxDurationMs": "213089",
+    "audioQuality": "AUDIO_QUALITY_MEDIUM"
+   },
+   {
+    "itag": 251,
+    "mimeType": "audio/webm; codecs=\"opus\"",
+    "bitrate": 136544,
+    "contentLength": "3433755",
+    "approxDurationMs": "213061",
+    "audioQuality": "AUDIO_QUALITY_MEDIUM"
+   }
+  ],
+  "serverAbrStreamingUrl": "https://example.invalid/sabr"
+ },
+ "videoDetails": {
+  "videoId": "dQw4w9WgXcQ",
+  "lengthSeconds": "213"
+ }
+}

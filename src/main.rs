@@ -37,7 +37,7 @@ mod wheel;
 
 slint::include_modules!();
 
-use innertube::model::{Header, Item, Kind, Page, PageKind};
+use innertube::model::{Header, Item, Kind, Page, PageKind, Trend};
 use innertube::Client;
 use slint::{ComponentHandle, Image, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 use std::cell::{Cell, RefCell};
@@ -419,6 +419,9 @@ struct Cover {
 struct Outgoing {
     cover: Option<Cover>,
     canvas: Option<(u64, canvas::Clip)>,
+    /// The song going out, for the pulse on its row's transition line.
+    video_id: String,
+    started: Instant,
     until: Instant,
 }
 
@@ -517,6 +520,8 @@ struct App {
     lastfm_token: RefCell<String>,
     listen: RefCell<Listen>,
     toast_timer: Timer,
+    /// What the toast's button does, while it shows one.
+    toast_action: RefCell<Option<Box<dyn Fn(&Rc<App>)>>>,
     release: RefCell<Option<update::Release>>,
     suggest: RefCell<Suggest>,
     suggest_timer: Timer,
@@ -704,14 +709,50 @@ fn suggestion_subtitle(item: &Item) -> String {
 
 impl App {
     fn toast(self: &Rc<Self>, message: impl Into<SharedString>) {
-        self.ui.set_toast(message.into());
+        self.show_toast(message.into(), "", None, Duration::from_secs(5));
+    }
+
+    /// A toast with a button. It stays longer, so there is time to click.
+    fn toast_with(
+        self: &Rc<Self>,
+        message: impl Into<SharedString>,
+        label: &str,
+        action: impl Fn(&Rc<App>) + 'static,
+    ) {
+        self.show_toast(message.into(), label, Some(Box::new(action)), Duration::from_secs(12));
+    }
+
+    fn show_toast(
+        self: &Rc<Self>,
+        message: SharedString,
+        label: &str,
+        action: Option<Box<dyn Fn(&Rc<App>)>>,
+        lasts: Duration,
+    ) {
+        self.ui.set_toast(message);
+        self.ui.set_toast_action(label.into());
+        *self.toast_action.borrow_mut() = action;
         let weak = Rc::downgrade(self);
-        self.toast_timer
-            .start(TimerMode::SingleShot, Duration::from_secs(5), move || {
-                if let Some(app) = weak.upgrade() {
-                    app.ui.set_toast("".into());
-                }
-            });
+        self.toast_timer.start(TimerMode::SingleShot, lasts, move || {
+            if let Some(app) = weak.upgrade() {
+                app.hide_toast();
+            }
+        });
+    }
+
+    fn hide_toast(&self) {
+        self.ui.set_toast("".into());
+        self.ui.set_toast_action("".into());
+        self.toast_action.borrow_mut().take();
+    }
+
+    fn toast_clicked(self: &Rc<Self>) {
+        let action = self.toast_action.borrow_mut().take();
+        self.toast_timer.stop();
+        self.hide_toast();
+        if let Some(action) = action {
+            action(self);
+        }
     }
 
     // ---------------------------------------------------------- thumbnails
@@ -753,7 +794,7 @@ impl App {
         target: Target,
         fetch: impl FnOnce(&ureq::Agent, &str) -> Option<images::Pixels> + Send + 'static,
     ) -> Option<Image> {
-        if let Some(pixels) = self.cache.borrow().get(&key) {
+        if let Some(pixels) = self.cache.borrow_mut().get(&key) {
             return Some(Image::from_rgba8(pixels));
         }
         let mut pending = self.pending.borrow_mut();
@@ -897,6 +938,12 @@ impl App {
             }),
             progress: item.video_id.as_deref().map(offline::progress).unwrap_or(0.0),
             explicit: item.explicit,
+            trend: match item.trend {
+                Trend::None => 0,
+                Trend::Up => 1,
+                Trend::Down => 2,
+                Trend::Same => 3,
+            },
         }
     }
 
@@ -993,7 +1040,7 @@ impl App {
         self.api.run(move || {
             let result = match &route {
                 Route::Home => client.browse("FEmusic_home", None),
-                Route::Explore => client.browse("FEmusic_explore", None),
+                Route::Explore => explore(&client),
                 Route::Library => client.browse("FEmusic_library_landing", None),
                 Route::Browse { id, params } => client.browse(id, params.as_deref()),
                 Route::Search(query, tab) => client.search_in(query, *tab),
@@ -1096,6 +1143,11 @@ impl App {
             )
         };
         let first = rows.row_count() == 0;
+        // A chart's numbers carry up and down marks, in a wider column.
+        if first {
+            let chart = new.shelves.iter().flat_map(|s| &s.items).any(|i| i.trend != Trend::None);
+            self.ui.set_chart(chart);
+        }
         // How the track list of this kind of page looks: 1 numbered with
         // no art for albums, 2 numbered with art for playlists.
         let track_style = match kind {
@@ -1143,6 +1195,8 @@ impl App {
             let style = match kind {
                 Some(PageKind::Artist) if shelf.title == "Popular" => 2,
                 Some(PageKind::Artist) => 0,
+                // Explore's chart, listed by `chart_top_songs`.
+                None if shelf.title == CHART_TITLE && !shelf.carousel => 2,
                 _ => track_style,
             };
             if shelf.carousel {
@@ -1760,6 +1814,9 @@ impl App {
     fn page_key(&self) -> String {
         match self.history.borrow().last() {
             Some(Route::Browse { id, .. }) => id.clone(),
+            // Not a YouTube id, but mix mode and "playing from here" need
+            // a key for the page all the same.
+            Some(Route::Downloads) => DOWNLOADS_KEY.to_string(),
             _ => String::new(),
         }
     }
@@ -2929,6 +2986,10 @@ impl App {
         let cover = self.cover.borrow_mut().take();
         let canvas = self.canvas.borrow_mut().take();
         let seconds = plan.length as f32;
+        let video_id = {
+            let player = self.player.borrow();
+            player.queue.get(player.index).and_then(|i| i.video_id.clone()).unwrap_or_default()
+        };
         self.moved_on(index, duration, |app, generation| {
             app.audio.crossfade(token, generation, plan);
         });
@@ -2936,6 +2997,8 @@ impl App {
         *self.outgoing.borrow_mut() = Some(Outgoing {
             cover,
             canvas,
+            video_id,
+            started: Instant::now(),
             until: Instant::now() + Duration::from_secs_f32(seconds),
         });
         self.ui.set_fade_motion_on(motion_on);
@@ -3720,6 +3783,15 @@ impl App {
             Some(out) if Instant::now() >= out.until => true,
             Some(out) => {
                 fading = true;
+                let now = ui.global::<Now>();
+                let length = out.until.saturating_duration_since(out.started).as_secs_f32();
+                if now.get_fade_from() != out.video_id.as_str() {
+                    now.set_fade_length((length * 1000.0) as i32);
+                    now.set_fade_progress(0.0);
+                    now.set_fade_from(out.video_id.as_str().into());
+                }
+                let progress = out.started.elapsed().as_secs_f32() / length.max(0.001);
+                now.set_fade_progress(progress.clamp(0.0, 1.0));
                 if let Some(cover) = out.cover.as_mut() {
                     if Instant::now() >= cover.due {
                         let frame = &cover.frames[cover.index];
@@ -3735,6 +3807,10 @@ impl App {
         if faded {
             self.outgoing.borrow_mut().take();
             ui.set_fade_motion_on(false);
+        }
+        // No mix going, whether it ended or a skip cut it short: no pulse.
+        if self.outgoing.borrow().is_none() && !ui.global::<Now>().get_fade_from().is_empty() {
+            ui.global::<Now>().set_fade_from("".into());
         }
 
         // Tick fast only while something on screen is moving.
@@ -4167,7 +4243,10 @@ impl App {
                         app.ui.set_update_available(true);
                         *app.release.borrow_mut() = Some(release);
                         if quiet {
-                            app.toast(format!("{note} Open Settings to update."));
+                            app.toast_with(note, "Update", |app| {
+                                app.install_update();
+                                app.toast("Downloading the update. Tonearm restarts when it is ready.");
+                            });
                         }
                     }
                     Ok(None) => {
@@ -4389,6 +4468,110 @@ fn wrap(line: &lyrics::Line, columns: usize) -> Vec<(String, Vec<lyrics::Syllabl
     rows
 }
 
+/// The Downloads page's key, for its mix mode and play button.
+const DOWNLOADS_KEY: &str = "tonearm:downloads";
+
+/// The Explore shelf YouTube Music draws as a ranked chart.
+const CHART_TITLE: &str = "Top songs";
+/// How many of the chart Explore lists. Its "more" opens the whole chart.
+const CHART_ROWS: usize = 10;
+
+/// The Explore page, with the top songs chart as a numbered list.
+///
+/// Signed in, Explore sends the chart as a carousel of cards; YouTube Music
+/// shows it as a numbered chart, so it becomes a list here. Signed out,
+/// Explore leaves it out, so we find the region's chart playlist and list
+/// its top songs ourselves.
+fn explore(client: &Client) -> Result<Page, String> {
+    let (page, chart) = std::thread::scope(|scope| {
+        let chart = scope.spawn(|| chart_shelf(client));
+        (client.browse("FEmusic_explore", None), chart.join().ok().flatten())
+    });
+    let mut page = page?;
+    let has_chart = page.shelves.iter().any(|s| s.title == CHART_TITLE);
+    if let (false, Some(chart)) = (has_chart, chart) {
+        // Where YouTube Music puts it: after the new releases.
+        let at = page.shelves.len().min(1);
+        page.shelves.insert(at, chart);
+    }
+    for shelf in &mut page.shelves {
+        if shelf.title == CHART_TITLE && shelf.items.iter().all(|i| i.video_id.is_some()) {
+            shelf.carousel = false;
+            shelf.items.truncate(CHART_ROWS);
+        }
+    }
+    Ok(page)
+}
+
+/// The region's "Top 100 Songs" chart as a shelf. The Charts page names the
+/// region in its video charts, and YouTube Music's own playlists search
+/// finds the song chart by that name. The id is kept for the session.
+fn chart_shelf(client: &Client) -> Option<innertube::model::Shelf> {
+    static CHART: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    let known = CHART.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let id = match known {
+        Some(id) => id,
+        None => {
+            let id = find_chart(client)?;
+            *CHART.lock().unwrap_or_else(|e| e.into_inner()) = Some(id.clone());
+            id
+        }
+    };
+    let playlist = client.browse(&id, None).ok()?;
+    let items: Vec<Item> = playlist
+        .shelves
+        .into_iter()
+        .flat_map(|s| s.items)
+        .filter(|i| i.video_id.is_some())
+        .take(CHART_ROWS)
+        .collect();
+    (!items.is_empty()).then(|| innertube::model::Shelf {
+        title: CHART_TITLE.into(),
+        carousel: false,
+        items,
+        more: Some((id, None)),
+    })
+}
+
+fn find_chart(client: &Client) -> Option<String> {
+    const SONGS: &str = "Top 100 Songs ";
+    const VIDEOS: &str = "Top 100 Music Videos ";
+    let charts = client.browse("FEmusic_charts", None).ok()?;
+    let mut region = None;
+    for item in charts.shelves.iter().flat_map(|s| &s.items) {
+        if item.title.starts_with(SONGS) {
+            return item.browse_id.clone();
+        }
+        if let Some(name) = item.title.strip_prefix(VIDEOS) {
+            region = Some(name.to_string());
+        }
+    }
+    let region = region?;
+    // The chart keeps its playlist, so once found it is kept, and the
+    // unreliable search below runs only the first time.
+    let key: String = region.chars().filter(char::is_ascii_alphanumeric).collect();
+    let key = format!("chart-{key}");
+    if let Some(id) = store::load(&key).filter(|id| id.starts_with("VL")) {
+        return Some(id);
+    }
+    let title = format!("{SONGS}{region}");
+    // The search lists the chart about half the time. Asked again, or
+    // worded a little differently, it turns up.
+    let queries = [title.clone(), format!("{title} YouTube Charts")];
+    let id = (0..6).find_map(|attempt| {
+        client
+            .search_featured(&queries[attempt % 2])
+            .ok()?
+            .shelves
+            .into_iter()
+            .flat_map(|s| s.items)
+            .find(|i| i.title == title)
+            .and_then(|i| i.browse_id)
+    })?;
+    let _ = store::save(&key, &id);
+    Some(id)
+}
+
 /// `tonearm --probe search <query>` and friends print parsed results, so we
 /// can check the parsers against the live service without the UI.
 fn probe(args: &[String]) {
@@ -4414,6 +4597,8 @@ fn probe(args: &[String]) {
             }
         }),
         "browse" => client.browse(arg(1), None),
+        "featured" => client.search_featured(arg(1)),
+        "explore" => explore(&client),
         // The song a video in a radio stands for: --probe song <videoId>
         "song" => {
             let video = client
@@ -4530,9 +4715,14 @@ fn probe(args: &[String]) {
             let Some(resolver) = resolver::default() else {
                 return println!("error: no resolver");
             };
+            // As the app would: signed in when there is a session.
+            resolver.set_cookie(store::load("session"));
+            let started = Instant::now();
             match resolver.resolve(arg(1)) {
                 Ok(stream) => {
+                    println!("resolved in {:.2}s", started.elapsed().as_secs_f32());
                     println!("duration {}", stream.duration);
+                    println!("via {}", resolver::last_path());
                     println!("headers {:?}", stream.headers);
                     println!("url {}", stream.url);
                     let mut request = innertube::agent(Duration::from_secs(15))
@@ -4801,6 +4991,7 @@ translate: Cell::new(load_translate()),
         attached: Cell::new(false),
         minimized: Cell::new(false),
         toast_timer: Timer::default(),
+        toast_action: RefCell::default(),
         release: RefCell::new(None),
         suggest: RefCell::default(),
         suggest_timer: Timer::default(),
@@ -4912,6 +5103,7 @@ translate: Cell::new(load_translate()),
     on!(on_discord_status_changed, |app, choice| app.discord_status(choice));
     on!(on_check_update, |app| app.check_update(false));
     on!(on_install_update, |app| app.install_update());
+    on!(on_toast_clicked, |app| app.toast_clicked());
     on!(on_cache_choice_changed, |app, choice| app.set_cache_choice(choice));
     on!(on_clear_cache, |app| app.clear_cache());
     on!(on_crossfade_choice_changed, |app, choice| app.set_crossfade_choice(choice));

@@ -1,8 +1,12 @@
-//! Thumbnail loading with a small, byte budgeted cache.
+//! Thumbnail loading with a small, byte budgeted cache in memory and a
+//! larger one on disk.
 
 use slint::{Rgba8Pixel, SharedPixelBuffer};
 use std::collections::{HashMap, VecDeque};
 use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // Art is fetched at screen pixels, so a scaled display needs more room.
 const BUDGET: usize = 64 * 1024 * 1024;
@@ -22,8 +26,16 @@ impl Cache {
         format!("{px}:{url}")
     }
 
-    pub fn get(&self, key: &str) -> Option<Pixels> {
-        self.map.get(key).cloned()
+    /// A hit moves to the back, so the art in use is the last to go.
+    pub fn get(&mut self, key: &str) -> Option<Pixels> {
+        let pixels = self.map.get(key)?.clone();
+        if let Some(at) = self.order.iter().rposition(|k| k == key) {
+            if at + 1 != self.order.len() {
+                let key = self.order.remove(at)?;
+                self.order.push_back(key);
+            }
+        }
+        Some(pixels)
     }
 
     pub fn put(&mut self, key: String, pixels: Pixels) {
@@ -40,6 +52,103 @@ impl Cache {
             if let Some(old) = self.map.remove(&oldest) {
                 self.bytes -= old.as_bytes().len();
             }
+        }
+    }
+}
+
+// ------------------------------------------------------------- disk cache
+
+/// Art already fetched is kept on disk as it came, so the next launch, or
+/// a page opened offline, shows it without the network. The URL asks for
+/// the size, so each size is its own file. Least recently shown go first.
+const DISK_BUDGET: u64 = 128 * 1024 * 1024;
+/// Trims after this many new files, not after every one.
+const TRIM_EVERY: u32 = 64;
+
+fn disk_dir() -> Option<PathBuf> {
+    Some(crate::store::data_dir()?.join("art-cache"))
+}
+
+fn disk_file(url: &str) -> Option<PathBuf> {
+    use sha1::{Digest, Sha1};
+    let hash: String = Sha1::digest(url.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    Some(disk_dir()?.join(format!("{hash}.img")))
+}
+
+/// The bytes of a picture, from the disk cache or the network.
+fn download(http: &ureq::Agent, url: &str) -> Option<Vec<u8>> {
+    let path = disk_file(url);
+    if let Some(path) = &path {
+        if let Ok(bytes) = std::fs::read(path) {
+            if !bytes.is_empty() {
+                // Marks it as recently shown, for trimming.
+                if let Ok(file) = std::fs::File::options().write(true).open(path) {
+                    let _ = file.set_modified(SystemTime::now());
+                }
+                return Some(bytes);
+            }
+        }
+    }
+    let response = http
+        .get(url)
+        .set("User-Agent", crate::innertube::USER_AGENT)
+        .call()
+        .ok()?;
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .take(MAX_DOWNLOAD)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    // Only a picture that decodes is worth keeping.
+    if let Some(path) = path.filter(|_| image::guess_format(&bytes).is_ok()) {
+        store(&path, &bytes);
+    }
+    Some(bytes)
+}
+
+fn store(path: &Path, bytes: &[u8]) {
+    static WRITES: AtomicU32 = AtomicU32::new(0);
+    let Some(folder) = path.parent() else { return };
+    if std::fs::create_dir_all(folder).is_err() {
+        return;
+    }
+    // Through a part file, so a crash never leaves half a picture.
+    let partial = path.with_extension("part");
+    if std::fs::write(&partial, bytes).is_err() || std::fs::rename(&partial, path).is_err() {
+        let _ = std::fs::remove_file(&partial);
+        return;
+    }
+    if WRITES.fetch_add(1, Ordering::Relaxed) % TRIM_EVERY == 0 {
+        trim(folder);
+    }
+}
+
+/// Drops the least recently shown pictures until the folder fits.
+fn trim(folder: &Path) {
+    let Ok(entries) = std::fs::read_dir(folder) else { return };
+    let mut files: Vec<(PathBuf, u64, SystemTime)> = entries
+        .flatten()
+        .filter_map(|e| {
+            let meta = e.metadata().ok()?;
+            meta.is_file()
+                .then(|| (e.path(), meta.len(), meta.modified().unwrap_or(UNIX_EPOCH)))
+        })
+        .collect();
+    let mut total: u64 = files.iter().map(|f| f.1).sum();
+    if total <= DISK_BUDGET {
+        return;
+    }
+    files.sort_by_key(|f| f.2);
+    for (path, size, _) in files {
+        if total <= DISK_BUDGET {
+            break;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            total -= size;
         }
     }
 }
@@ -70,17 +179,7 @@ pub fn fetch_wide(http: &ureq::Agent, url: &str, width: u32) -> Option<Pixels> {
         _ if url.starts_with("//") => format!("https:{url}"),
         _ => url.to_string(),
     };
-    let response = http
-        .get(&url)
-        .set("User-Agent", crate::innertube::USER_AGENT)
-        .call()
-        .ok()?;
-    let mut bytes = Vec::new();
-    response
-        .into_reader()
-        .take(MAX_DOWNLOAD)
-        .read_to_end(&mut bytes)
-        .ok()?;
+    let bytes = download(http, &url)?;
     let decoded = image::load_from_memory(&bytes).ok()?;
     let scaled = if decoded.width() > width {
         let height = decoded.height() * width / decoded.width();
@@ -108,18 +207,7 @@ pub fn fetch(http: &ureq::Agent, url: &str, px: u32) -> Option<Pixels> {
         } else {
             sized(url, px)
         };
-        let response = http
-            .get(&url)
-            .set("User-Agent", crate::innertube::USER_AGENT)
-            .call()
-            .ok()?;
-        let mut bytes = Vec::new();
-        response
-            .into_reader()
-            .take(MAX_DOWNLOAD)
-            .read_to_end(&mut bytes)
-            .ok()?;
-        bytes
+        download(http, &url)?
     };
     let decoded = image::load_from_memory(&bytes).ok()?;
     let side = decoded.width().min(decoded.height());

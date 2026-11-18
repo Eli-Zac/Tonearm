@@ -63,8 +63,12 @@ export struct ItemData {
     // Being downloaded, or waiting its turn, and how far it has got (0 to 1).
     downloading: bool,
     progress: float,
-    // Marked explicit: an E badge before the subtitle.
+    // Marked explicit: an E badge before the subtitle, or after the title
+    // when there is none.
     explicit: bool,
+    // On a chart, the move since the last one: 0 none, 1 up, 2 down,
+    // 3 level.
+    trend: int,
 }
 
 // kind: 0 section header, 1 list item, 2 row of cards, 3 load more marker,
@@ -208,7 +212,7 @@ export global Icons {
     out property <string> home: "\u{e2c2}";
     out property <string> explore: "\u{e1c8}";
     out property <string> library: "\u{e758}";
-    out property <string> download: "\u{e20c}";
+    out property <string> download: "\u{e028}";
     out property <string> settings: "\u{e270}";
     // Regular only from here, apart from dots.
     out property <string> search: "\u{e30c}";
@@ -263,6 +267,12 @@ export global Now {
     // A clock in ms for the playing bars, stepped from Rust while a song
     // plays. animation-tick() would redraw at the screen's full rate.
     in property <int> beat;
+    // During a crossfade: the song going out, and how far the mix has got,
+    // 0 to 1. Its row draws the pulse on the line to the next song.
+    in property <string> fade-from;
+    in property <float> fade-progress;
+    // The crossfade's length in ms, so the pulse can keep its own time.
+    in property <int> fade-length;
     // Whether the item keyed `key` is playing or paused right now.
     public pure function is-current(key: string) -> bool {
         return key != "" && (key == song || key == from);
@@ -731,7 +741,7 @@ component Section inherits Rectangle {
     // An optional logo, drawn white on a tile of the brand colour.
     in property <image> logo;
     in property <color> brand;
-    max-width: 680px;
+    max-width: 880px;
     border-radius: 12px;
     background: #ffffff0a;
     VerticalLayout {
@@ -852,7 +862,7 @@ component SubpageRow inherits Rectangle {
     in property <string> title;
     in property <string> subtitle;
     callback clicked;
-    max-width: 680px;
+    max-width: 880px;
     height: 68px;
     border-radius: 12px;
     background: touch.has-hover ? #ffffff14 : #ffffff0a;
@@ -1587,6 +1597,9 @@ component SongRow inherits Rectangle {
     // 0 draws no number. Otherwise the 1-based track number sits before the title.
     in property <int> number;
     in property <bool> show-art: true;
+    // A chart: the number column is wider, for the up or down mark.
+    in property <bool> wide-number;
+    property <length> num-w: root.wide-number ? 46px : 28px;
     // The album in a column before the length, for playlists on a wide window.
     in property <bool> show-album;
     // Mix mode: BPM and key columns, and the transition chip under the row.
@@ -1630,16 +1643,24 @@ component SongRow inherits Rectangle {
         root.album-hot = false;
     }
     property <length> base: number > 0 && !show-art ? 48px : 56px;
-    height: root.base + (root.mix-label != "" ? 22px * root.mix-level : 0px);
+    // Keep the gap in step with the row heights the page list reserves.
+    height: root.base + (root.mix-label != "" ? 34px * root.mix-level : 0px);
     Timer {
         interval: 350ms;
         running: root.hovered;
         triggered => { root.rested(); }
     }
-    border-radius: 10px;
-    background: current ? #ffffff14 : root.hovered ? Theme.hover : transparent;
-    animate background { duration: 120ms; }
+    // Only the song itself lights up, not the transition gap under it.
+    Rectangle {
+        y: 0;
+        height: root.base;
+        border-radius: 10px;
+        background: root.current ? #ffffff14 : root.hovered ? Theme.hover : transparent;
+        animate background { duration: 120ms; }
+    }
     touch := TouchArea {
+        y: 0;
+        height: root.base;
         mouse-cursor: pointer;
         clicked => { root.activated(); }
         pointer-event(event) => {
@@ -1655,8 +1676,33 @@ component SongRow inherits Rectangle {
         padding-right: 14px;
         spacing: 12px;
         if root.number > 0: Rectangle {
-            width: 28px;
+            width: root.num-w;
+            // A chart's mark: up green, down red, level a grey dot.
+            if item.trend != 0 && !(root.hovered || root.is-now): Rectangle {
+                x: 2px;
+                width: 12px;
+                if item.trend == 1: Path {
+                    width: 12px;
+                    height: 8px;
+                    commands: "M 6 0 L 12 8 L 0 8 Z";
+                    fill: #3ec46d;
+                }
+                if item.trend == 2: Path {
+                    width: 12px;
+                    height: 8px;
+                    commands: "M 0 0 L 12 0 L 6 8 Z";
+                    fill: #ff4f5e;
+                }
+                if item.trend == 3: Rectangle {
+                    width: 5px;
+                    height: 5px;
+                    border-radius: 2.5px;
+                    background: Theme.faint;
+                }
+            }
             Text {
+                x: root.wide-number ? 14px : 0px;
+                width: parent.width - self.x;
                 text: root.hovered || root.is-now ? "" : root.number;
                 color: root.current ? Theme.accent : Theme.dim;
                 font-size: 16px;
@@ -1722,20 +1768,31 @@ component SongRow inherits Rectangle {
             alignment: center;
             horizontal-stretch: 1;
             spacing: 3px;
-            Text {
-                text: item.title;
-                color: current || root.is-now ? Theme.accent : Theme.text;
-                font-size: 16px;
-                font-weight: 500;
-                overflow: elide;
+            // With no subtitle, as on an album, the E follows the title.
+            // Placed by hand, so the title can elide before it.
+            title-line := Rectangle {
+                property <bool> badge: item.explicit && item.subtitle == "";
+                height: title.preferred-height;
+                title := Text {
+                    x: 0;
+                    width: min(self.preferred-width, parent.width - (parent.badge ? 16px + 6px : 0px));
+                    text: item.title;
+                    color: current || root.is-now ? Theme.accent : Theme.text;
+                    font-size: 16px;
+                    font-weight: 500;
+                    overflow: elide;
+                }
+                if title-line.badge: ExplicitBadge {
+                    x: title.width + 6px;
+                    y: (title-line.height - 16px) / 2;
+                    height: 16px;
+                }
             }
-            if item.subtitle != "" || item.explicit: HorizontalLayout {
+            if item.subtitle != "": HorizontalLayout {
                 height: 18px;
                 spacing: 5px;
                 if item.explicit: ExplicitBadge {}
-                // A badge alone would cap the title column at its own width.
-                if item.subtitle == "": Rectangle { horizontal-stretch: 1; }
-                if item.subtitle != "": RunLine {
+                RunLine {
                     text: item.subtitle;
                     runs: root.show-album ? item.short-runs : item.runs;
                     changed hovered => { root.sub-hot = self.hovered; }
@@ -1860,7 +1917,7 @@ component SongRow inherits Rectangle {
     // from this song's art down to the next one's, with the chip on it.
     if root.mix-level > 0.01 && root.mix-label != "": Rectangle {
         opacity: root.mix-level;
-        property <length> art-x: root.number > 0 ? 8px + 28px + 12px : 8px;
+        property <length> art-x: root.number > 0 ? 8px + root.num-w + 12px : 8px;
         property <length> art-bottom: (root.base + 40px) / 2;
         Rectangle {
             x: parent.art-x + 20px;
@@ -1870,8 +1927,14 @@ component SongRow inherits Rectangle {
             height: root.height - parent.art-bottom + (root.base - 40px) / 2;
             background: #ffffff59;
         }
-        // In the number column, beside the chip, while the row has the mouse.
-        if root.number > 0 && (root.hovered || chip-touch.has-hover || preview-touch.has-hover): Rectangle {
+        // The gap under the row, apart from the row, so it does not light it.
+        gap-touch := TouchArea {
+            y: root.base;
+            height: root.height - root.base;
+        }
+        // In the number column, beside the chip, while the row or the gap
+        // has the mouse.
+        if root.number > 0 && (root.hovered || gap-touch.has-hover || chip-touch.has-hover || preview-touch.has-hover): Rectangle {
             x: 8px;
             y: root.base + (root.height - root.base - self.height) / 2;
             width: 28px;
@@ -1893,7 +1956,7 @@ component SongRow inherits Rectangle {
             mouse-cursor: pointer;
             clicked => { root.preview-mix(); }
         }
-        Rectangle {
+        chip := Rectangle {
             x: parent.art-x;
             y: root.base + (root.height - root.base - self.height) / 2;
             // Padding, the icon, a gap, the label, padding.
@@ -1928,6 +1991,134 @@ component SongRow inherits Rectangle {
             chip-touch := TouchArea {
                 mouse-cursor: pointer;
                 clicked => { root.edit-mix(); }
+            }
+        }
+        // Mixing out of this song right now: a white pulse runs down the
+        // line as the mix goes on, splits round both sides of the chip to
+        // meet under it, and runs on to the next song, lighting the way
+        // behind it. It keeps time on the frame clock, so it glides.
+        if Now.fade-from != "" && Now.fade-from == root.item.key: pulse := Rectangle {
+            property <duration> length: max(1ms, Now.fade-length * 1ms);
+            property <duration> start;
+            init => {
+                // Joining part way through, as when the list scrolls to it.
+                self.start = animation-tick() - Now.fade-progress * self.length;
+            }
+            property <float> p: clamp((animation-tick() - self.start) / self.length, 0, 1);
+            // Fades in at the start and out at the end.
+            property <float> env-raw: clamp(min(self.p / 0.06, (1 - self.p) / 0.08), 0, 1);
+            opacity: self.env-raw * self.env-raw * (3 - 2 * self.env-raw);
+            // The path: down to the chip, round it both ways, down to the
+            // next song's art.
+            property <length> lx: chip.x + 20px;
+            property <length> top: parent.art-bottom;
+            property <length> bottom: root.height + (root.base - 40px) / 2;
+            property <length> r: chip.height / 2;
+            property <length> cy0: chip.y;
+            property <length> cy1: chip.y + chip.height;
+            property <length> s1l: self.lx - chip.x - self.r;
+            property <length> s1r: chip.x + chip.width - self.r - self.lx;
+            property <length> arc: 3.14159 * self.r;
+            property <length> len-l: 2 * self.s1l + self.arc;
+            property <length> len-r: 2 * self.s1r + self.arc;
+            property <length> la: self.cy0 - self.top;
+            property <length> lb: (self.len-l + self.len-r) / 2;
+            property <length> lc: self.bottom - self.cy1;
+            property <length> d: self.p * (self.la + self.lb + self.lc);
+            // A point on the path `dist` along it, by the left way round the
+            // chip, or the right when `right`. Both ways arrive together.
+            pure function at-x(dist: length, right: bool) -> length {
+                if dist <= self.la || dist >= self.la + self.lb {
+                    return self.lx;
+                }
+                let q = (dist - self.la) / self.lb;
+                if !right {
+                    let dl = q * self.len-l;
+                    if dl < self.s1l { return self.lx - dl; }
+                    if dl < self.s1l + self.arc {
+                        return chip.x + self.r - self.r * sin((dl - self.s1l) / self.r * 1rad);
+                    }
+                    return chip.x + self.r + (dl - self.s1l - self.arc);
+                }
+                let dr = q * self.len-r;
+                if dr < self.s1r { return self.lx + dr; }
+                if dr < self.s1r + self.arc {
+                    return chip.x + chip.width - self.r + self.r * sin((dr - self.s1r) / self.r * 1rad);
+                }
+                return chip.x + chip.width - self.r - (dr - self.s1r - self.arc);
+            }
+            pure function at-y(dist: length, right: bool) -> length {
+                if dist <= self.la {
+                    return self.top + dist;
+                }
+                if dist >= self.la + self.lb {
+                    return self.cy1 + (dist - self.la - self.lb);
+                }
+                let q = (dist - self.la) / self.lb;
+                let along = q * (right ? self.len-r : self.len-l);
+                let straight = right ? self.s1r : self.s1l;
+                if along < straight { return self.cy0; }
+                if along < straight + self.arc {
+                    return self.cy0 + self.r - self.r * cos((along - straight) / self.r * 1rad);
+                }
+                return self.cy1;
+            }
+            // How far round the chip its edge is lit, 0 to 1.
+            property <float> q: clamp((self.d - self.la) / self.lb, 0, 1);
+            // The way behind it, faintly lit: the line above the chip, the
+            // chip's edge as it is rounded, and the line below.
+            Rectangle {
+                x: pulse.lx;
+                y: pulse.top;
+                width: 1px;
+                height: min(pulse.d, pulse.la);
+                background: #ffffff70;
+            }
+            Rectangle {
+                x: chip.x;
+                y: chip.y;
+                width: chip.width;
+                height: chip.height;
+                border-radius: chip.border-radius;
+                border-width: 1px;
+                border-color: #ffffff.with-alpha(0.55 * pulse.q);
+            }
+            if pulse.d > pulse.la + pulse.lb: Rectangle {
+                x: pulse.lx;
+                y: pulse.cy1;
+                width: 1px;
+                height: pulse.d - pulse.la - pulse.lb;
+                background: #ffffff70;
+            }
+            // A comet each way: a soft glow at the head, then a tail of
+            // dots that shrink and fade behind it. Off the chip the two
+            // ways share one path, so only one is drawn there.
+            for side in 2: Rectangle {
+                // The tail: points packed closer than their own size, so they
+                // run together into one streak that thins and fades behind
+                // the head, round the chip's curve as well as down the line.
+                for k in 56: Rectangle {
+                    property <length> dist: pulse.d - k * 0.75px;
+                    property <float> fade: 1 - k / 56;
+                    property <length> size: 0.6px + 1.8px * self.fade;
+                    visible: self.dist > 0px && (side == 0 || (self.dist > pulse.la && self.dist < pulse.la + pulse.lb));
+                    x: pulse.at-x(self.dist, side == 1) - self.size / 2;
+                    y: pulse.at-y(self.dist, side == 1) - self.size / 2;
+                    width: self.size;
+                    height: self.size;
+                    border-radius: self.size / 2;
+                    background: #ffffff.with-alpha(0.55 * self.fade * self.fade);
+                }
+                // The head: a small bright point.
+                Rectangle {
+                    visible: side == 0 || (pulse.d > pulse.la && pulse.d < pulse.la + pulse.lb);
+                    x: pulse.at-x(pulse.d, side == 1) - 1.5px;
+                    y: pulse.at-y(pulse.d, side == 1) - 1.5px;
+                    width: 3px;
+                    height: 3px;
+                    border-radius: 1.5px;
+                    background: #ffffff;
+                }
             }
         }
     }
@@ -2652,6 +2843,9 @@ component ColumnTitle inherits Rectangle {
 
 component TrackColumns inherits Rectangle {
     in property <bool> show-art;
+    // A chart: the number column is wider, as in SongRow.
+    in property <bool> wide-number;
+    property <length> num-w: root.wide-number ? 46px : 28px;
     in property <bool> show-album;
     in property <bool> mixing;
     // Where the BPM and key columns start: before the album, or before the
@@ -2664,7 +2858,7 @@ component TrackColumns inherits Rectangle {
     height: 32px;
     ColumnTitle {
         x: 8px;
-        width: 28px;
+        width: root.num-w;
         height: parent.height;
         text: "#";
         centred: true;
@@ -2673,7 +2867,7 @@ component TrackColumns inherits Rectangle {
         clicked => { root.sort(0); }
     }
     ColumnTitle {
-        x: root.show-art ? 8px + 28px + 12px + 40px + 12px : 8px + 28px + 12px;
+        x: root.show-art ? 8px + root.num-w + 12px + 40px + 12px : 8px + root.num-w + 12px;
         width: 160px;
         height: parent.height;
         text: "Title";
@@ -3474,6 +3668,11 @@ export component AppWindow inherits Window {
     in property <bool> can-back;
     in property <int> nav: 0;
     in property <string> toast;
+    // The open page is a chart: its numbers carry up and down marks.
+    in property <bool> chart;
+    // A button on the toast, such as Update. Empty for none.
+    in property <string> toast-action;
+    callback toast-clicked();
     in property <bool> signed-in;
     in property <string> account-name;
     in property <image> account-art;
@@ -3540,6 +3739,40 @@ export component AppWindow inherits Window {
     // Eased out, so each starts quick and settles.
     property <float> name-out: 1 - (1 - root.name-out-raw) * (1 - root.name-out-raw);
     property <float> name-in: 1 - (1 - root.name-in-raw) * (1 - root.name-in-raw);
+    // The mix animation in Now playing, as Spotify has it: for a crossfade
+    // long enough to show it, the outgoing cover shrinks to the left while
+    // the next slides in from the right, both side by side through the mix,
+    // then the old one is pushed off and the new one grows to fill again.
+    property <bool> mix-anim: root.xfade-length >= 2s;
+    // Each move runs on a spring, as Apple's do: quick, a touch past the
+    // mark, then settled. The cover coming in trails the one going out a
+    // little, which makes the pair feel fluid rather than locked together.
+    // Unhurried, but shorter when the crossfade is, so both moves fit.
+    property <duration> mix-step: min(1400ms, (root.xfade-length - 2 * root.mix-lag) / 2.4);
+    property <duration> mix-lag: 140ms;
+    // The way out starts early enough that both have settled by the end.
+    property <duration> mix-leave-at: root.xfade-length - root.mix-step - root.mix-lag;
+    property <float> mix-out-e: root.mix-anim ? root.spring(root.xfade-elapsed / root.mix-step) : 1;
+    property <float> mix-in-e: root.mix-anim ? root.spring((root.xfade-elapsed - root.mix-lag) / root.mix-step) : 1;
+    property <float> mix-out-l: root.mix-anim ? root.spring((root.xfade-elapsed - root.mix-leave-at) / root.mix-step) : 1;
+    property <float> mix-in-l: root.mix-anim ? root.spring((root.xfade-elapsed - root.mix-leave-at - root.mix-lag) / root.mix-step) : 1;
+    // For the canvas giving way, which wants no bounce.
+    property <float> mix-enter: clamp(root.xfade-elapsed / 500ms, 0, 1);
+    // A soft spring from 0 to 1: one gentle swing about 4% past the mark,
+    // two thirds of the way through, easing back to land exactly at the end.
+    pure function spring(x: float) -> float {
+        if x <= 0 {
+            return 0;
+        }
+        if x >= 1 {
+            return 1;
+        }
+        return 1 - pow(2.718281828, -5 * x) * cos(270deg * x);
+    }
+    // Canvases rest during the mix, showing the still covers, and the new
+    // song's comes back once it is over.
+    property <float> mix-hide: root.mix-anim ? 1 : 0;
+    animate mix-hide { duration: 450ms; easing: ease-in-out; }
     public function begin-crossfade(seconds: float) {
         root.xfade-start = animation-tick();
         root.xfade-length = max(1ms, seconds * 1s);
@@ -3801,7 +4034,7 @@ export component AppWindow inherits Window {
     // A song in mix mode also has room under it for the transition chip.
     pure function row-height(kind: int, style: int, mix: string) -> length {
         return kind == 0 ? 56px
-            : kind == 1 ? (style == 1 ? 48px : 56px) + (style == 2 && mix != "" ? 22px * mix-level : 0px)
+            : kind == 1 ? (style == 1 ? 48px : 56px) + (style == 2 && mix != "" ? 34px * mix-level : 0px)
             : kind == 2 ? 236px
             : kind == 4 ? hero-height + 12px
             : kind == 5 ? 84px
@@ -3927,26 +4160,6 @@ export component AppWindow inherits Window {
             padding: 12px;
             spacing: 4px;
             alignment: start;
-            HorizontalLayout {
-                height: 52px;
-                padding-left: 6px;
-                spacing: 10px;
-                VerticalLayout {
-                    alignment: center;
-                    Image {
-                        width: 26px;
-                        height: 26px;
-                        source: @image-url("logo.svg");
-                    }
-                }
-                Text {
-                    text: "Tonearm";
-                    color: Theme.text;
-                    font-size: 20px;
-                    font-weight: 700;
-                    vertical-alignment: center;
-                }
-            }
             NavItem {
                 icon: Icons.home;
                 label: "Home";
@@ -3981,15 +4194,6 @@ export component AppWindow inherits Window {
                 clicked => {
                     root.np-expanded = false;
                     root.navigate(4);
-                }
-            }
-            NavItem {
-                icon: Icons.settings;
-                label: "Settings";
-                selected: root.nav == 3;
-                clicked => {
-                    root.settings-page = 0;
-                    root.navigate(3);
                 }
             }
         }
@@ -4103,6 +4307,7 @@ export component AppWindow inherits Window {
                                 x: 16px;
                                 width: parent.width - 32px;
                                 item: row.item;
+                                wide-number: root.chart;
                                 number: row.number;
                                 show-art: row.style != 1;
                                 show-album: row.style >= 2 && root.show-album && row.item.album != "";
@@ -4220,6 +4425,7 @@ export component AppWindow inherits Window {
                                 }
                             }
                             if row.kind == 6: TrackColumns {
+                                wide-number: root.chart;
                                 x: 16px;
                                 width: parent.width - 32px;
                                 show-art: row.style == 2;
@@ -4272,23 +4478,17 @@ export component AppWindow inherits Window {
                         height: 64px;
                         opacity: page-box.named ? 1 : 0;
                         animate opacity { duration: 180ms; easing: ease-out; }
-                        if root.header.can-play: Rectangle {
+                        // The same button as the page's own, mix mode look and all.
+                        if root.header.can-play: PlayDisc {
                             x: 16px;
                             y: 10px;
-                            width: 44px;
-                            height: 44px;
-                            border-radius: 22px;
-                            background: sticky-play.has-hover ? Theme.accent.brighter(0.1) : Theme.accent;
-                            Icon {
-                                text: Now.page != "" && Now.page == Now.from && Now.playing ? Icons.pause : Icons.play;
-                                fill: true;
-                                color: #08080a;
-                                font-size: 20px;
-                            }
-                            sticky-play := TouchArea {
-                                enabled: page-box.named;
-                                mouse-cursor: pointer;
-                                clicked => { root.play-page(false); }
+                            size: 44px;
+                            playing: Now.page != "" && Now.page == Now.from && Now.playing;
+                            mixed: root.header.mixing;
+                            clicked => {
+                                if page-box.named {
+                                    root.play-page(false);
+                                }
                             }
                         }
                         Text {
@@ -4313,6 +4513,7 @@ export component AppWindow inherits Window {
                         // A slightly lighter strip, as Spotify has it.
                         Rectangle { background: #ffffff0a; }
                         TrackColumns {
+                            wide-number: root.chart;
                             x: 16px;
                             y: 2px;
                             width: parent.width - 32px;
@@ -4335,6 +4536,10 @@ export component AppWindow inherits Window {
             }
 
             if root.nav == 3 && root.settings-page == 0: settings-flick := Flickable {
+                // Fills the panel. Left alone it takes the cards' cap as
+                // its own width and stops short, scroll bar and all.
+                max-width: 100000px;
+                horizontal-stretch: 1;
                 content-height: settings.preferred-height;
                 settings := VerticalLayout {
                     padding: 28px;
@@ -4361,7 +4566,7 @@ export component AppWindow inherits Window {
                         clicked => { root.settings-page = 1; }
                     }
                     Rectangle {
-                        max-width: 680px;
+                        max-width: 880px;
                         border-radius: 12px;
                         background: #ffffff0a;
                         HorizontalLayout {
@@ -4377,7 +4582,7 @@ export component AppWindow inherits Window {
                         }
                     }
                     Rectangle {
-                        max-width: 680px;
+                        max-width: 880px;
                         border-radius: 12px;
                         background: #ffffff0a;
                         HorizontalLayout {
@@ -4394,7 +4599,7 @@ export component AppWindow inherits Window {
                         }
                     }
                     Rectangle {
-                        max-width: 680px;
+                        max-width: 880px;
                         border-radius: 12px;
                         background: #ffffff0a;
                         HorizontalLayout {
@@ -4411,7 +4616,7 @@ export component AppWindow inherits Window {
                         }
                     }
                     Rectangle {
-                        max-width: 680px;
+                        max-width: 880px;
                         border-radius: 12px;
                         background: #ffffff0a;
                         HorizontalLayout {
@@ -4428,7 +4633,7 @@ export component AppWindow inherits Window {
                         }
                     }
                     Rectangle {
-                        max-width: 680px;
+                        max-width: 880px;
                         border-radius: 12px;
                         background: #ffffff0a;
                         HorizontalLayout {
@@ -4445,7 +4650,7 @@ export component AppWindow inherits Window {
                         }
                     }
                     Rectangle {
-                        max-width: 680px;
+                        max-width: 880px;
                         border-radius: 12px;
                         background: #ffffff0a;
                         HorizontalLayout {
@@ -4462,7 +4667,7 @@ export component AppWindow inherits Window {
                         }
                     }
                     Rectangle {
-                        max-width: 680px;
+                        max-width: 880px;
                         border-radius: 12px;
                         background: #ffffff0a;
                         VerticalLayout {
@@ -4488,7 +4693,7 @@ export component AppWindow inherits Window {
                         }
                     }
                     Rectangle {
-                        max-width: 680px;
+                        max-width: 880px;
                         border-radius: 12px;
                         background: #ffffff0a;
                         HorizontalLayout {
@@ -4643,7 +4848,7 @@ export component AppWindow inherits Window {
                             font-weight: 800;
                         }
                         HorizontalLayout {
-                            max-width: 680px;
+                            max-width: 880px;
                             spacing: 12px;
                             StatTile {
                                 value: root.profile-songs;
@@ -4675,7 +4880,7 @@ export component AppWindow inherits Window {
                             font-weight: 800;
                         }
                         VerticalLayout {
-                            max-width: 680px;
+                            max-width: 880px;
                             for name[i] in root.profile-artists: ArtistRank {
                                 rank: i + 1;
                                 name: name;
@@ -4751,6 +4956,10 @@ export component AppWindow inherits Window {
 
             // Settings sub page: the YouTube Music sign in.
             if root.nav == 3 && root.settings-page == 2: account-flick := Flickable {
+                // Fills the panel. Left alone it takes the cards' cap as
+                // its own width and stops short, scroll bar and all.
+                max-width: 100000px;
+                horizontal-stretch: 1;
                 content-height: account.preferred-height;
                 account := VerticalLayout {
                     padding: 28px;
@@ -4818,6 +5027,10 @@ export component AppWindow inherits Window {
 
             // Settings sub page: the services Tonearm can report to.
             if root.nav == 3 && root.settings-page == 1: connections-flick := Flickable {
+                // Fills the panel. Left alone it takes the cards' cap as
+                // its own width and stops short, scroll bar and all.
+                max-width: 100000px;
+                horizontal-stretch: 1;
                 content-height: connections.preferred-height;
                 connections := VerticalLayout {
                     padding: 28px;
@@ -5419,22 +5632,210 @@ export component AppWindow inherits Window {
                     ArtPending {
                         waiting: !root.track-has-art && root.motion-t <= 0;
                     }
-                    if root.track-has-art: Image {
+                    if root.track-has-art && !root.mix-anim: Image {
                         width: 100%;
                         height: 100%;
                         source: root.track-art;
                         image-fit: cover;
                     }
-                    if root.motion-t > 0: Image {
+                    if root.motion-t > 0 && root.mix-hide < 1: Image {
                         width: 100%;
                         height: 100%;
                         source: root.track-motion;
                         image-fit: cover;
-                        opacity: root.motion-t;
+                        opacity: root.motion-t * (1 - root.mix-hide);
+                    }
+                    // The mix animation: the two covers side by side.
+                    if root.mix-anim: mixbox := Rectangle {
+                        background: root.panel-color;
+                        // The small covers' size, the gap between them,
+                        // and where the pair sits: a little above the
+                        // middle, clear of the names at the bottom.
+                        property <length> c: min(self.width, self.height) * 0.42;
+                        property <length> g: 14px;
+                        property <length> cy: (self.height - self.c) * 0.4;
+                        property <length> lx: self.width / 2 - self.c - self.g / 2;
+                        property <length> rx: self.width / 2 + self.g / 2;
+                        property <float> oe: root.mix-out-e;
+                        property <float> ol: root.mix-out-l;
+                        property <float> ie: root.mix-in-e;
+                        property <float> il: root.mix-in-l;
+                        // The liquid hand-over, while the pair sits side by
+                        // side: light runs across the old cover, through a
+                        // glowing bridge, and on across the new one, over
+                        // and over, rippling out from where they meet.
+                        property <float> hold: clamp(min(self.oe, self.ie), 0, 1) * (1 - clamp(max(self.ol, self.il), 0, 1));
+                        // One wave, 2.8 s long, timed so that it passes
+                        // through the bridge (0.6 of the way) just as the
+                        // songs change over, halfway through the mix, with
+                        // the ripple.
+                        property <float> w: (root.xfade-elapsed - root.xfade-length / 2) / 2800ms + 0.6;
+                        // Where the wave is: across the old cover first,
+                        // through the bridge, across the new one last.
+                        // Outside 0 to 1 there is no wave.
+                        property <float> f: self.w < 0 || self.w > 1 ? -1 : self.w;
+                        property <float> bump: max(0, 1 - abs(self.f - 0.6) / 0.16);
+                        property <float> bump-e: self.bump * self.bump * (3 - 2 * self.bump);
+                        property <length> mid-y: self.cy + self.c / 2;
+                        // One ring rippling out from the join, once, as the
+                        // songs change over: halfway through the mix.
+                        property <float> rp: (root.xfade-elapsed - root.xfade-length / 2) / 1800ms;
+                        if mixbox.hold > 0.01 && mixbox.rp > 0 && mixbox.rp < 1: Rectangle {
+                            property <length> size: mixbox.c * (0.3 + 1.5 * mixbox.rp);
+                            x: mixbox.width / 2 - self.size / 2;
+                            y: mixbox.mid-y - self.size / 2;
+                            width: self.size;
+                            height: self.size;
+                            border-radius: self.size / 2;
+                            border-width: 1.5px;
+                            border-color: #ffffff.with-alpha(0.45 * (1 - mixbox.rp) * (1 - mixbox.rp) * mixbox.hold);
+                        }
+                        // The bridge: a bead of light at each cover's facing
+                        // edge and a neck between them that swells as a
+                        // wave passes, like a drop pulled between two.
+                        if mixbox.hold > 0.01: Rectangle {
+                            opacity: mixbox.hold;
+                            property <length> blob: mixbox.c * (0.26 + 0.14 * mixbox.bump-e);
+                            property <length> neck: mixbox.c * (0.07 + 0.03 * sin(mixbox.w * 360deg * 1.5) + 0.16 * mixbox.bump-e);
+                            Rectangle {
+                                x: mixbox.lx + mixbox.c - parent.blob / 2;
+                                y: mixbox.mid-y - parent.blob / 2;
+                                width: parent.blob;
+                                height: parent.blob;
+                                border-radius: parent.blob / 2;
+                                background: @radial-gradient(circle, #ffffffa0 0%, #ffffff40 45%, #ffffff00 100%);
+                            }
+                            Rectangle {
+                                x: mixbox.rx - parent.blob / 2;
+                                y: mixbox.mid-y - parent.blob / 2;
+                                width: parent.blob;
+                                height: parent.blob;
+                                border-radius: parent.blob / 2;
+                                background: @radial-gradient(circle, #ffffffa0 0%, #ffffff40 45%, #ffffff00 100%);
+                            }
+                            // A soft beam across the gap, fading at top and
+                            // bottom, so it reads as light, not a part.
+                            Rectangle {
+                                x: mixbox.lx + mixbox.c;
+                                y: mixbox.mid-y - parent.neck * 1.5;
+                                width: mixbox.g;
+                                height: parent.neck * 3;
+                                background: @linear-gradient(180deg, #ffffff00 0%, #ffffff.with-alpha(0.18 + 0.4 * mixbox.bump-e) 50%, #ffffff00 100%);
+                            }
+                            // Its bright thread, which thickens as a wave
+                            // goes through.
+                            Rectangle {
+                                x: mixbox.lx + mixbox.c;
+                                y: mixbox.mid-y - self.height / 2;
+                                width: mixbox.g;
+                                height: 1px + 3px * mixbox.bump-e;
+                                border-radius: self.height / 2;
+                                background: #ffffff.with-alpha(0.35 + 0.6 * mixbox.bump-e);
+                            }
+                            // A drop of light pulled across with each wave.
+                            if mixbox.f > 0.47 && mixbox.f < 0.73: Rectangle {
+                                property <float> u: (mixbox.f - 0.47) / 0.26;
+                                property <float> ue: self.u * self.u * (3 - 2 * self.u);
+                                // Stretched while it moves, round at rest.
+                                property <length> long: 7px + 9px * sin(self.u * 180deg);
+                                x: mixbox.lx + mixbox.c - 4px + (mixbox.g + 8px) * self.ue - self.long / 2;
+                                y: mixbox.mid-y - 3.5px;
+                                width: self.long;
+                                height: 7px;
+                                border-radius: 3.5px;
+                                background: #ffffff;
+                                opacity: sin(self.u * 180deg);
+                            }
+                        }
+                        // Going out: full size to the left slot, then off.
+                        Rectangle {
+                            drop-shadow-blur: 22px + 18px * mixbox.bump-e;
+                            drop-shadow-color: #ffffff.with-alpha(mixbox.hold * (0.10 + 0.22 * mixbox.bump-e));
+                            x: parent.lx * parent.oe + (-parent.c - 24px - parent.lx) * parent.ol;
+                            y: parent.cy * min(1, parent.oe);
+                            width: parent.width + (parent.c - parent.width) * parent.oe;
+                            height: parent.height + (parent.c - parent.height) * parent.oe;
+                            border-radius: 10px * min(1, parent.oe);
+                            clip: true;
+                            opacity: 1 - clamp(parent.ol, 0, 1);
+                            if root.fade-has-art: Image {
+                                width: 100%;
+                                height: 100%;
+                                source: root.fade-art;
+                                image-fit: cover;
+                            }
+                            // Its Canvas gives way to the still cover first.
+                            if root.fade-motion-on && root.mix-enter < 1: Image {
+                                width: 100%;
+                                height: 100%;
+                                source: root.fade-motion;
+                                image-fit: cover;
+                                opacity: 1 - root.mix-enter;
+                            }
+                            // Dims as the song hands over.
+                            Rectangle {
+                                background: #000000.with-alpha(0.35 * root.xfade * mixbox.hold);
+                            }
+                            // The wave crossing it, towards the new one.
+                            if mixbox.hold > 0.01 && mixbox.f >= 0 && mixbox.f < 0.55: Rectangle {
+                                property <float> s: clamp(mixbox.f / 0.55, 0, 1);
+                                width: parent.width * 0.7;
+                                x: -self.width + (parent.width + self.width) * self.s;
+                                opacity: mixbox.hold;
+                                background: @linear-gradient(90deg, #ffffff00 0%, #ffffff48 70%, #ffffff00 100%);
+                            }
+                            // Light gathering at the edge it hands over by.
+                            Rectangle {
+                                property <float> a: 0.45 * mixbox.hold * (0.25 + 0.75 * mixbox.bump-e);
+                                x: parent.width * 0.65;
+                                width: parent.width * 0.35;
+                                background: @linear-gradient(90deg, #ffffff.with-alpha(0) 0%, #ffffff.with-alpha(self.a) 100%);
+                            }
+                        }
+                        // Coming in: from the right to the right slot, then
+                        // to the middle and full size.
+                        Rectangle {
+                            x: (parent.width + 24px) + (parent.rx - parent.width - 24px) * parent.ie - parent.rx * parent.il;
+                            y: parent.cy - parent.cy * min(1, parent.il);
+                            // Never past full size, which would spill out
+                            // of the cover's place.
+                            width: parent.c + (parent.width - parent.c) * min(1, parent.il);
+                            height: parent.c + (parent.height - parent.c) * min(1, parent.il);
+                            border-radius: 10px * (1 - min(1, parent.il));
+                            clip: true;
+                            drop-shadow-blur: 22px + 18px * mixbox.bump-e;
+                            drop-shadow-color: #ffffff.with-alpha(mixbox.hold * (0.10 + 0.22 * mixbox.bump-e));
+                            if root.track-has-art: Image {
+                                width: 100%;
+                                height: 100%;
+                                source: root.track-art;
+                                image-fit: cover;
+                            }
+                            // Brightens as it takes over.
+                            Rectangle {
+                                background: #000000.with-alpha(0.35 * (1 - root.xfade) * mixbox.hold);
+                            }
+                            // The wave arriving from the bridge.
+                            if mixbox.hold > 0.01 && mixbox.f > 0.62: Rectangle {
+                                property <float> s: clamp((mixbox.f - 0.62) / 0.38, 0, 1);
+                                width: parent.width * 0.7;
+                                x: -self.width + (parent.width + self.width) * self.s;
+                                opacity: mixbox.hold;
+                                background: @linear-gradient(90deg, #ffffff00 0%, #ffffff48 30%, #ffffff00 100%);
+                            }
+                            // Light spilling in at the edge it meets the
+                            // other by, brightest as a wave crosses.
+                            Rectangle {
+                                property <float> a: 0.45 * mixbox.hold * (0.25 + 0.75 * mixbox.bump-e);
+                                x: 0;
+                                width: parent.width * 0.35;
+                                background: @linear-gradient(90deg, #ffffff.with-alpha(self.a) 0%, #ffffff.with-alpha(0) 100%);
+                            }
+                        }
                     }
                     // The song going out, fading off the new one's cover.
                     // Its Canvas keeps playing until it has gone.
-                    if root.xfade < 1: Rectangle {
+                    if root.xfade < 1 && !root.mix-anim: Rectangle {
                         opacity: 1 - root.xfade-eased;
                         if root.fade-has-art: Image {
                             width: 100%;
@@ -6459,19 +6860,49 @@ export component AppWindow inherits Window {
     if root.toast != "": Rectangle {
         x: (root.width - self.width) / 2;
         y: root.height - player-height - gap - self.height - 12px;
-        width: min(root.width - 48px, message.preferred-width + 40px);
+        property <length> button: root.toast-action != "" ? action-measure.preferred-width + 28px : 0px;
+        // Measures the button text, which sits inside an `if` out of reach.
+        action-measure := Text {
+            visible: false;
+            text: root.toast-action;
+            font-size: 13px;
+            font-weight: 700;
+        }
+        width: min(root.width - 48px, message.preferred-width + 40px + (self.button > 0 ? self.button + 8px - 14px : 0px));
         height: 40px;
         border-radius: 20px;
         background: #f0f0f3;
         message := Text {
+            x: 20px;
             text: root.toast;
             color: #08080a;
             font-size: 14px;
             font-weight: 500;
             vertical-alignment: center;
-            horizontal-alignment: center;
+            horizontal-alignment: parent.button > 0 ? left : center;
             overflow: elide;
-            width: parent.width - 24px;
+            width: parent.width - 40px - (parent.button > 0 ? parent.button + 8px - 14px : 0px);
+        }
+        if root.toast-action != "": Rectangle {
+            x: parent.width - self.width - 6px;
+            y: 6px;
+            width: parent.button;
+            height: 28px;
+            border-radius: 14px;
+            background: action-touch.pressed ? #2a2a30 : action-touch.has-hover ? #1c1c21 : #08080a;
+            animate background { duration: 120ms; }
+            Text {
+                text: root.toast-action;
+                color: #f5f5f7;
+                font-size: 13px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            action-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.toast-clicked(); }
+            }
         }
     }
 
@@ -6726,6 +7157,32 @@ export component AppWindow inherits Window {
             clicked => {
                 root.np-expanded = false;
                 root.open-profile();
+            }
+        }
+    }
+
+    // Settings, an icon beside the account, as the side menu no longer
+    // lists it.
+    Rectangle {
+        x: root.width - gap - 6px - 48px - 8px - self.width;
+        y: (top-bar - self.height) / 2;
+        width: 48px;
+        height: 48px;
+        border-radius: 24px;
+        background: settings-touch.has-hover ? #ffffff1c : transparent;
+        animate background { duration: 120ms; }
+        Icon {
+            text: Icons.settings;
+            fill: root.nav == 3;
+            color: root.nav == 3 || settings-touch.has-hover ? Theme.text : Theme.dim;
+            font-size: 22px;
+        }
+        settings-touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => {
+                root.np-expanded = false;
+                root.settings-page = 0;
+                root.navigate(3);
             }
         }
     }

@@ -1,0 +1,42 @@
+{
+ "playabilityStatus": {
+  "status": "OK"
+ },
+ "streamingData": {
+  "expiresInSeconds": "21540",
+  "adaptiveFormats": [
+   {
+    "itag": 139,
+    "url": "https://rr1---sn-placeholder.googlevideo.com/videoplayback?expire=1795024732&ei=EI_PLACEHOLDER&ip=0.0.0.0&id=ID_PLACEHOLDER&itag=139&source=youtube&requiressl=yes&xpc=EgVo2aDSNQ%3D%3D&cps=1167&met=1795003132%2C&mh=xx&mm=18%2C26&mn=sn-placeholder&ms=aub%2Conr&mv=m&mvi=2&pl=17&rms=aub%2Caub&pcm2=no&initcwndbps=2355250&bui=BUI_PLACEHOLDER&spc=SPC_PLACEHOLDER&vprv=1&svpuc=1&mime=audio%2Fmp4&rqh=1&gir=yes&clen=1300631&dur=213.159&lmt=1766955925459591&mt=1795002571&fvip=1&epbp=1&keepalive=yes&fexp=51565116&c=ANDROID_VR&txp=5532534&sparams=expire%2Cei%2Cip%2Cid%2Citag%2Csource%2Crequiressl%2Cxpc%2Cpcm2%2Cbui%2Cspc%2Cvprv%2Csvpuc%2Cmime%2Crqh%2Cgir%2Cclen%2Cdur%2Clmt&sig=SIG_PLACEHOLDER&lsparams=cps%2Cmet%2Cmh%2Cmm%2Cmn%2Cms%2Cmv%2Cmvi%2Cpl%2Crms%2Cinitcwndbps&lsig=LSIG_PLACEHOLDER",
+    "mimeType": "audio/mp4; codecs=\"mp4a.40.5\"",
+    "bitrate": 50152,
+    "contentLength": "1300631",
+    "approxDurationMs": "213159",
+    "audioQuality": "AUDIO_QUALITY_LOW"
+   },
+   {
+    "itag": 140,
+    "url": "https://rr1---sn-placeholder.googlevideo.com/videoplayback?expire=1795024732&ei=EI_PLACEHOLDER&ip=0.0.0.0&id=ID_PLACEHOLDER&itag=140&source=youtube&requiressl=yes&xpc=EgVo2aDSNQ%3D%3D&cps=1167&met=1795003132%2C&mh=xx&mm=18%2C26&mn=sn-placeholder&ms=aub%2Conr&mv=m&mvi=2&pl=17&rms=aub%2Caub&pcm2=no&initcwndbps=2355250&bui=BUI_PLACEHOLDER&spc=SPC_PLACEHOLDER&vprv=1&svpuc=1&mime=audio%2Fmp4&rqh=1&gir=yes&clen=3449447&dur=213.089&lmt=1766955925572207&mt=1795002571&fvip=1&epbp=1&keepalive=yes&fexp=51565116&c=ANDROID_VR&txp=5532534&sparams=expire%2Cei%2Cip%2Cid%2Citag%2Csource%2Crequiressl%2Cxpc%2Cpcm2%2Cbui%2Cspc%2Cvprv%2Csvpuc%2Cmime%2Crqh%2Cgir%2Cclen%2Cdur%2Clmt&sig=SIG_PLACEHOLDER&lsparams=cps%2Cmet%2Cmh%2Cmm%2Cmn%2Cms%2Cmv%2Cmvi%2Cpl%2Crms%2Cinitcwndbps&lsig=LSIG_PLACEHOLDER",
+    "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"",
+    "bitrate": 130677,
+    "contentLength": "3449447",
+    "approxDurationMs": "213089",
+    "audioQuality": "AUDIO_QUALITY_MEDIUM"
+   },
+   {
+    "itag": 251,
+    "url": "https://rr1---sn-placeholder.googlevideo.com/videoplayback?expire=1795024732&ei=EI_PLACEHOLDER&ip=0.0.0.0&id=ID_PLACEHOLDER&itag=251&source=youtube&requiressl=yes&xpc=EgVo2aDSNQ%3D%3D&cps=1167&met=1795003132%2C&mh=xx&mm=18%2C26&mn=sn-placeholder&ms=aub%2Conr&mv=m&mvi=2&pl=17&rms=aub%2Caub&pcm2=no&initcwndbps=2355250&bui=BUI_PLACEHOLDER&spc=SPC_PLACEHOLDER&vprv=1&svpuc=1&mime=audio%2Fwebm&rqh=1&gir=yes&clen=3433755&dur=213.061&lmt=1766955883819090&mt=1795002571&fvip=1&epbp=1&keepalive=yes&fexp=51565116&c=ANDROID_VR&txp=5532534&sparams=expire%2Cei%2Cip%2Cid%2Citag%2Csource%2Crequiressl%2Cxpc%2Cpcm2%2Cbui%2Cspc%2Cvprv%2Csvpuc%2Cmime%2Crqh%2Cgir%2Cclen%2Cdur%2Clmt&sig=SIG_PLACEHOLDER&lsparams=cps%2Cmet%2Cmh%2Cmm%2Cmn%2Cms%2Cmv%2Cmvi%2Cpl%2Crms%2Cinitcwndbps&lsig=LSIG_PLACEHOLDER",
+    "mimeType": "audio/webm; codecs=\"opus\"",
+    "bitrate": 136544,
+    "contentLength": "3433755",
+    "approxDurationMs": "213061",
+    "audioQuality": "AUDIO_QUALITY_MEDIUM"
+   }
+  ],
+  "serverAbrStreamingUrl": "https://example.invalid/sabr"
+ },
+ "videoDetails": {
+  "videoId": "dQw4w9WgXcQ",
+  "lengthSeconds": "213"
+ }
+}

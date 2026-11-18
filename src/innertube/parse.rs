@@ -181,6 +181,19 @@ fn is_explicit(r: &Value) -> bool {
     })
 }
 
+/// The up, down or level mark beside a chart song's rank.
+fn trend(r: &Value) -> Trend {
+    let icon = r
+        .pointer("/customIndexColumn/musicCustomIndexColumnRenderer/icon/iconType")
+        .and_then(Value::as_str);
+    match icon {
+        Some("ARROW_DROP_UP") => Trend::Up,
+        Some("ARROW_DROP_DOWN") => Trend::Down,
+        Some("ARROW_CHART_NEUTRAL") => Trend::Same,
+        _ => Trend::None,
+    }
+}
+
 fn list_item(r: &Value) -> Item {
     let columns: Vec<String> = r
         .get("flexColumns")
@@ -206,6 +219,7 @@ fn list_item(r: &Value) -> Item {
             .join(" • "),
         thumb: r.get("thumbnail").map(thumb).unwrap_or_default(),
         explicit: is_explicit(r),
+        trend: trend(r),
         ..Item::default()
     };
     if let Some(fixed) = r.get("fixedColumns").and_then(|f| find(f, "text")) {

@@ -499,11 +499,10 @@ impl App {
         (t <= track.right).then_some((t, (track.left, track.right)))
     }
 
-    /// The play button beside a transition chip: opens that transition in
-    /// the editor and plays its preview there, so the editor shows it
-    /// playing.
+    /// The play button beside a transition chip: plays that transition's
+    /// preview, without opening the editor.
     pub fn preview_row_mix(self: &Rc<Self>, id: usize) {
-        self.edit_mix(id);
+        // Plays it where it is. Only the chip opens the editor.
         self.preview_mix(id, None);
     }
 

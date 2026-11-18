@@ -3,8 +3,10 @@
 //! Blocking HTTP on worker threads. No async runtime, which keeps both the
 //! binary and the idle memory small.
 
+pub mod challenge;
 pub mod model;
 pub mod parse;
+pub mod player;
 
 use model::*;
 use serde_json::{json, Value};
@@ -46,6 +48,22 @@ fn cookie_value<'a>(cookie: &'a str, name: &str) -> Option<&'a str> {
         let (key, value) = pair.trim().split_once('=')?;
         (key == name).then_some(value)
     })
+}
+
+/// The `Authorization` header signed-in requests to music.youtube.com carry.
+pub(crate) fn sapisid_hash(sapisid: &str) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let digest = Sha1::digest(format!("{now} {sapisid} {ORIGIN}"));
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    format!("SAPISIDHASH {now}_{hex}")
+}
+
+/// The SAPISID a cookie header signs requests with, if it has one.
+pub(crate) fn sapisid(cookie: &str) -> Option<&str> {
+    cookie_value(cookie, "__Secure-3PAPISID").or_else(|| cookie_value(cookie, "SAPISID"))
 }
 
 /// Accepts what people paste: the raw value or a whole `Cookie: ...` line.
@@ -133,15 +151,9 @@ impl Client {
             .set("X-Origin", ORIGIN)
             .set("Accept-Language", "en");
         if let Some(auth) = self.auth.read().unwrap().as_ref() {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let digest = Sha1::digest(format!("{now} {} {ORIGIN}", auth.sapisid));
-            let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
             request = request
                 .set("Cookie", &auth.cookie)
-                .set("Authorization", &format!("SAPISIDHASH {now}_{hex}"))
+                .set("Authorization", &sapisid_hash(&auth.sapisid))
                 .set("X-Goog-AuthUser", "0");
         }
         match request.send_json(body) {
@@ -268,6 +280,12 @@ impl Client {
         let mut page = parse::page(&self.post("search", json!({"query": query, "params": params}))?);
         page.title = format!("Results for \u{201c}{query}\u{201d}");
         Ok(page)
+    }
+
+    /// Playlists made by YouTube Music itself, such as its charts.
+    pub fn search_featured(&self, query: &str) -> Result<Page, String> {
+        let params = "EgeKAQQoADgBagwQDhAKEAMQBBAJEAU=";
+        Ok(parse::page(&self.post("search", json!({"query": query, "params": params}))?))
     }
 
     /// The next page of search results. Search pages continue through the

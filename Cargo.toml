@@ -23,6 +23,8 @@ md5 = "0.7"
 # Already built for Slint's text. Draws blurred lyric lines.
 swash = "0.2"
 rusqlite = { version = "0.43.0", features = ["bundled"] }
+# Runs YouTube's player script to solve stream link challenges.
+rquickjs = { version = "0.14", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 souvlaki = { version = "0.8", default-features = false }
