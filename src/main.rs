@@ -606,6 +606,21 @@ fn credits(item: &Item) -> (String, f32) {
     (artist, seconds)
 }
 
+/// The first credited artist, for scrobbling. YouTube's links name each
+/// artist on its own, so a duo like "Simon & Garfunkel" stays whole. With
+/// no links, the credit line is cut at the first ", " or " & ".
+fn lead_artist(item: &Item, artist: &str) -> String {
+    if let Some((name, _)) = item.artists.iter().find(|(name, _)| !name.trim().is_empty()) {
+        return name.trim().to_string();
+    }
+    let cut = [", ", " & "]
+        .iter()
+        .filter_map(|sep| artist.find(sep))
+        .min()
+        .unwrap_or(artist.len());
+    artist[..cut].trim().to_string()
+}
+
 /// As `credits`, with the album in the middle. The album is empty when the
 /// subtitle has none, as for videos, which show a view count there.
 fn credits_with_album(item: &Item) -> (String, String, f32) {
@@ -3927,8 +3942,10 @@ impl App {
                 self.remember(item, 0.25);
                 let (artist, album, seconds) = credits_with_album(item);
                 let seconds = if duration > 0.0 { duration } else { seconds };
+                let lead_artist = lead_artist(item, &artist);
                 self.services.send(Event::Started(services::Track {
                     title: item.title.clone(),
+                    lead_artist,
                     artist,
                     album,
                     seconds,
@@ -5195,6 +5212,28 @@ translate: Cell::new(load_translate()),
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrobbles_name_only_the_first_artist() {
+        let linked = Item {
+            artists: vec![
+                ("Shakira".into(), Some("UC1".into())),
+                ("Burna Boy".into(), Some("UC2".into())),
+            ],
+            ..Item::default()
+        };
+        assert_eq!(lead_artist(&linked, "Shakira & Burna Boy"), "Shakira");
+        // A duo is one linked artist, so it stays whole.
+        let duo = Item {
+            artists: vec![("Simon & Garfunkel".into(), Some("UC3".into()))],
+            ..Item::default()
+        };
+        assert_eq!(lead_artist(&duo, "Simon & Garfunkel"), "Simon & Garfunkel");
+        // No links: cut at the first separator.
+        let plain = Item::default();
+        assert_eq!(lead_artist(&plain, "HUNTR/X, EJAE & REI AMI"), "HUNTR/X");
+        assert_eq!(lead_artist(&plain, "Alex Warren"), "Alex Warren");
+    }
 
     #[test]
     fn the_playing_song_keeps_its_place_through_moves() {

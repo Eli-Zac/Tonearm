@@ -128,6 +128,8 @@ impl Settings {
 pub struct Track {
     pub title: String,
     pub artist: String,
+    /// The first credited artist, the one Last.fm is told of.
+    pub lead_artist: String,
     /// Empty when YouTube Music did not name one.
     pub album: String,
     pub seconds: f32,
@@ -151,6 +153,8 @@ pub enum Event {
 struct Meta {
     title: String,
     artist: String,
+    /// The first credited artist, which is what gets scrobbled.
+    lead: String,
     album: String,
     seconds: f32,
     art: String,
@@ -228,6 +232,7 @@ impl Worker {
             Event::Started(track) => {
                 let meta = self.spotify(&track).unwrap_or(Meta {
                     title: track.title,
+                    lead: if track.lead_artist.is_empty() { track.artist.clone() } else { track.lead_artist },
                     artist: track.artist,
                     album: track.album,
                     seconds: track.seconds,
@@ -328,7 +333,7 @@ impl Worker {
             ("method", method.to_string()),
             ("api_key", key.to_string()),
             ("sk", s.lastfm_session.clone()),
-            ("artist", meta.artist.clone()),
+            ("artist", meta.lead.clone()),
             ("track", meta.title.clone()),
         ];
         if !meta.album.is_empty() {
@@ -482,14 +487,12 @@ fn pick(items: &[Value], track: &Track) -> Option<Meta> {
             .and_then(|a| a.get("images")?.as_array()?.first()?.get("url")?.as_str())
             .unwrap_or(&track.art)
             .to_string();
+        // Spotify itself scrobbles the first credited artist.
+        let first = artists.first().copied().unwrap_or(&track.artist).to_string();
         let meta = Meta {
             title: title.to_string(),
-            // Spotify itself scrobbles the first credited artist.
-            artist: artists
-                .first()
-                .copied()
-                .unwrap_or(&track.artist)
-                .to_string(),
+            lead: first.clone(),
+            artist: first,
             album: album
                 .and_then(|a| a.get("name")?.as_str())
                 .unwrap_or("")
@@ -687,9 +690,12 @@ mod tests {
             album: String::new(),
             seconds: 369.0,
             art: String::new(),
+            ..Track::default()
         };
         let meta = pick(&items, &track).unwrap();
         assert_eq!(meta.artist, "Daft Punk");
+        // Only the first of Daft Punk and Pharrell Williams is scrobbled.
+        assert_eq!(meta.lead, "Daft Punk");
         assert_eq!(meta.album, "Random Access Memories");
         assert_eq!(
             meta.title,
