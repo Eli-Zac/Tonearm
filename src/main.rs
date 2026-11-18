@@ -33,6 +33,7 @@ mod services;
 mod session;
 mod store;
 mod update;
+mod wheel;
 
 slint::include_modules!();
 
@@ -4732,6 +4733,7 @@ fn main() -> Result<(), slint::PlatformError> {
 
     update::clean_up();
     let ui = AppWindow::new()?;
+    wheel::install(&ui);
     ui.set_app_version(update::VERSION.trim_start_matches('v').into());
     let client = Arc::new(Client::new());
     let session = store::load("session");
