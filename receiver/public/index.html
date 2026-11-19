@@ -202,32 +202,36 @@
 
   // The stream is live, so seeking it means nothing: what a phone or the
   // Google Home app offers is pause, volume, and the next or last song.
-  const Command = cast.framework.messages.Command;
-  const COMMANDS = Command.PAUSE | Command.STREAM_VOLUME | Command.STREAM_MUTE |
-    Command.QUEUE_NEXT | Command.QUEUE_PREV;
-  player.setSupportedMediaCommands(COMMANDS, false);
-  player.setMessageInterceptor(cast.framework.messages.MessageType.MEDIA_STATUS, (status) => {
-    status.supportedMediaCommands = COMMANDS;
-    return status;
-  });
+  try {
+    const Command = cast.framework.messages.Command;
+    const COMMANDS = Command.PAUSE | Command.STREAM_VOLUME | Command.STREAM_MUTE |
+      Command.QUEUE_NEXT | Command.QUEUE_PREV;
+    player.setSupportedMediaCommands(COMMANDS, false);
+    player.setMessageInterceptor(cast.framework.messages.MessageType.MEDIA_STATUS, (status) => {
+      status.supportedMediaCommands = COMMANDS;
+      return status;
+    });
 
-  // Next and previous are Tonearm's to do. Pass them on to it.
-  function skip(forward) {
-    context.sendCustomMessage(NAMESPACE, undefined, { type: forward ? 'NEXT' : 'PREVIOUS' });
-  }
-  player.setMessageInterceptor(cast.framework.messages.MessageType.QUEUE_UPDATE, (request) => {
-    if (request.jump) skip(request.jump > 0);
-    return null;
-  });
-  for (const type of ['QUEUE_NEXT', 'QUEUE_PREV']) {
-    if (cast.framework.messages.MessageType[type]) {
-      player.setMessageInterceptor(cast.framework.messages.MessageType[type], () => {
-        skip(type === 'QUEUE_NEXT');
-        return null;
-      });
+    // Next and previous are Tonearm's to do. Pass them on to it.
+    function skip(forward) {
+      context.sendCustomMessage(NAMESPACE, undefined, { type: forward ? 'NEXT' : 'PREVIOUS' });
     }
+    player.setMessageInterceptor(cast.framework.messages.MessageType.QUEUE_UPDATE, (request) => {
+      if (request.jump) skip(request.jump > 0);
+      return null;
+    });
+    for (const type of ['QUEUE_NEXT', 'QUEUE_PREV']) {
+      if (cast.framework.messages.MessageType[type]) {
+        player.setMessageInterceptor(cast.framework.messages.MessageType[type], () => {
+          skip(type === 'QUEUE_NEXT');
+          return null;
+        });
+      }
+    }
+    player.setMessageInterceptor(cast.framework.messages.MessageType.SEEK, () => null);
+  } catch (e) {
+    console.error('tonearm: media commands', e);
   }
-  player.setMessageInterceptor(cast.framework.messages.MessageType.SEEK, () => null);
 
   context.addCustomMessageListener(NAMESPACE, (event) => {
     const data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;

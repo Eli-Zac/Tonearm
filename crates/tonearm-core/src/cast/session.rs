@@ -38,6 +38,9 @@ const PING_EVERY: Duration = Duration::from_secs(5);
 const SILENT: Duration = Duration::from_secs(20);
 /// How often to ask how far the device has played.
 const STATUS_EVERY: Duration = Duration::from_secs(1);
+/// How long a device has to take up a volume change before the cast
+/// sets the stream's volume instead.
+const VOLUME_IGNORED: Duration = Duration::from_millis(1500);
 /// A device that has not fetched the stream this long after being told
 /// the link never will: something between is turning it away.
 const UNREACHED: Duration = Duration::from_secs(12);
@@ -85,9 +88,50 @@ fn app_for(device: &Device) -> &'static str {
     }
 }
 
+/// A line of synced lyrics, for a receiver with a screen.
+#[derive(Clone, Debug, Default)]
+pub struct LyricLine {
+    /// Milliseconds into the song.
+    pub start: u32,
+    pub end: u32,
+    pub text: String,
+    /// Backing vocals sung with it.
+    pub background: String,
+    /// The translation on show under it, if any.
+    pub translation: String,
+}
+
+/// Cast messages stop at 64 KB. Lyrics larger than this lose their
+/// translations, then their backing vocals, then don't go at all.
+const LYRICS_MAX: usize = 56 * 1024;
+
+/// The message that gives the receiver a song's lyrics.
+fn lyrics_message(id: &str, lines: &[LyricLine]) -> Option<Value> {
+    for (translations, backing) in [(true, true), (false, true), (false, false)] {
+        let lines: Vec<Value> = lines
+            .iter()
+            .map(|l| {
+                json!({
+                    "start": l.start,
+                    "end": l.end,
+                    "text": l.text,
+                    "background": if backing { l.background.as_str() } else { "" },
+                    "translation": if translations { l.translation.as_str() } else { "" },
+                })
+            })
+            .collect();
+        let message = json!({"type": "LYRICS", "id": id, "lines": lines});
+        if message.to_string().len() <= LYRICS_MAX {
+            return Some(message);
+        }
+    }
+    None
+}
+
 enum Command {
     Volume(f32),
     Now(NowPlaying),
+    Lyrics(Value),
     Stop,
 }
 
@@ -143,6 +187,17 @@ impl Session {
 
     pub fn volume(&self, level: f32) {
         let _ = self.tx.send(Command::Volume(level));
+    }
+
+    /// A song's synced lyrics, by the id its `NowPlaying` has. The receiver
+    /// keeps them for when that song shows. Send them again after a cast
+    /// starts playing: ones sent while it was starting can be lost.
+    pub fn lyrics(&self, id: &str, lines: &[LyricLine]) {
+        if self.shows_songs() {
+            if let Some(message) = lyrics_message(id, lines) {
+                let _ = self.tx.send(Command::Lyrics(message));
+            }
+        }
     }
 
     /// Whether the device shows the song playing, so wants `now_playing`.
@@ -271,6 +326,11 @@ impl Cast {
         let mut told_paused = false;
         let mut wanted_volume: Option<f32> = None;
         let mut volume_sent = Instant::now() - Duration::from_secs(1);
+        // Some devices, LG TVs among them, say their volume can be set and
+        // then ignore it. A level the device hasn't taken up by this long
+        // after it was sent moves the cast to the stream's own volume.
+        let mut volume_check: Option<(f32, Instant)> = None;
+        let mut stream_volume = false;
         let mut heard = Instant::now();
         let mut pinged = Instant::now();
         let mut asked = Instant::now();
@@ -295,6 +355,7 @@ impl Cast {
                 }
                 Ok(Command::Volume(level)) => wanted_volume = Some(level.clamp(0.0, 1.0)),
                 Ok(Command::Now(now)) => screen.update(now, self.pipe.lead()),
+                Ok(Command::Lyrics(message)) => channel.send(&transport, TONEARM, &message)?,
                 Err(TryRecvError::Empty) => {}
             }
             if let Some(now) = screen.due() {
@@ -303,6 +364,7 @@ impl Cast {
                     TONEARM,
                     &json!({
                         "type": "NOW",
+                        "id": now.id,
                         "title": now.title,
                         "artist": now.artist,
                         "album": now.album,
@@ -315,13 +377,27 @@ impl Cast {
             }
             // A slider dragged sends a stream of levels. The device gets
             // one every tenth of a second.
+            if volume_check.is_some_and(|(_, at)| at.elapsed() > VOLUME_IGNORED) {
+                let (level, _) = volume_check.take().unwrap();
+                eprintln!("cast: {name} ignored a volume change, using the stream's volume");
+                stream_volume = true;
+                wanted_volume = Some(level);
+            }
             if let Some(level) = wanted_volume {
                 if volume_sent.elapsed() >= Duration::from_millis(100) {
                     let id = self.next_request();
-                    channel.send(PLATFORM, RECEIVER, &json!({"type": "SET_VOLUME", "volume": {"level": level}, "requestId": id}))?;
-                    volume = Some(level);
-                    wanted_volume = None;
-                    volume_sent = Instant::now();
+                    if !stream_volume {
+                        channel.send(PLATFORM, RECEIVER, &json!({"type": "SET_VOLUME", "volume": {"level": level}, "requestId": id}))?;
+                        volume_check.get_or_insert((level, Instant::now())).0 = level;
+                        volume = Some(level);
+                        wanted_volume = None;
+                        volume_sent = Instant::now();
+                    } else if let Some(media) = media {
+                        channel.send(&transport, MEDIA, &json!({"type": "SET_VOLUME", "mediaSessionId": media, "volume": {"level": level}, "requestId": id}))?;
+                        volume = Some(level);
+                        wanted_volume = None;
+                        volume_sent = Instant::now();
+                    }
                 }
             }
             if let Some(media) = media {
@@ -358,11 +434,14 @@ impl Cast {
                     if our_app(p, self.app).is_none_or(|(_, s)| s != session) {
                         return Err(format!("{name} is playing something else now"));
                     }
-                    if let Some(level) = p["status"]["volume"]["level"].as_f64() {
+                    if let Some(level) = p["status"]["volume"]["level"].as_f64().filter(|_| !stream_volume) {
                         let level = level as f32;
+                        if volume_check.is_some_and(|(want, _)| (want - level).abs() < 0.02) {
+                            volume_check = None;
+                        }
                         // Ours coming back changes nothing. Anyone else's
                         // moves the slider.
-                        if wanted_volume.is_none() && volume.is_none_or(|v| (v - level).abs() > 0.01) {
+                        if wanted_volume.is_none() && volume_check.is_none() && volume.is_none_or(|v| (v - level).abs() > 0.01) {
                             volume = Some(level);
                             (self.events)(Event::Volume(level));
                         }
@@ -378,6 +457,14 @@ impl Cast {
                     };
                     if let Some(id) = status["mediaSessionId"].as_u64() {
                         media = Some(id);
+                    }
+                    // With the stream's volume in use, a phone's slider moves ours.
+                    if let Some(level) = status["volume"]["level"].as_f64().filter(|_| stream_volume) {
+                        let level = level as f32;
+                        if wanted_volume.is_none() && volume.is_none_or(|v| (v - level).abs() > 0.01) {
+                            volume = Some(level);
+                            (self.events)(Event::Volume(level));
+                        }
                     }
                     let state = status["playerState"].as_str().unwrap_or("");
                     if let Some(seconds) = status["currentTime"].as_f64() {

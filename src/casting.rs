@@ -26,6 +26,14 @@ pub struct Casting {
     local_volume: Option<f32>,
     /// Counts casts, so word from one that has ended is ignored.
     generation: u64,
+    /// The lyrics the device has, as `lyrics_key` names them.
+    lyrics_sent: Option<String>,
+}
+
+/// Names a song's lyrics as found, so they go again once translated.
+fn lyrics_key(id: &str, found: &crate::lyrics::Lyrics) -> String {
+    let translated = found.lines.iter().filter(|l| !l.translation.is_empty()).count();
+    format!("{id}/{}/{translated}", found.lines.len())
 }
 
 /// What this computer is called on the network, for the device to show.
@@ -127,7 +135,11 @@ impl App {
         }
         match event {
             cast::Event::Playing => {
-                self.casting.borrow_mut().connecting = false;
+                let mut casting = self.casting.borrow_mut();
+                casting.connecting = false;
+                // Lyrics sent while the device was starting may be lost.
+                casting.lyrics_sent = None;
+                drop(casting);
                 self.show_cast_devices();
             }
             // The slider follows the device. Setting it here sends nothing
@@ -191,7 +203,8 @@ impl App {
     /// receiver to show. `seconds` is where the playhead shows, which
     /// follows what the device plays.
     pub(crate) fn cast_now_playing(&self, seconds: f32, duration: f32, playing: bool) {
-        let casting = self.casting.borrow();
+        let mut casting = self.casting.borrow_mut();
+        let casting = &mut *casting;
         let Some(session) = casting.session.as_ref().filter(|s| s.shows_songs()) else {
             return;
         };
@@ -209,8 +222,30 @@ impl App {
         } else {
             crate::images::sized(&item.thumb, 720)
         };
+        let id = item.video_id.clone().unwrap_or_else(|| item.title.clone());
+        // The song's synced lyrics, once they're found.
+        let lyrics = self.lyrics.borrow();
+        if let Some(found) = lyrics.found.as_ref().filter(|f| f.synced && lyrics.generation == player.generation) {
+            let key = lyrics_key(&id, found);
+            if casting.lyrics_sent.as_deref() != Some(key.as_str()) {
+                let lines: Vec<cast::LyricLine> = found
+                    .lines
+                    .iter()
+                    .map(|l| cast::LyricLine {
+                        start: l.start,
+                        end: l.end,
+                        text: l.text.clone(),
+                        background: l.background_text.clone(),
+                        translation: l.translation.clone(),
+                    })
+                    .collect();
+                session.lyrics(&id, &lines);
+                casting.lyrics_sent = Some(key);
+            }
+        }
+        drop(lyrics);
         session.now_playing(cast::NowPlaying {
-            id: item.video_id.clone().unwrap_or_else(|| item.title.clone()),
+            id,
             title: item.title.clone(),
             artist,
             album: item.album.as_ref().map(|(name, _)| name.clone()).unwrap_or_default(),
