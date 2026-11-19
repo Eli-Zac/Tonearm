@@ -5,8 +5,36 @@
 //! The file is encrypted with your Windows account, like the history.
 
 use crate::innertube::model::Item;
-use crate::Repeat;
 use serde_json::{json, Value};
+
+/// The repeat button: off, the whole queue, or the one song.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Repeat {
+    #[default]
+    Off,
+    All,
+    One,
+}
+
+impl Repeat {
+    pub fn next(self) -> Repeat {
+        match self {
+            Repeat::Off => Repeat::All,
+            Repeat::All => Repeat::One,
+            Repeat::One => Repeat::Off,
+        }
+    }
+    pub fn number(self) -> i32 {
+        self as i32
+    }
+    pub fn from_number(n: i64) -> Repeat {
+        match n {
+            1 => Repeat::All,
+            2 => Repeat::One,
+            _ => Repeat::Off,
+        }
+    }
+}
 
 /// Not "session": that name holds the sign in cookie.
 const FILE: &str = "playback";

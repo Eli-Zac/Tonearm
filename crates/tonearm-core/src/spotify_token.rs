@@ -32,7 +32,7 @@ pub fn forget_token() {
 /// a web player token.
 static SEARCH_TOKEN: Mutex<Option<(String, Instant)>> = Mutex::new(None);
 
-pub(crate) fn search_token(http: &ureq::Agent, id: &str, secret: &str) -> Result<String, String> {
+pub fn search_token(http: &ureq::Agent, id: &str, secret: &str) -> Result<String, String> {
     if let Some((token, until)) = SEARCH_TOKEN.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
         if Instant::now() < *until {
             return Ok(token.clone());
@@ -58,7 +58,7 @@ pub(crate) fn search_token(http: &ureq::Agent, id: &str, secret: &str) -> Result
 }
 
 /// A web player token for the signed in account, from the `sp_dc` cookie.
-pub(crate) fn web_token(http: &ureq::Agent, cookie: &str) -> Result<String, String> {
+pub fn web_token(http: &ureq::Agent, cookie: &str) -> Result<String, String> {
     if let Some((token, until)) = TOKEN.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
         if Instant::now() < *until {
             return Ok(token.clone());

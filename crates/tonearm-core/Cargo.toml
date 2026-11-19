@@ -1,0 +1,27 @@
+[package]
+name = "tonearm-core"
+version = "0.9.0"
+edition = "2021"
+description = "Tonearm without the window: YouTube Music, playback, mixing, downloads, sync and casting."
+license = "GPL-3.0-only"
+repository = "https://github.com/Eli-Zac/tonearm"
+publish = false
+
+[dependencies]
+ureq = { version = "2.12", default-features = false, features = ["json", "gzip", "native-tls", "proxy-from-env"] }
+native-tls = "0.2"
+serde_json = "1"
+sha1 = "0.10"
+sha2 = "0.10"
+rodio = { version = "0.20", default-features = false, features = ["symphonia-aac", "symphonia-isomp4"] }
+symphonia = { version = "0.5", default-features = false, features = ["aac", "isomp4"] }
+dirs = "6"
+roxmltree = "0.20"
+md5 = "0.7"
+rusqlite = { version = "0.43.0", features = ["bundled"] }
+# Runs YouTube's player script to solve stream link challenges.
+rquickjs = { version = "0.14", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Security", "Win32_Security_Cryptography", "Win32_Foundation", "Win32_System_Threading"] }
+windows = { version = "0.58", features = ["Win32_NetworkManagement_Dns", "Win32_Foundation"] }

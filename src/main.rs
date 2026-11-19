@@ -1,31 +1,16 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-mod analysis;
-mod animated_art;
-mod audio;
 mod blur;
 mod canvas;
-mod cast;
 mod casting;
-mod decode;
 mod detail;
 mod downloading;
-mod hook;
-mod quick_access;
-mod history;
-mod home;
 mod images;
-mod innertube;
-mod library;
-mod lyrics;
 #[cfg(windows)]
 mod media_keys;
 mod menu;
-mod mix;
 mod mixing;
 mod recommend;
-mod releases;
-mod transition;
 #[cfg(windows)]
 mod shell;
 #[cfg(windows)]
@@ -33,18 +18,14 @@ mod single;
 #[cfg(windows)]
 mod taskbar;
 mod motion;
-mod offline;
-mod pool;
-mod resolver;
-mod services;
-mod spotify;
-mod spotify_token;
-mod session;
-mod store;
-mod sync;
-mod syncing;
 mod update;
 mod wheel;
+
+use tonearm_core::{
+    analysis, animated_art, audio, cast, decode, history, home, innertube, library, lyrics, mix,
+    offline, pool, quick_access, releases, resolver, services, session, spotify, spotify_token,
+    store, syncing, transition,
+};
 
 slint::include_modules!();
 
@@ -254,34 +235,7 @@ struct Player {
     suggested: HashSet<String>,
 }
 
-/// The repeat button: off, the whole queue, or the one song.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Repeat {
-    #[default]
-    Off,
-    All,
-    One,
-}
-
-impl Repeat {
-    fn next(self) -> Repeat {
-        match self {
-            Repeat::Off => Repeat::All,
-            Repeat::All => Repeat::One,
-            Repeat::One => Repeat::Off,
-        }
-    }
-    pub fn number(self) -> i32 {
-        self as i32
-    }
-    pub fn from_number(n: i64) -> Repeat {
-        match n {
-            1 => Repeat::All,
-            2 => Repeat::One,
-            _ => Repeat::Off,
-        }
-    }
-}
+pub use session::Repeat;
 
 /// The song at queue position `index` first, the rest shuffled after it.
 fn shuffled_from(mut items: Vec<Item>, index: usize) -> Vec<Item> {

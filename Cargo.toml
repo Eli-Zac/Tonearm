@@ -7,7 +7,11 @@ license = "GPL-3.0-only"
 repository = "https://github.com/Eli-Zac/tonearm"
 publish = false
 
+[workspace]
+members = ["crates/tonearm-core"]
+
 [dependencies]
+tonearm-core = { path = "crates/tonearm-core" }
 slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-skia", "raw-window-handle-06", "unstable-winit-030"] }
 ureq = { version = "2.12", default-features = false, features = ["json", "gzip", "native-tls", "proxy-from-env"] }
 native-tls = "0.2"

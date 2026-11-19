@@ -4907,10 +4907,31 @@ dependencies = [
  "souvlaki",
  "swash",
  "symphonia",
+ "tonearm-core",
  "ureq",
  "windows 0.58.0",
  "windows-sys 0.59.0",
  "winresource",
+]
+
+[[package]]
+name = "tonearm-core"
+version = "0.9.0"
+dependencies = [
+ "dirs",
+ "md5",
+ "native-tls",
+ "rodio",
+ "roxmltree 0.20.0",
+ "rquickjs",
+ "rusqlite",
+ "serde_json",
+ "sha1",
+ "sha2",
+ "symphonia",
+ "ureq",
+ "windows 0.58.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

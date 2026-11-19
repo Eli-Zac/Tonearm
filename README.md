@@ -92,7 +92,7 @@ releases into `%LOCALAPPDATA%\tonearm`, checks it against GitHub's SHA-256
 digest, and lets it update itself once per start. Some YouTube formats need
 a JavaScript runtime, so yt-dlp uses Deno, Node or Bun if one is installed.
 
-The resolver lives behind one trait in `src/resolver.rs`. Set
+The resolver lives behind one trait in `crates/tonearm-core/src/resolver.rs`. Set
 `TONEARM_TEST_STREAM` to any M4A URL to test the audio path without it.
 
 ## Casting
@@ -198,22 +198,29 @@ secrets.
 
 ## Layout
 
+Tonearm is two crates. `crates/tonearm-core` is everything that is not the
+window, so another app (an Android one, say) can share it. The desktop app
+at the top draws it.
+
 | Path | What it holds |
 | --- | --- |
 | `ui/app.slint` | The whole interface |
 | `src/main.rs` | App state and wiring |
-| `src/innertube/` | YouTube Music API client and parsers |
-| `src/audio.rs`, `src/decode.rs` | Streaming download, decode and output |
-| `src/resolver.rs` | Turns a song into an audio stream, with yt-dlp |
-| `src/lyrics.rs`, `src/blur.rs` | Lyric services, and lyric lines drawn out of focus |
-| `src/services.rs` | Discord, Last.fm and Spotify |
+| `src/blur.rs`, `src/images.rs` | Lyric lines drawn out of focus, and covers |
 | `src/canvas.rs`, `src/motion.rs` | Spotify Canvas clips and animated covers |
-| `src/offline.rs` | Offline songs and the song cache |
-| `src/cast/`, `src/casting.rs` | Finding Cast devices, streaming to them, and the cast menu |
-| `src/history.rs`, `src/session.rs` | Listening history, and where you left off |
+| `src/casting.rs`, `src/downloading.rs` | The Devices panel, and download toasts and storage |
 | `src/media_keys.rs`, `src/taskbar.rs`, `src/shell.rs` | Media keys, taskbar buttons, tray and Start menu shortcut |
 | `src/update.rs` | In-app updates |
-| `src/store.rs` | Encrypted storage for settings and secrets |
+| `crates/tonearm-core/src/innertube/` | YouTube Music API client and parsers |
+| `crates/tonearm-core/src/audio.rs`, `decode.rs` | Streaming download, decode and output |
+| `crates/tonearm-core/src/mix.rs`, `transition.rs`, `analysis.rs` | Mixes, and the tempo and key analyzer |
+| `crates/tonearm-core/src/resolver.rs` | Turns a song into an audio stream, with yt-dlp |
+| `crates/tonearm-core/src/lyrics.rs` | Lyric services |
+| `crates/tonearm-core/src/services.rs`, `spotify.rs`, `syncing.rs` | Discord, Last.fm, Spotify and playlist sync |
+| `crates/tonearm-core/src/offline.rs` | Offline songs and the song cache |
+| `crates/tonearm-core/src/cast/` | Finding Cast devices and streaming to them |
+| `crates/tonearm-core/src/history.rs`, `session.rs` | Listening history, and where you left off |
+| `crates/tonearm-core/src/store.rs` | Encrypted storage for settings and secrets |
 | `installer/tonearm.nsi` | The NSIS installer |
 
 ## Contributing
