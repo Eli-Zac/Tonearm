@@ -189,12 +189,16 @@ impl Cast {
         let mut channel = Channel::connect(self.device.addr).map_err(|e| format!("Couldn't connect to {name}: {e}"))?;
         let server = Server::start(channel.local_ip, self.pipe.clone())?;
         channel.send(PLATFORM, CONNECTION, &json!({"type": "CONNECT"}))?;
-        let launch = self.next_request();
+        let mut launch = self.next_request();
         channel.send(PLATFORM, RECEIVER, &json!({"type": "LAUNCH", "appId": self.app, "requestId": launch}))?;
 
         // Wait for the receiver app to come up and say where to reach it.
+        // Only once the device has answered our launch: until then a status
+        // can still name the session of an earlier cast, which the launch
+        // is about to replace.
         let started = Instant::now();
         let mut volume: Option<f32> = None;
+        let mut answered = false;
         let (transport, session) = loop {
             if started.elapsed() > Duration::from_secs(20) {
                 return Err(format!("{name} didn't start the player"));
@@ -205,6 +209,9 @@ impl Cast {
             let Some(message) = channel.poll()? else { continue };
             self.ping_back(&mut channel, &message)?;
             let p = &message.payload;
+            if std::env::var_os("TONEARM_CAST_DEBUG").is_some() {
+                eprintln!("cast launch {launch}: {} {p}", message.namespace);
+            }
             match p["type"].as_str() {
                 Some("RECEIVER_STATUS") => {
                     // The slider shows the device's volume from the start.
@@ -214,7 +221,8 @@ impl Cast {
                         }
                         volume = Some(level as f32);
                     }
-                    if let Some(app) = our_app(p, self.app) {
+                    answered |= p["requestId"].as_u64() == Some(launch);
+                    if let Some(app) = our_app(p, self.app).filter(|_| answered) {
                         break app;
                     }
                 }
@@ -223,7 +231,7 @@ impl Cast {
                 Some("LAUNCH_ERROR") if self.app != DEFAULT_APP => {
                     eprintln!("cast: {name} wouldn't open {} ({}), using the default receiver", self.app, p["reason"]);
                     self.app = DEFAULT_APP;
-                    let launch = self.next_request();
+                    launch = self.next_request();
                     channel.send(PLATFORM, RECEIVER, &json!({"type": "LAUNCH", "appId": self.app, "requestId": launch}))?;
                 }
                 Some("LAUNCH_ERROR") => {
