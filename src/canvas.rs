@@ -92,7 +92,7 @@ impl Keys {
 }
 
 /// A web player token for the signed in account, from the `sp_dc` cookie.
-fn web_token(http: &ureq::Agent, cookie: &str) -> Result<String, String> {
+pub(crate) fn web_token(http: &ureq::Agent, cookie: &str) -> Result<String, String> {
     if let Some((token, until)) = TOKEN.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
         if Instant::now() < *until {
             return Ok(token.clone());

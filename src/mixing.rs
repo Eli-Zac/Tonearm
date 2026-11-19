@@ -322,6 +322,7 @@ impl App {
         ui.set_mix_filters(choices(&transition::FILTER_CHOICES));
         ui.set_mix_effects(choices(&transition::EFFECT_CHOICES));
         ui.set_mix_loops(choices(&transition::LOOP_CHOICES));
+        ui.set_mix_lengths(choices(&transition::LENGTH_CHOICES));
         ui.set_mix_from(self.mix_song(id, from));
         ui.set_mix_to(self.mix_song(songs[n + 1].0, to));
         self.show_editor();
@@ -549,11 +550,14 @@ impl App {
             return;
         };
         self.change_mix(|s, app, from, to| {
+            // The length is its own choice: a preset keeps it.
+            let bars = s.bars;
             *s = if preset == Preset::Auto {
                 app.auto_settings(from, to)
             } else {
                 Settings::preset(preset)
             };
+            s.bars = bars;
         });
     }
 
@@ -562,6 +566,11 @@ impl App {
             use transition::*;
             fn at<T: Copy>(choices: &[(T, &str)], index: usize) -> T {
                 choices[index.min(choices.len() - 1)].0
+            }
+            // How long it lasts goes with any preset, so it stays one.
+            if part == 5 {
+                s.bars = at(&LENGTH_CHOICES, index);
+                return;
             }
             match part {
                 0 => s.volume = at(&VOLUME_CHOICES, index),
@@ -699,6 +708,7 @@ impl App {
         ui.set_mix_filter(transition::index_of(&transition::FILTER_CHOICES, s.filter) as i32);
         ui.set_mix_effect(transition::index_of(&transition::EFFECT_CHOICES, s.effect) as i32);
         ui.set_mix_loop(transition::index_of(&transition::LOOP_CHOICES, s.looping) as i32);
+        ui.set_mix_length(transition::index_of(&transition::LENGTH_CHOICES, s.bars) as i32);
         ui.set_mix_beatmatch(s.beatmatch);
         ui.set_mix_key_lock(s.key_lock);
         ui.set_mix_changed(s != e.saved);
@@ -708,7 +718,7 @@ impl App {
         let plan = transition::plan(s, out.as_deref(), out_length, inn.as_deref(), self.mix_length());
         // Whether the songs could be beat matched at all, whatever the
         // toggle says. When not, the tempos say why and the toggle is off.
-        let why = transition::why_unmatched(out.as_deref(), out_length, inn.as_deref(), self.mix_length());
+        let why = transition::why_unmatched(out.as_deref(), out_length, inn.as_deref(), self.mix_length(), s.bars);
         ui.set_mix_can_beatmatch(why.is_none());
         let warning = why.unwrap_or_default();
         let picture_span = Picture::new(&plan, out_length);

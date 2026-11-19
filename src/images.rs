@@ -38,6 +38,17 @@ impl Cache {
         Some(pixels)
     }
 
+    /// The largest copy of `url` held, at whatever size it was fetched:
+    /// a stand-in while the size wanted is on its way.
+    pub fn largest(&self, url: &str) -> Option<Pixels> {
+        let tail = format!(":{url}");
+        self.map
+            .iter()
+            .filter(|(key, _)| key.ends_with(&tail))
+            .max_by_key(|(_, pixels)| pixels.width())
+            .map(|(_, pixels)| pixels.clone())
+    }
+
     pub fn put(&mut self, key: String, pixels: Pixels) {
         if self.map.contains_key(&key) {
             return;

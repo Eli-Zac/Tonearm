@@ -9,9 +9,9 @@ use swash::shape::ShapeContext;
 use swash::zeno::Format;
 use swash::FontRef;
 
-/// The fonts lines are drawn in, first choice first. Inter Display
-/// Bold is the window's own lyric font, shipped with the app. Segoe UI
-/// Bold covers what Inter lacks. (Not the variable Segoe UI: swash gives
+/// The fonts lines are drawn in, first choice first. Figtree Bold is
+/// the window's own lyric font, shipped with the app. Segoe UI Bold
+/// covers what Figtree lacks. (Not the variable Segoe UI: swash gives
 /// some of its letters, such as r, far too wide an advance. The image is
 /// stretched to the window's own width of the line.) Neither has Korean,
 /// Japanese or Chinese, so those come from the fonts Windows itself falls
@@ -22,7 +22,7 @@ fn fonts() -> &'static [Vec<u8>] {
         let dir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into()) + r"\Fonts\";
         // The window's lyric font first, so blurred lines match the sharp
         // one. Segoe UI stands in for anything it lacks.
-        let mut fonts: Vec<Vec<u8>> = vec![include_bytes!("../ui/InterDisplay-Bold.ttf").to_vec()];
+        let mut fonts: Vec<Vec<u8>> = vec![include_bytes!("../ui/Figtree-Bold.ttf").to_vec()];
         fonts.extend(
             ["segoeuib.ttf", "SegUIVar.ttf"]
                 .iter()

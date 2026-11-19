@@ -206,7 +206,19 @@ pub struct Settings {
     /// Seconds the song coming in starts later in itself, from its first
     /// downbeat, or from its top when not beat matched.
     pub in_shift: f64,
+    /// How many bars the mix lasts, or 0 for about as long as the
+    /// crossfade setting says.
+    pub bars: u32,
 }
+
+/// The lengths in the editor's menu.
+pub const LENGTH_CHOICES: [(u32, &str); 5] = [
+    (0, "Auto"),
+    (2, "2 bars"),
+    (4, "4 bars"),
+    (8, "8 bars"),
+    (16, "16 bars"),
+];
 
 /// The choices in the editor's menus, in Spotify's order. The names are
 /// also what is saved, so they stay put.
@@ -288,6 +300,7 @@ impl Settings {
             key_lock: false,
             out_shift: 0.0,
             in_shift: 0.0,
+            bars: 0,
         }
     }
 
@@ -297,7 +310,7 @@ impl Settings {
     pub fn auto(out: Option<&Analysis>, inn: Option<&Analysis>, beat_match: bool) -> Settings {
         let matched = beat_match
             && match (out, inn) {
-                (Some(a), Some(b)) => timing(a, f64::MAX, b, 8.0).is_ok(),
+                (Some(a), Some(b)) => timing(a, f64::MAX, b, 8.0, 0).is_ok(),
                 _ => false,
             };
         let mut settings = if matched {
@@ -328,6 +341,7 @@ impl Settings {
             "key_lock": self.key_lock,
             "out_shift": self.out_shift,
             "in_shift": self.in_shift,
+            "bars": self.bars,
         })
         .to_string()
     }
@@ -354,6 +368,12 @@ impl Settings {
             // Saved before they could be dragged: none.
             out_shift: v["out_shift"].as_f64().unwrap_or(0.0),
             in_shift: v["in_shift"].as_f64().unwrap_or(0.0),
+            // Saved before a length could be picked: Auto.
+            bars: v["bars"]
+                .as_u64()
+                .map(|n| n as u32)
+                .filter(|n| LENGTH_CHOICES.iter().any(|(b, _)| b == n))
+                .unwrap_or(0),
         })
     }
 }
@@ -430,13 +450,13 @@ fn steady_part(a: &Analysis, from: f64, to: f64) -> Option<LocalGrid> {
 }
 
 /// Beat matched timing from `out`, `out_length` seconds long, into `inn`,
-/// about `seconds` long.
+/// about `seconds` long, or exactly `bars` bars when that is not 0.
 ///
 /// The mix starts on a downbeat of the song going out, as late as lets it
 /// finish before that song's beat stops, and where its beat is steady. The
 /// song coming in starts from its first downbeat, at the old song's tempo
 /// there, so beats and bars land together.
-fn timing(out: &Analysis, out_length: f64, inn: &Analysis, seconds: f64) -> Result<Timing, Unmatched> {
+fn timing(out: &Analysis, out_length: f64, inn: &Analysis, seconds: f64, bars: u32) -> Result<Timing, Unmatched> {
     if out.beats.len() < 16 || inn.beats.len() < 16 {
         return Err(Unmatched::NoBeat);
     }
@@ -454,7 +474,7 @@ fn timing(out: &Analysis, out_length: f64, inn: &Analysis, seconds: f64) -> Resu
             continue;
         };
         steady_somewhere = true;
-        let beats = mix_beats(rough.beat, seconds);
+        let beats = if bars > 0 { 4.0 * bars as f64 } else { mix_beats(rough.beat, seconds) };
         let at = rough.downbeat_before(end - beats * rough.beat);
         if at < room * 0.5 {
             break;
@@ -493,7 +513,7 @@ fn matched(settings: &Settings, out: &Analysis, out_length: f64, inn: &Analysis,
     if !settings.beatmatch {
         return None;
     }
-    let mut t = timing(out, out_length, inn, seconds).ok()?;
+    let mut t = timing(out, out_length, inn, seconds, settings.bars).ok()?;
     let beats = (t.length / t.beat).round();
     if settings.out_shift != 0.0 {
         let mut at = t.out_at + settings.out_shift;
@@ -559,11 +579,17 @@ pub fn snap(shift: f64, step: f64) -> f64 {
 
 /// Why two songs cannot be beat matched, for the warning on their tempos.
 /// None when they can.
-pub fn why_unmatched(out: Option<&Analysis>, out_length: f64, inn: Option<&Analysis>, seconds: f64) -> Option<String> {
+pub fn why_unmatched(
+    out: Option<&Analysis>,
+    out_length: f64,
+    inn: Option<&Analysis>,
+    seconds: f64,
+    bars: u32,
+) -> Option<String> {
     let (Some(a), Some(b)) = (out, inn) else {
         return Some("Beat matching waits until both songs are analyzed".into());
     };
-    let why = match timing(a, out_length, b, seconds).err()? {
+    let why = match timing(a, out_length, b, seconds, bars).err()? {
         Unmatched::NoBeat => "neither keeps a steady beat where they meet".to_string(),
         Unmatched::TempoApart(speed) => {
             format!("their tempos where they meet are {:.0}% apart", (speed - 1.0).abs() * 100.0)
@@ -603,7 +629,15 @@ pub fn plan(
         Some(t) if cut => (Some(t.out_at + t.length), t.in_from, CUT, t.beat),
         Some(t) => (Some(t.out_at), t.in_from, t.length, t.beat),
         None if cut => (None, settings.in_shift.max(0.0), CUT, 0.5),
-        None => (None, settings.in_shift.max(0.0), seconds.max(0.5), seconds.max(0.5) / 16.0),
+        None => {
+            // Bars at the old song's own tempo, or at 120 bpm before it is
+            // analyzed.
+            let length = match settings.bars {
+                0 => seconds.max(0.5),
+                bars => 4.0 * bars as f64 * out.map_or(0.5, Analysis::beat),
+            };
+            (None, settings.in_shift.max(0.0), length, length / 16.0)
+        }
     };
     // Moved by hand, not beat matched: by as much as dragged, and the old
     // song must last through the mix.
@@ -841,6 +875,30 @@ mod tests {
     }
 
     #[test]
+    fn a_mix_lasts_the_bars_picked() {
+        let (out, inn) = (steady(128.0, 0.4, 200.0), steady(124.0, 1.1, 180.0));
+        let beat = 60.0 / 128.0;
+        for bars in [2, 4, 8, 16] {
+            let mut blend = Settings::preset(Preset::Blend);
+            blend.bars = bars;
+            let p = plan(blend, Some(&out), 200.0, Some(&inn), 8.0);
+            let at = p.out_at.expect("beat matched");
+            assert!((p.length - 4.0 * bars as f64 * beat).abs() < 1e-4, "{bars} bars: {}", p.length);
+            // Still on a downbeat, and done before the beat stops.
+            let downbeats = (at - 0.4) / (4.0 * beat);
+            assert!((downbeats - downbeats.round()).abs() < 1e-4);
+            assert!(at + p.length <= *out.beats.last().unwrap() as f64 + beat + 1e-4);
+        }
+        // Not beat matched, the bars are counted at the old song's tempo.
+        let mut fade = Settings::preset(Preset::Fade);
+        fade.beatmatch = false;
+        fade.bars = 4;
+        let p = plan(fade, Some(&out), 200.0, Some(&inn), 8.0);
+        assert!(p.out_at.is_none());
+        assert!((p.length - 16.0 * out.beat()).abs() < 1e-4);
+    }
+
+    #[test]
     fn a_song_that_changes_tempo_mixes_at_its_tempo_where_it_ends() {
         // 90 BPM for a minute, then 128 to the end. The whole song's grid
         // fits neither.
@@ -877,7 +935,7 @@ mod tests {
             .collect();
         let wobbly = song(wobbly, 128.0, 0.0, 200.0);
         assert!(plan(fade, Some(&out), 200.0, Some(&wobbly), 8.0).out_at.is_none());
-        assert!(why_unmatched(Some(&out), 200.0, Some(&wobbly), 8.0).is_some());
+        assert!(why_unmatched(Some(&out), 200.0, Some(&wobbly), 8.0, 0).is_some());
         // And without analyses it is a plain fade of the length asked.
         let plain = plan(fade, None, 200.0, None, 6.0);
         assert_eq!((plain.out_at, plain.length), (None, 6.0));
@@ -1008,6 +1066,7 @@ mod tests {
         s.eq = Eq::ThreeBand;
         s.out_shift = -3.75;
         s.in_shift = 1.875;
+        s.bars = 16;
         assert_eq!(Settings::from_json(&s.to_json()), Some(s));
         assert_eq!(Settings::from_json("{}"), None);
         // Saved by an older version, by place in the menus.

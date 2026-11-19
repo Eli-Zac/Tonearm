@@ -7,6 +7,7 @@ mod blur;
 mod canvas;
 mod decode;
 mod detail;
+mod quick_access;
 mod history;
 mod home;
 mod images;
@@ -31,20 +32,23 @@ mod offline;
 mod pool;
 mod resolver;
 mod services;
+mod spotify;
 mod session;
 mod store;
+mod sync;
+mod syncing;
 mod update;
 mod wheel;
 
 slint::include_modules!();
 
-use innertube::model::{Header, Item, Kind, Page, PageKind, Trend};
+use innertube::model::{Header, Item, Kind, Layout, Page, PageKind, Trend};
 use innertube::Client;
 use slint::{ComponentHandle, Image, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -87,6 +91,20 @@ enum Target {
     ProfilePhoto,
     /// A card under Played lately on the profile page.
     Profile { generation: u64, index: usize },
+    /// An entry in Quick access, in the side menu.
+    Pinned { generation: u64, index: usize },
+    /// A cover on the Syncs page: its row, and 0 the source or 1 the
+    /// destination.
+    SyncRow { generation: u64, index: usize, side: u8 },
+}
+
+/// The entries Quick access shows in the side menu.
+#[derive(Default)]
+struct PinnedRows {
+    /// Counts up each time the list is built, so art for an older one is
+    /// dropped.
+    generation: u64,
+    model: Rc<VecModel<ItemData>>,
 }
 
 /// What the profile page shows, kept to act on clicks.
@@ -151,6 +169,20 @@ const SUGGEST_DELAY: Duration = Duration::from_millis(140);
 /// How long fetched results stay good enough to show again.
 const SUGGEST_FRESH: Duration = Duration::from_secs(300);
 
+/// A Spotify playlist's songs being matched to YouTube Music, a few at a
+/// time in the background.
+struct SpotifyJob {
+    /// Set to stop the workers, once the playlist is neither open nor
+    /// playing.
+    cancel: Arc<AtomicBool>,
+    /// Each song's answer as it comes in: Some(Some) matched, Some(None)
+    /// not on YouTube Music, None still looking. By place in the playlist.
+    results: Vec<Option<Option<Item>>>,
+    /// Songs before this have all been answered and, when the queue plays
+    /// from the playlist, added to it. Keeps added songs in order.
+    cursor: usize,
+}
+
 enum Place {
     Row(usize),
     Card(Rc<VecModel<ItemData>>, usize),
@@ -179,6 +211,8 @@ struct PageState {
     header: Option<Header>,
     /// What the "Show all" buttons open, by `RowData.more_id`.
     mores: Vec<(String, Option<String>)>,
+    /// Home's mood chips, by their place in the chip row.
+    chips: Vec<innertube::model::Chip>,
     /// Tracks numbered so far, so a playlist's next page counts on.
     numbered: usize,
     /// What the track list is sorted by, from its column titles: 0 its own
@@ -377,6 +411,26 @@ const MIX_LEAD: f32 = 0.5;
 /// Opening the next song this far ahead leaves time to fetch and analyze
 /// it before a beat matched mix, which can start well before the end.
 const PREPARE_AHEAD_MIXING: f32 = 75.0;
+/// Which service a playlist is on, for its badge: 1 YouTube Music, 2
+/// Spotify, 0 when it is not a playlist, or is one of Tonearm's own pages.
+fn service_of(browse_id: Option<&str>, playlist: bool) -> i32 {
+    match browse_id {
+        Some(id) if spotify::is_playlist(id) => 2,
+        Some(id) if id.starts_with(spotify::PREFIX) || id.starts_with(syncing::PREFIX) => 0,
+        Some(id) if playlist || id.starts_with("VL") => 1,
+        _ => 0,
+    }
+}
+
+/// When synced playlists sync: a minute after Tonearm starts, so starting
+/// up is not slowed, then every 15 minutes.
+const SYNC_FIRST: Duration = Duration::from_secs(60);
+const SYNC_EVERY: Duration = Duration::from_secs(15 * 60);
+/// How often synced playlists are checked for changes, which then sync.
+const SYNC_CHECK: Duration = Duration::from_secs(60);
+/// How long after a change made in Tonearm its pair syncs.
+const SYNC_SOON: Duration = Duration::from_secs(2);
+
 /// How long mixes last in a playlist's mix mode when crossfade is off.
 const MIX_MODE_SECONDS: f32 = 8.0;
 
@@ -461,6 +515,8 @@ struct App {
     history: RefCell<Vec<Route>>,
     page: RefCell<PageState>,
     taste: RefCell<history::History>,
+    quick_access: RefCell<quick_access::QuickAccess>,
+    pinned_rows: RefCell<PinnedRows>,
     profile: RefCell<Profile>,
     /// The link to the signed in account's picture.
     account_photo: RefCell<String>,
@@ -480,6 +536,29 @@ struct App {
     /// item's play button while it plays.
     playing_from: RefCell<String>,
     player: RefCell<Player>,
+    /// Spotify songs being matched, by the page key of their playlist.
+    spotify_jobs: RefCell<HashMap<String, SpotifyJob>>,
+    /// A Spotify playlist whose card's play button was pressed: it starts
+    /// playing as soon as one of its songs is matched.
+    spotify_autoplay: RefCell<Option<String>>,
+    /// Spotify playlists being copied to YouTube Music, by browse id, so
+    /// one is not copied twice at once.
+    spotify_copying: RefCell<HashSet<String>>,
+    /// A sync is under way, so a second does not start on top of it.
+    syncing: Cell<bool>,
+    /// Syncs every pair now and then, while Tonearm is open.
+    sync_timer: Timer,
+    /// Looks for changed playlists every minute.
+    check_timer: Timer,
+    /// Waits a moment after a change made in Tonearm.
+    soon_timer: Timer,
+    /// Pairs to sync once the sync under way is done.
+    sync_waiting: RefCell<HashSet<String>>,
+    /// The pair syncing now, by Spotify browse id, for its row's line.
+    sync_running: RefCell<Option<String>>,
+    /// The Syncs page's rows, and which filling of them covers belong to.
+    sync_rows: Rc<VecModel<SyncRowData>>,
+    sync_generation: Cell<u64>,
     lyrics: RefCell<LyricsState>,
     cover: RefCell<Option<Cover>>,
     /// The clip looping as the cover: in the panel, or in both views when
@@ -839,7 +918,7 @@ impl App {
         key: String,
         url: &str,
         target: Target,
-        fetch: impl FnOnce(&ureq::Agent, &str) -> Option<images::Pixels> + Send + 'static,
+        fetch: impl Fn(&ureq::Agent, &str) -> Option<images::Pixels> + Send + 'static,
     ) -> Option<Image> {
         if let Some(pixels) = self.cache.borrow_mut().get(&key) {
             return Some(Image::from_rgba8(pixels));
@@ -849,10 +928,18 @@ impl App {
             waiting.push(target);
             return None;
         }
+        // The playing song's cover goes ahead of every thumbnail queued
+        // for the page, which on a long playlist can be hundreds.
+        let urgent = matches!(target, Target::Track { .. });
         pending.insert(key.clone(), vec![target]);
         let (http, url) = (self.http.clone(), url.to_string());
-        self.art.run(move || {
-            let pixels = fetch(&http, &url);
+        let job = move || {
+            // One more try after a moment: a dropped download would leave
+            // the picture missing until it was asked for again.
+            let pixels = fetch(&http, &url).or_else(|| {
+                std::thread::sleep(Duration::from_secs(1));
+                fetch(&http, &url)
+            });
             on_ui(move |app| {
                 let targets = app.pending.borrow_mut().remove(&key).unwrap_or_default();
                 let Some(pixels) = pixels else { return };
@@ -861,7 +948,12 @@ impl App {
                     app.place_thumb(target, Image::from_rgba8(pixels.clone()));
                 }
             });
-        });
+        };
+        if urgent {
+            let _ = std::thread::Builder::new().name("art-now".into()).spawn(job);
+        } else {
+            self.art.run(job);
+        }
         None
     }
 
@@ -948,6 +1040,27 @@ impl App {
                     }
                 }
             }
+            Target::Pinned { generation, index } => {
+                let rows = self.pinned_rows.borrow();
+                if rows.generation == generation {
+                    set(&rows.model, index);
+                }
+            }
+            Target::SyncRow { generation, index, side } => {
+                if self.sync_generation.get() != generation {
+                    return;
+                }
+                if let Some(mut row) = self.sync_rows.row_data(index) {
+                    if side == 0 {
+                        row.from_art = image;
+                        row.from_has_art = true;
+                    } else {
+                        row.to_art = image;
+                        row.to_has_art = true;
+                    }
+                    self.sync_rows.set_row_data(index, row);
+                }
+            }
         }
     }
 
@@ -991,12 +1104,23 @@ impl App {
                 Trend::Down => 2,
                 Trend::Same => 3,
             },
+            // Every YouTube Music song has a video id; a Spotify song has
+            // one once it is matched.
+            pending: item.kind == Kind::Song && item.video_id.is_none(),
+            service: service_of(item.browse_id.as_deref(), item.kind == Kind::Playlist),
         }
     }
 
     // --------------------------------------------------------------- pages
 
     fn open(self: &Rc<Self>, route: Route, push: bool) {
+        // Library's "Connect Spotify" card: the steps in Settings.
+        if matches!(&route, Route::Browse { id, .. } if id == spotify::CONNECT) {
+            self.ui.invoke_show_connections();
+            self.ui.set_nav(3);
+            self.show_storage();
+            return;
+        }
         if matches!(route, Route::Library) && !self.client.signed_in() {
             self.ui.set_nav(3);
             self.ui
@@ -1006,12 +1130,20 @@ impl App {
         if push {
             self.history.borrow_mut().push(route.clone());
         }
+        match &route {
+            Route::Browse { id, .. } => self.prune_spotify_jobs(id),
+            _ => self.prune_spotify_jobs(""),
+        }
         let generation = {
             let mut page = self.page.borrow_mut();
             *page = PageState {
                 generation: page.generation + 1,
                 // Downloads queue the page, so they keep playing offline.
-                radio_on_click: !matches!(route, Route::Browse { .. } | Route::Downloads),
+                radio_on_click: match &route {
+                    Route::Browse { id, .. } => id == "FEmusic_home",
+                    Route::Downloads => false,
+                    _ => true,
+                },
                 query: match &route {
                     Route::Search(query, _) => Some(query.clone()),
                     _ => None,
@@ -1045,11 +1177,12 @@ impl App {
         self.ui.set_loading(true);
         self.ui.set_can_back(self.history.borrow().len() > 1);
         self.show_now();
-        self.ui.set_nav(match route {
+        self.ui.set_nav(match &route {
             Route::Home => 0,
             Route::Explore => 1,
             Route::Library => 2,
             Route::Downloads => 4,
+            Route::Browse { id, .. } if id == syncing::ALL => 6,
             _ => -1,
         });
         self.ui.set_search_tab(match &route {
@@ -1072,7 +1205,56 @@ impl App {
                 }
             }
         }
+        // Your Spotify library and its playlists: read from Spotify, and the
+        // songs matched to YouTube Music as the page shows.
+        if let Route::Browse { id, .. } = &route {
+            if id.starts_with(spotify::PREFIX) {
+                self.open_spotify(generation, id.clone());
+                return;
+            }
+            // A synced pair's own pages, read from disk.
+            if id.starts_with(syncing::PREFIX) {
+                let all = id == syncing::ALL;
+                self.show(generation, syncing::page(id));
+                if all {
+                    self.show_syncs();
+                }
+                return;
+            }
+        }
         let client = self.client.clone();
+        // Library: your YouTube Music library, under a row of your Spotify
+        // playlists when Spotify is signed in. Both are asked for at once.
+        if let Route::Library = route {
+            let (http, cookie) = (self.http.clone(), self.settings.borrow().spotify_cookie.clone());
+            self.api.run(move || {
+                let spotify = (!cookie.is_empty())
+                    .then(|| std::thread::spawn(move || spotify::library_shelf(&http, &cookie)));
+                let result = client.browse("FEmusic_library_landing", None);
+                let shelf = spotify.and_then(|s| s.join().ok());
+                on_ui(move |app| {
+                    let result = result.map(|mut page| {
+                        match shelf {
+                            Some(Ok(shelf)) => {
+                                // Its own grid keeps wrapping, now under a title.
+                                for own in page.shelves.iter_mut().filter(|s| s.carousel && s.layout == Layout::Cards) {
+                                    own.layout = Layout::Wrapped;
+                                    if own.title.is_empty() {
+                                        own.title = "YouTube Music".into();
+                                    }
+                                }
+                                page.shelves.insert(0, shelf);
+                            }
+                            Some(Err(message)) => app.toast(format!("Spotify library: {message}")),
+                            None => page.shelves.insert(0, spotify::connect_shelf()),
+                        }
+                        page
+                    });
+                    app.show(generation, result);
+                });
+            });
+            return;
+        }
         // Home is put together from several pages and the listening history.
         if let Route::Home = route {
             self.api.run(move || {
@@ -1094,6 +1276,587 @@ impl App {
                 Route::Downloads => Ok(offline::downloads_page()),
             };
             on_ui(move |app| app.show(generation, result));
+        });
+    }
+
+    // ------------------------------------------------------------- spotify
+
+    /// Stops matching playlists that are neither playing nor `opening`,
+    /// and forgets a card's play button pressed for another page.
+    fn prune_spotify_jobs(&self, opening: &str) {
+        let playing = self.playing_from.borrow().clone();
+        let mut stopped = false;
+        self.spotify_jobs.borrow_mut().retain(|key, job| {
+            let keep = *key == playing || *key == opening;
+            if !keep {
+                job.cancel.store(true, Ordering::SeqCst);
+                stopped = true;
+            }
+            keep
+        });
+        if stopped {
+            spotify::save_matches();
+        }
+        let mut autoplay = self.spotify_autoplay.borrow_mut();
+        if autoplay.as_deref().is_some_and(|key| key != opening) {
+            *autoplay = None;
+        }
+    }
+
+    /// Opens a Spotify page: your library's grid, a playlist or Liked
+    /// Songs. Songs matched before play at once; the rest are matched now.
+    fn open_spotify(self: &Rc<Self>, generation: u64, id: String) {
+        let (http, cookie) = (self.http.clone(), self.settings.borrow().spotify_cookie.clone());
+        self.api.run(move || {
+            let result = spotify::page(&http, &cookie, &id);
+            on_ui(move |app| match result {
+                Ok((page, tracks)) => {
+                    app.show(generation, Ok(page));
+                    if app.page.borrow().generation != generation {
+                        return;
+                    }
+                    // A card's play button: play what is matched already.
+                    if app.spotify_autoplay.borrow().as_deref() == Some(id.as_str())
+                        && !app.page_songs().is_empty()
+                    {
+                        app.spotify_autoplay.borrow_mut().take();
+                        app.play_page(false);
+                    }
+                    app.match_spotify(id, tracks);
+                }
+                Err(message) => app.show(generation, Err(message)),
+            });
+        });
+    }
+
+    /// Matches a playlist's songs that are not matched yet, four at a time,
+    /// in the playlist's order. Each answer goes to `spotify_matched`.
+    fn match_spotify(self: &Rc<Self>, key: String, tracks: Vec<spotify::Track>) {
+        // Already matching it, as it plays: that carries on.
+        if tracks.is_empty() || self.spotify_jobs.borrow().contains_key(&key) {
+            return;
+        }
+        let results: Vec<Option<Option<Item>>> = tracks
+            .iter()
+            .map(|t| spotify::known(t).map(|found| found.map(|f| spotify::song_item(t, Some(&f)))))
+            .collect();
+        let pending: std::collections::VecDeque<(usize, spotify::Track)> = tracks
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| results[*i].is_none())
+            .collect();
+        if pending.is_empty() {
+            return;
+        }
+        let cursor = results.iter().take_while(|r| r.is_some()).count();
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.spotify_jobs.borrow_mut().insert(
+            key.clone(),
+            SpotifyJob {
+                cancel: cancel.clone(),
+                results,
+                cursor,
+            },
+        );
+        let left = Arc::new(AtomicUsize::new(pending.len()));
+        let queue = Arc::new(std::sync::Mutex::new(pending));
+        for n in 0..4 {
+            let (client, queue, cancel, left, key) =
+                (self.client.clone(), queue.clone(), cancel.clone(), left.clone(), key.clone());
+            let _ = std::thread::Builder::new()
+                .name(format!("spotify{n}"))
+                .spawn(move || loop {
+                    if cancel.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    let next = queue.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
+                    let Some((index, track)) = next else { return };
+                    let found = spotify::find(&client, &track);
+                    let matched = found.map(|f| spotify::song_item(&track, Some(&f)));
+                    let last = left.fetch_sub(1, Ordering::SeqCst) == 1;
+                    if last {
+                        spotify::save_matches();
+                    }
+                    let key = key.clone();
+                    on_ui(move |app| app.spotify_matched(&key, index, matched, last));
+                });
+        }
+    }
+
+    /// One song's answer: its row becomes playable, and when the queue
+    /// plays from this playlist, it joins the queue in the playlist's order.
+    fn spotify_matched(self: &Rc<Self>, key: &str, index: usize, matched: Option<Item>, last: bool) {
+        let open = self.page_key() == key;
+        if let (true, Some(item)) = (open, &matched) {
+            self.place_matched(index, item.clone());
+        }
+        let (ready, unmatched) = {
+            let mut jobs = self.spotify_jobs.borrow_mut();
+            let Some(job) = jobs.get_mut(key) else { return };
+            if let Some(slot) = job.results.get_mut(index) {
+                *slot = Some(matched.clone());
+            }
+            let mut ready = Vec::new();
+            while let Some(Some(answer)) = job.results.get(job.cursor) {
+                if let Some(item) = answer {
+                    ready.push(item.clone());
+                }
+                job.cursor += 1;
+            }
+            let unmatched = job.results.iter().filter(|r| matches!(r, Some(None))).count();
+            if last {
+                jobs.remove(key);
+            }
+            (ready, unmatched)
+        };
+        if *self.playing_from.borrow() == key && !ready.is_empty() {
+            if self.player.borrow().unshuffled.is_some() {
+                self.shuffle_in(ready);
+            } else {
+                self.extend_queue(ready);
+            }
+        }
+        if open && matched.is_some() && self.spotify_autoplay.borrow().as_deref() == Some(key) {
+            self.spotify_autoplay.borrow_mut().take();
+            self.play_page(false);
+        }
+        if last && open && unmatched > 0 {
+            self.toast(match unmatched {
+                1 => "1 song from this playlist isn't on YouTube Music".to_string(),
+                n => format!("{n} songs from this playlist aren't on YouTube Music"),
+            });
+        }
+    }
+
+    /// Songs found after a shuffled Spotify playlist started: each goes
+    /// somewhere random among the songs still to play, as if it had been
+    /// there when shuffle dealt them, and at the end of the playlist's own
+    /// order, so turning shuffle off puts it where it belongs.
+    fn shuffle_in(self: &Rc<Self>, items: Vec<Item>) {
+        {
+            let mut player = self.player.borrow_mut();
+            let player = &mut *player;
+            shuffle_into(&mut player.queue, player.index, player.unshuffled.as_mut(), items, random_below);
+        }
+        self.rebuild_queue_model();
+        self.prefetch_next();
+    }
+
+    /// Puts a matched song in its row on the open page, and turns on Play
+    /// and Shuffle once there is something to play.
+    fn place_matched(self: &Rc<Self>, index: usize, item: Item) {
+        let (generation, rows, row) = {
+            let page = self.page.borrow();
+            let Some(Place::Row(row)) = page.places.get(index) else { return };
+            (page.generation, page.rows.clone(), *row)
+        };
+        let Some(mut data) = rows.row_data(row) else { return };
+        data.item = self.item_data(&item, index, 64, Target::Page { generation, id: index });
+        rows.set_row_data(row, data);
+        if let Some(slot) = self.page.borrow_mut().items.get_mut(index) {
+            *slot = item;
+        }
+        if !self.ui.get_page_playable() {
+            self.ui.set_page_playable(true);
+            let mut header = self.ui.get_header();
+            header.can_play = true;
+            header.can_shuffle = true;
+            self.ui.set_header(header);
+        }
+    }
+
+    /// Copies a Spotify playlist into YouTube Music in the background,
+    /// saying how far it has got as it goes. See `spotify::copy`.
+    pub(crate) fn copy_spotify(self: &Rc<Self>, id: String, title: String) {
+        if !self.client.signed_in() {
+            self.toast("Sign in to YouTube Music to copy playlists to it.");
+            return;
+        }
+        if !self.spotify_copying.borrow_mut().insert(id.clone()) {
+            self.toast(format!("Already copying {title}"));
+            return;
+        }
+        self.toast(format!("Copying {title} to YouTube Music…"));
+        let (client, http) = (self.client.clone(), self.http.clone());
+        let cookie = self.settings.borrow().spotify_cookie.clone();
+        let _ = std::thread::Builder::new().name("spotify-copy".into()).spawn(move || {
+            // A toast every couple of seconds at most, not one per song.
+            let last = std::sync::Mutex::new(Instant::now());
+            let report = |stage: spotify::Stage| {
+                let mut last = last.lock().unwrap_or_else(|e| e.into_inner());
+                if last.elapsed() < Duration::from_secs(2) {
+                    return;
+                }
+                *last = Instant::now();
+                let text = match stage {
+                    spotify::Stage::Finding(n, of) => format!("Finding {title} on YouTube Music: {n} of {of}"),
+                    spotify::Stage::Adding(n, of) => format!("Adding {title} to YouTube Music: {n} of {of}"),
+                };
+                on_ui(move |app| app.toast(text));
+            };
+            let result = spotify::copy(&client, &http, &cookie, &id, report);
+            on_ui(move |app| {
+                app.spotify_copying.borrow_mut().remove(&id);
+                match result {
+                    Ok(done) => {
+                        let mut text = if done.updated {
+                            format!("Updated the YouTube Music copy of {title}")
+                        } else {
+                            format!("Copied {title} to YouTube Music: {} songs", done.songs)
+                        };
+                        match done.missing {
+                            0 => {}
+                            1 => text.push_str(". 1 song isn't on YouTube Music"),
+                            n => text.push_str(&format!(". {n} songs aren't on YouTube Music")),
+                        }
+                        let playlist = format!("VL{}", done.playlist);
+                        app.toast_with(text, "Open", move |app| app.open_browse(&playlist));
+                    }
+                    Err(message) => app.toast(format!("Could not copy {title}: {message}")),
+                }
+            });
+        });
+    }
+
+    // ----------------------------------------------------------------- sync
+
+    /// Syncs every pair a minute after Tonearm starts, then every 15
+    /// minutes while it is open, and any pair whose playlists change, on
+    /// either service, within about a minute. Quietly: a message only when
+    /// a sync changed something or needs the user.
+    fn schedule_syncs(self: &Rc<Self>) {
+        let weak = Rc::downgrade(self);
+        slint::Timer::single_shot(SYNC_FIRST, move || {
+            let Some(app) = weak.upgrade() else { return };
+            app.sync_all();
+            let weak = Rc::downgrade(&app);
+            app.sync_timer.start(TimerMode::Repeated, SYNC_EVERY, move || {
+                if let Some(app) = weak.upgrade() {
+                    app.sync_all();
+                }
+            });
+            let weak = Rc::downgrade(&app);
+            app.check_timer.start(TimerMode::Repeated, SYNC_CHECK, move || {
+                if let Some(app) = weak.upgrade() {
+                    app.sync_changed();
+                }
+            });
+        });
+    }
+
+    fn can_sync(&self) -> bool {
+        self.client.signed_in() && !self.settings.borrow().spotify_cookie.is_empty()
+    }
+
+    fn sync_all(self: &Rc<Self>) {
+        let keys: Vec<String> = syncing::pairs().into_iter().map(|p| p.spotify).collect();
+        self.sync_keys(keys);
+    }
+
+    /// Looks for pairs whose playlists changed since they synced, and syncs
+    /// those. The look is cheap: one small request a side.
+    fn sync_changed(self: &Rc<Self>) {
+        if syncing::pairs().is_empty() || !self.can_sync() || self.syncing.get() {
+            return;
+        }
+        let (client, http) = (self.client.clone(), self.http.clone());
+        let cookie = self.settings.borrow().spotify_cookie.clone();
+        let _ = std::thread::Builder::new().name("sync-check".into()).spawn(move || {
+            let keys = syncing::changed(&client, &http, &cookie);
+            if !keys.is_empty() {
+                on_ui(move |app| app.sync_keys(keys));
+            }
+        });
+    }
+
+    /// Syncs the pair a playlist belongs to a moment after it was changed
+    /// in Tonearm, so a few quick changes go in one sync. `id` is either
+    /// side's id.
+    pub(crate) fn sync_soon(self: &Rc<Self>, id: &str) {
+        let Some(pair) = syncing::pair_of(id) else { return };
+        if !self.can_sync() {
+            return;
+        }
+        self.sync_waiting.borrow_mut().insert(pair.spotify);
+        let weak = Rc::downgrade(self);
+        self.soon_timer.start(TimerMode::SingleShot, SYNC_SOON, move || {
+            if let Some(app) = weak.upgrade() {
+                let keys: Vec<String> = app.sync_waiting.borrow_mut().drain().collect();
+                app.sync_keys(keys);
+            }
+        });
+    }
+
+    /// Syncs these pairs in turn, in the background. While a sync is under
+    /// way they wait, and go once it is done.
+    fn sync_keys(self: &Rc<Self>, keys: Vec<String>) {
+        if keys.is_empty() || !self.can_sync() {
+            return;
+        }
+        if self.syncing.replace(true) {
+            self.sync_waiting.borrow_mut().extend(keys);
+            return;
+        }
+        let (client, http) = (self.client.clone(), self.http.clone());
+        let cookie = self.settings.borrow().spotify_cookie.clone();
+        let _ = std::thread::Builder::new().name("sync".into()).spawn(move || {
+            for key in keys {
+                let running = key.clone();
+                on_ui(move |app| app.sync_started(running));
+                let result = syncing::run(&client, &http, &cookie, &key);
+                on_ui(move |app| app.synced(&key, result, true));
+            }
+            on_ui(|app| app.sync_done());
+        });
+    }
+
+    /// A sync finished: any pairs that changed meanwhile go next, and the
+    /// Syncs page, if open, shows the news.
+    /// A pair started syncing: its line on the Syncs page speeds up.
+    fn sync_started(self: &Rc<Self>, key: String) {
+        *self.sync_running.borrow_mut() = Some(key);
+        self.refresh_syncs_page();
+    }
+
+    fn sync_done(self: &Rc<Self>) {
+        self.syncing.set(false);
+        self.sync_running.borrow_mut().take();
+        let waiting: Vec<String> = self.sync_waiting.borrow_mut().drain().collect();
+        self.refresh_syncs_page();
+        self.sync_keys(waiting);
+    }
+
+    /// Redraws the Syncs page's rows, when it is open.
+    fn refresh_syncs_page(self: &Rc<Self>) {
+        let open = matches!(self.history.borrow().last(), Some(Route::Browse { id, .. }) if id == syncing::ALL);
+        if open {
+            self.show_syncs();
+        }
+    }
+
+    /// Fills the Syncs page: each pair as its source, a line, and its
+    /// destination, with the covers loading as they come.
+    fn show_syncs(self: &Rc<Self>) {
+        let generation = self.sync_generation.get() + 1;
+        self.sync_generation.set(generation);
+        let running = self.sync_running.borrow().clone();
+        let rows: Vec<SyncRowData> = syncing::pairs()
+            .iter()
+            .enumerate()
+            .map(|(index, pair)| {
+                let (from, to) = pair.sides();
+                let from_art = self.thumb(&from.thumb, 240, Target::SyncRow { generation, index, side: 0 });
+                let to_art = self.thumb(&to.thumb, 240, Target::SyncRow { generation, index, side: 1 });
+                let busy = running.as_deref() == Some(pair.spotify.as_str());
+                SyncRowData {
+                    key: pair.spotify.as_str().into(),
+                    from_title: from.title.into(),
+                    from_label: from.label.into(),
+                    from_service: from.service,
+                    from_has_art: from_art.is_some(),
+                    from_art: from_art.unwrap_or_default(),
+                    to_title: to.title.into(),
+                    to_label: to.label.into(),
+                    to_service: to.service,
+                    to_has_art: to_art.is_some(),
+                    to_art: to_art.unwrap_or_default(),
+                    when: if busy { "Syncing".into() } else { syncing::when(pair.last).into() },
+                    busy,
+                    held: pair.held_count() as i32,
+                    missing: (pair.not_on_youtube.len() + pair.not_on_spotify.len()) as i32,
+                    can_undo: !pair.log.is_empty(),
+                }
+            })
+            .collect();
+        self.sync_rows.set_vec(rows);
+    }
+
+    /// A side of a pair clicked on the Syncs page: opens that playlist.
+    fn sync_open(self: &Rc<Self>, key: &str, side: i32) {
+        let Some(pair) = syncing::pair_of(key) else { return };
+        let (from, to) = pair.sides();
+        let id = if side == 0 { from.browse_id } else { to.browse_id };
+        self.open_browse(&id);
+    }
+
+    /// One of a pair's buttons on the Syncs page.
+    fn sync_act(self: &Rc<Self>, key: String, action: i32) {
+        match action {
+            0 => self.sync_pair(key, false),
+            1 => self.undo_sync(key),
+            2 => self.open_browse(&format!("{}{key}", syncing::REVIEW)),
+            3 => self.open_browse(&format!("{}{key}", syncing::MISSING)),
+            _ => {
+                let name = syncing::pair_of(&key).map(|p| p.name).unwrap_or_default();
+                syncing::unpair(&key);
+                self.toast(format!("Stopped syncing {name}. Both playlists stay as they are."));
+                self.refresh_syncs_page();
+            }
+        }
+    }
+
+    /// Syncs one pair, by its Spotify browse id. Not `quiet`, it says so
+    /// even when nothing changed.
+    fn sync_pair(self: &Rc<Self>, key: String, quiet: bool) {
+        if !self.can_sync() {
+            self.toast("Sync needs YouTube Music signed in and your Spotify cookie in Settings.");
+            return;
+        }
+        if self.syncing.replace(true) {
+            self.toast("A sync is already under way");
+            return;
+        }
+        let name = syncing::pair_of(&key).map(|p| p.name).unwrap_or_default();
+        if !quiet {
+            self.toast(format!("Syncing {name}…"));
+        }
+        self.sync_started(key.clone());
+        let (client, http) = (self.client.clone(), self.http.clone());
+        let cookie = self.settings.borrow().spotify_cookie.clone();
+        let _ = std::thread::Builder::new().name("sync".into()).spawn(move || {
+            let result = syncing::run(&client, &http, &cookie, &key);
+            on_ui(move |app| {
+                app.sync_done();
+                app.synced(&key, result, quiet);
+            });
+        });
+    }
+
+    /// Says what a sync did: what changed, with Undo, and any removals it
+    /// held back, with Review.
+    fn synced(self: &Rc<Self>, key: &str, result: Result<syncing::Report, String>, quiet: bool) {
+        let report = match result {
+            Ok(report) => report,
+            Err(message) => {
+                if !quiet {
+                    self.toast(format!("Could not sync: {message}"));
+                } else {
+                    eprintln!("sync {key}: {message}");
+                }
+                return;
+            }
+        };
+        let name = &report.name;
+        if report.newly_held {
+            let review = format!("{}{key}", syncing::REVIEW);
+            let text = format!("Sync wants to remove {} songs in {name}. Nothing was removed yet.", report.held);
+            self.toast_with(text, "Review", move |app| app.open_browse(&review));
+            return;
+        }
+        let c = &report.change;
+        let songs = |n: usize| if n == 1 { "1 song".to_string() } else { format!("{n} songs") };
+        let mut parts = Vec::new();
+        if !c.to_youtube.is_empty() {
+            parts.push(format!("added {} to YouTube Music", songs(c.to_youtube.len())));
+        }
+        if !c.to_spotify.is_empty() {
+            parts.push(format!("added {} to Spotify", songs(c.to_spotify.len())));
+        }
+        if !c.from_youtube.is_empty() {
+            parts.push(format!("removed {} from YouTube Music", songs(c.from_youtube.len())));
+        }
+        if !c.from_spotify.is_empty() {
+            parts.push(format!("removed {} from Spotify", songs(c.from_spotify.len())));
+        }
+        // The first sync says what could not go across, which the menu
+        // lists from then on.
+        let missing = match report.missing {
+            0 => String::new(),
+            1 => ". 1 song is only on one side".to_string(),
+            n => format!(". {n} songs are only on one side"),
+        };
+        if parts.is_empty() {
+            if report.first {
+                self.toast(format!("{name} now syncs. Both sides already match{missing}"));
+            } else if !quiet {
+                self.toast(format!("{name} is in sync"));
+            }
+            return;
+        }
+        let text = if report.first {
+            format!("{name} now syncs: {}{missing}", parts.join(", "))
+        } else {
+            format!("Synced {name}: {}", parts.join(", "))
+        };
+        let key = key.to_string();
+        self.toast_with(text, "Undo", move |app| app.undo_sync(key.clone()));
+    }
+
+    /// Pairs a playlist with the other service, then syncs it the first
+    /// time, which only adds.
+    fn start_sync(self: &Rc<Self>, id: String, title: String) {
+        if !self.can_sync() {
+            self.toast("Sync needs YouTube Music signed in and your Spotify cookie in Settings.");
+            return;
+        }
+        if self.syncing.get() {
+            self.toast("A sync is already under way. Try again when it's done.");
+            return;
+        }
+        let other = if spotify::is_playlist(&id) { "YouTube Music" } else { "Spotify" };
+        self.toast(format!("Setting up sync of {title} to {other}…"));
+        let (client, http) = (self.client.clone(), self.http.clone());
+        let cookie = self.settings.borrow().spotify_cookie.clone();
+        let _ = std::thread::Builder::new().name("sync".into()).spawn(move || {
+            let paired = if spotify::is_playlist(&id) {
+                syncing::pair_spotify(&client, &id, &title)
+            } else {
+                syncing::pair_youtube(&http, &cookie, &id, &title)
+            };
+            on_ui(move |app| match paired {
+                Ok(pair) => app.sync_pair(pair.spotify, false),
+                Err(message) => app.toast(format!("Could not set up sync for {title}: {message}")),
+            });
+        });
+    }
+
+    fn undo_sync(self: &Rc<Self>, key: String) {
+        if self.syncing.replace(true) {
+            self.toast("A sync is under way. Try again when it's done.");
+            return;
+        }
+        self.toast("Undoing the last sync…");
+        let (client, http) = (self.client.clone(), self.http.clone());
+        let cookie = self.settings.borrow().spotify_cookie.clone();
+        let _ = std::thread::Builder::new().name("sync".into()).spawn(move || {
+            let result = syncing::undo(&client, &http, &cookie, &key);
+            on_ui(move |app| {
+                app.sync_done();
+                match result {
+                    Ok(n) => app.toast(format!("Undid the last sync: {n} changes put back")),
+                    Err(message) => app.toast(format!("Could not undo the sync: {message}")),
+                }
+            });
+        });
+    }
+
+    /// Makes the removals sync held back, or keeps the songs, then leaves
+    /// the review page.
+    fn settle_held(self: &Rc<Self>, key: String, remove: bool) {
+        if !remove {
+            syncing::keep_held(&key);
+            self.toast("Kept those songs. Sync won't ask about them again.");
+            self.back();
+            return;
+        }
+        if self.syncing.replace(true) {
+            self.toast("A sync is under way. Try again when it's done.");
+            return;
+        }
+        let (client, http) = (self.client.clone(), self.http.clone());
+        let cookie = self.settings.borrow().spotify_cookie.clone();
+        let _ = std::thread::Builder::new().name("sync".into()).spawn(move || {
+            let result = syncing::remove_held(&client, &http, &cookie, &key);
+            on_ui(move |app| {
+                app.sync_done();
+                match result {
+                    Ok(n) => {
+                        app.toast_with(format!("Removed {n} songs"), "Undo", move |app| app.undo_sync(key.clone()));
+                        app.back();
+                    }
+                    Err(message) => app.toast(format!("Could not remove them: {message}")),
+                }
+            });
         });
     }
 
@@ -1124,7 +1887,9 @@ impl App {
                     self.ui.set_page_title(page.title.as_str().into());
                     self.ui.set_page_subtitle(page.subtitle.as_str().into());
                 }
-                if page.shelves.is_empty() && first && !detail {
+                // The Syncs page draws its own rows, so has no shelves.
+                let syncs = self.ui.get_nav() == 6;
+                if page.shelves.is_empty() && first && !detail && !syncs {
                     self.toast("Nothing here yet");
                 }
                 self.append(page);
@@ -1142,6 +1907,9 @@ impl App {
     /// Puts a detail page's hero on screen and starts loading its art.
     fn show_header(self: &Rc<Self>, generation: u64, header: Header) {
         let mut data = detail::header_data(&header, self.client.signed_in());
+        if let Some(Route::Browse { id, .. }) = self.history.borrow().last() {
+            data.service = service_of(Some(id), header.kind == PageKind::Playlist);
+        }
         if header.kind == PageKind::Artist && !header.banner {
             data.round = true;
         }
@@ -1218,12 +1986,35 @@ impl App {
                 });
             }
         }
+        if first && !new.chips.is_empty() {
+            let chips: Vec<ItemData> = new
+                .chips
+                .iter()
+                .enumerate()
+                .map(|(i, chip)| ItemData {
+                    id: i as i32,
+                    title: chip.title.as_str().into(),
+                    // Drawn lit up: the mood this page was opened with.
+                    explicit: chip.selected,
+                    ..ItemData::default()
+                })
+                .collect();
+            rows.push(RowData {
+                kind: 12,
+                cards: ModelRc::new(VecModel::from(chips)),
+                ..RowData::default()
+            });
+            self.page.borrow_mut().chips = new.chips.clone();
+        }
         let about = new
             .continuation
             .is_none()
             .then(|| self.page.borrow().header.as_ref().map(|h| h.about.clone()))
             .flatten()
             .filter(|a| first && !a.is_empty());
+        // A page that is one row of cards, as "Show all" opens: the cards
+        // wrap onto as many lines as they need instead of scrolling sideways.
+        let wrap = first && new.shelves.len() == 1;
         for shelf in new.shelves {
             if !shelf.title.is_empty() {
                 rows.push(RowData {
@@ -1249,21 +2040,37 @@ impl App {
             if shelf.carousel {
                 let cards = Rc::new(VecModel::default());
                 for (index, item) in shelf.items.into_iter().enumerate() {
-                    cards.push(self.item_data(
-                        &item,
-                        next_id,
-                        192,
-                        Target::Page {
-                            generation,
-                            id: next_id,
-                        },
-                    ));
+                    let target = Target::Page {
+                        generation,
+                        id: next_id,
+                    };
+                    let data = match shelf.layout {
+                        // Small art beside each song.
+                        Layout::Grid => self.item_data(&item, next_id, 64, target),
+                        // A video's own wide frame, not a square cut of it.
+                        Layout::Wide => {
+                            let mut data = self.item_data(&item, next_id, 0, target.clone());
+                            if let Some(art) = self.wide_thumb(&item.thumb, 320, target) {
+                                data.art = art;
+                                data.has_art = true;
+                            }
+                            data
+                        }
+                        Layout::Cards | Layout::Wrapped => self.item_data(&item, next_id, 192, target),
+                    };
+                    cards.push(data);
                     places.push(Place::Card(cards.clone(), index));
                     items.push(item);
                     next_id += 1;
                 }
                 rows.push(RowData {
-                    kind: 2,
+                    kind: match shelf.layout {
+                        Layout::Grid => 10,
+                        Layout::Wide => 11,
+                        Layout::Cards if wrap => 13,
+                        Layout::Wrapped => 13,
+                        Layout::Cards => 2,
+                    },
                     cards: ModelRc::from(cards),
                     ..RowData::default()
                 });
@@ -1562,6 +2369,47 @@ impl App {
                 });
             });
         }
+    }
+
+    /// Fills Quick access in the side menu, in the order things were pinned.
+    fn show_quick_access(self: &Rc<Self>) {
+        let (items, generation) = {
+            let mut rows = self.pinned_rows.borrow_mut();
+            rows.generation += 1;
+            (self.quick_access.borrow().items().to_vec(), rows.generation)
+        };
+        let model = self.pinned_rows.borrow().model.clone();
+        let rows: Vec<ItemData> = items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| self.item_data(item, i, 64, Target::Pinned { generation, index: i }))
+            .collect();
+        model.set_vec(rows);
+    }
+
+    /// Opens a Quick access entry, as clicking its card would.
+    fn open_pinned(self: &Rc<Self>, index: usize) {
+        let item = self.quick_access.borrow().items().get(index).cloned();
+        if let Some(item) = item {
+            self.open_item(item);
+        }
+    }
+
+    /// Pins an album, artist or playlist to Quick access, or unpins it,
+    /// and saves the list in the background.
+    pub(crate) fn toggle_pin(self: &Rc<Self>, item: &Item) {
+        let (added, text) = {
+            let mut pinned = self.quick_access.borrow_mut();
+            let added = pinned.toggle(item);
+            (added, pinned.serialize())
+        };
+        self.disk.run(move || quick_access::QuickAccess::save(text));
+        self.show_quick_access();
+        self.toast(if added {
+            format!("Pinned {} to Quick access", item.title)
+        } else {
+            format!("Unpinned {} from Quick access", item.title)
+        });
     }
 
     /// Adds to the listening history and saves it in the background.
@@ -1902,6 +2750,16 @@ impl App {
             self.activate(id);
             return;
         }
+        // A Spotify playlist's card: open it and play once a song is found.
+        if let Some(browse) = item.browse_id.clone().filter(|b| b.starts_with(spotify::PREFIX)) {
+            self.open_item(item);
+            *self.spotify_autoplay.borrow_mut() = Some(browse);
+            return;
+        }
+        // A Spotify song still being matched has nothing to play yet.
+        if item.kind == Kind::Song && item.browse_id.is_none() && item.playlist_id.is_none() {
+            return;
+        }
         self.remember(&item, 0.5);
         let client = self.client.clone();
         self.api.run(move || {
@@ -2081,6 +2939,11 @@ impl App {
             if player.extending || player.repeat != Repeat::Off {
                 return;
             }
+            // A Spotify playlist still being matched: its songs join the
+            // queue as they are found, and a radio would go before them.
+            if self.spotify_jobs.borrow().contains_key(self.playing_from.borrow().as_str()) {
+                return;
+            }
             let Some(last) = player.queue.last().filter(|i| i.video_id.is_some()).cloned() else {
                 return;
             };
@@ -2219,7 +3082,12 @@ impl App {
         ui.set_playing(false);
         *self.cover.borrow_mut() = None;
         // Large enough for the Now playing panel. The player scales it down.
-        let art = self.thumb(&item.thumb, 544, Target::Track { generation });
+        // Until the big cover comes, a smaller copy fetched for a list
+        // stands in for it.
+        let art = self.thumb(&item.thumb, 544, Target::Track { generation }).or_else(|| {
+            let held = self.cache.borrow().largest(&item.thumb)?;
+            Some(Image::from_rgba8(held))
+        });
         if let Some(image) = &art {
             self.set_tint(image);
         }
@@ -2962,6 +3830,7 @@ impl App {
         // old song short.
         let mut unmatched = settings;
         unmatched.beatmatch = false;
+        unmatched.bars = 0;
         let plan = transition::plan(unmatched, None, duration as f64, None, left.min(length) as f64);
         self.crossfade_into(index, token, plan, next_duration);
         true
@@ -3438,9 +4307,11 @@ impl App {
         self.ui.set_liked(liked);
         let client = self.client.clone();
         self.api.run(move || {
-            if let Err(message) = client.rate(&video_id, liked) {
-                on_ui(move |app| app.toast(message));
-            }
+            let result = client.rate(&video_id, liked);
+            on_ui(move |app| match result {
+                Ok(()) => app.sync_soon(syncing::LIKED_MUSIC),
+                Err(message) => app.toast(message),
+            });
         });
     }
 
@@ -3626,13 +4497,17 @@ impl App {
                 previous_end = line.end;
             }
             let syllable_data = |syllables: &[lyrics::Syllable]| -> ModelRc<SyllableData> {
+                // No space after a row's last word, so it lines up with the
+                // rows' edge as the rest do.
+                let last = syllables.len().saturating_sub(1);
                 let data: Vec<SyllableData> = syllables
                     .iter()
-                    .map(|s| SyllableData {
+                    .enumerate()
+                    .map(|(n, s)| SyllableData {
                         text: s.text.trim_end().into(),
                         start: s.start as i32,
                         end: s.end as i32,
-                        space: s.text.ends_with(' '),
+                        space: s.text.ends_with(' ') && n < last,
                     })
                     .collect();
                 ModelRc::new(VecModel::from(data))
@@ -3642,7 +4517,11 @@ impl App {
                 state.rows.push((start, end, y, number));
                 y += height;
                 rows.push(LyricRow {
-                    text: text.into(),
+                    // A row broken mid-line keeps the space after its last
+                    // word from the word timing. Slint then cuts the line
+                    // short with "…", and right-aligned rows sit a space
+                    // left of their blurred image, which doubles them.
+                    text: text.trim_end().into(),
                     syllables: syllable_data(&syllables),
                     start,
                     end,
@@ -3665,7 +4544,7 @@ impl App {
                 let wider = columns * 5 / 3;
                 for (text, syllables) in wrap(&backing, wider) {
                     rows.push(LyricRow {
-                        text: text.into(),
+                        text: text.trim_end().into(),
                         syllables: syllable_data(&syllables),
                         start,
                         end,
@@ -3687,7 +4566,7 @@ impl App {
                 for text in wrap(&translation, wider).into_iter().map(|(text, _)| text) {
                     y += height * 0.6;
                     rows.push(LyricRow {
-                        text: text.into(),
+                        text: text.trim_end().into(),
                         start,
                         end,
                         kind: 4,
@@ -4551,6 +5430,49 @@ fn songs_of(page: &Page) -> Vec<Item> {
         .collect()
 }
 
+/// Puts each song somewhere among those after `index` in a shuffled
+/// queue, and at the end of the queue's own order. A song already queued
+/// is left out. `pick(n)` chooses from 0 to below n.
+fn shuffle_into(
+    queue: &mut Vec<Item>,
+    index: usize,
+    mut order: Option<&mut Vec<Item>>,
+    items: Vec<Item>,
+    pick: impl Fn(usize) -> usize,
+) {
+    for item in items {
+        let Some(id) = item.video_id.as_deref() else { continue };
+        if queue.iter().any(|q| q.video_id.as_deref() == Some(id)) {
+            continue;
+        }
+        if let Some(order) = order.as_deref_mut() {
+            order.push(item.clone());
+        }
+        let first = (index + 1).min(queue.len());
+        let at = (first + pick(queue.len() - first + 1)).min(queue.len());
+        queue.insert(at, item);
+    }
+}
+
+/// A number from 0 to below `n`, different from call to call, for placing
+/// one song at a time somewhere random.
+fn random_below(n: usize) -> usize {
+    static STATE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let mut seed = STATE.load(Ordering::Relaxed);
+    if seed == 0 {
+        seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(1)
+            | 1;
+    }
+    seed ^= seed << 13;
+    seed ^= seed >> 7;
+    seed ^= seed << 17;
+    STATE.store(seed, Ordering::Relaxed);
+    (seed % n.max(1) as u64) as usize
+}
+
 fn shuffled(mut songs: Vec<Item>) -> Vec<Item> {
     let mut seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -4841,6 +5763,137 @@ fn probe(args: &[String]) {
                 audio.status.state.load(Ordering::SeqCst),
                 audio.status.position_ms.load(Ordering::SeqCst)
             );
+            return;
+        }
+        // `--probe spotify` lists your Spotify playlists, `spotify liked`
+        // your Liked Songs, `spotify <playlist id>` one playlist's songs.
+        "spotify" => {
+            let http = innertube::agent(Duration::from_secs(15));
+            let cookie = services::Settings::load().spotify_cookie;
+            let started = Instant::now();
+            let show = |tracks: &[spotify::Track]| {
+                for t in tracks.iter().take(15) {
+                    println!(
+                        "  {} | {} | {} | {:.0}s | {}",
+                        t.title,
+                        t.artists.join(", "),
+                        t.album,
+                        t.duration_secs(),
+                        t.id
+                    );
+                }
+                println!("  {} songs", tracks.len());
+            };
+            match arg(1) {
+                "" => match spotify::playlists(&http, &cookie) {
+                    Ok(lists) => {
+                        for l in &lists {
+                            println!("{} | {} | {} | {} songs", l.id, l.name, l.owner, l.count);
+                        }
+                    }
+                    Err(e) => println!("error: {e}"),
+                },
+                "liked" => match spotify::liked(&http, &cookie) {
+                    Ok(tracks) => show(&tracks),
+                    Err(e) => println!("error: {e}"),
+                },
+                id => match spotify::playlist(&http, &cookie, id) {
+                    Ok((list, tracks)) => {
+                        println!("{} by {} ({} songs) {:?}", list.name, list.owner, list.count, list.about);
+                        show(&tracks);
+                    }
+                    Err(e) => println!("error: {e}"),
+                },
+            }
+            println!("took {:?}", started.elapsed());
+            return;
+        }
+        // `--probe spsync <spotify browse id> <youtube playlist id>`: what
+        // the first sync of the two would do, without pairing or changing
+        // either.
+        "spsync" => {
+            let http = innertube::agent(Duration::from_secs(15));
+            let cookie = services::Settings::load().spotify_cookie;
+            let started = Instant::now();
+            match syncing::preview(&client, &http, &cookie, arg(1), arg(2)) {
+                Ok(text) => print!("{text}"),
+                Err(e) => println!("error: {e}"),
+            }
+            println!("took {:?}", started.elapsed());
+            return;
+        }
+        // `--probe spmatch <playlist id> [count]`: matches a playlist's first
+        // songs to YouTube Music, as opening it does, and shows each answer.
+        "spmatch" => {
+            let http = innertube::agent(Duration::from_secs(15));
+            let cookie = services::Settings::load().spotify_cookie;
+            let tracks = match spotify::playlist(&http, &cookie, arg(1)) {
+                Ok((_, tracks)) => tracks,
+                Err(e) => return println!("error: {e}"),
+            };
+            let count = arg(2).parse().unwrap_or(25);
+            let started = Instant::now();
+            let mut found = 0;
+            for t in tracks.iter().take(count) {
+                match spotify::find(&client, t) {
+                    Some(item) => {
+                        found += 1;
+                        println!("ok   {} | {} -> {} | {}", t.title, t.artists.join(", "), item.title, item.subtitle);
+                    }
+                    None => println!("MISS {} | {} ({:.0}s)", t.title, t.artists.join(", "), t.duration_secs()),
+                }
+            }
+            spotify::save_matches();
+            println!("{found} of {} matched in {:?}", count.min(tracks.len()), started.elapsed());
+            return;
+        }
+        // `--probe spcopy <browse id>`: what copying a Spotify playlist to
+        // YouTube Music would add, without making or changing anything.
+        "spcopy" => {
+            let http = innertube::agent(Duration::from_secs(15));
+            let cookie = services::Settings::load().spotify_cookie;
+            let (list, tracks) = match spotify::load(&http, &cookie, arg(1)) {
+                Ok(loaded) => loaded,
+                Err(e) => return println!("error: {e}"),
+            };
+            let started = Instant::now();
+            let found = spotify::match_all(&client, &tracks, |_| {});
+            let songs = found.iter().flatten().count();
+            println!("{}: {} of {} songs would be copied, in {:?}", list.name, songs, tracks.len(), started.elapsed());
+            for (t, f) in tracks.iter().zip(&found) {
+                if f.is_none() {
+                    println!("  missing: {} | {}", t.title, t.artists.join(", "));
+                }
+            }
+            println!("copied before: {:?}", spotify::copy_of(arg(1)));
+            if arg(2) == "audit" {
+                for (t, f) in tracks.iter().zip(&found) {
+                    if let Some(f) = f.as_ref().filter(|f| spotify::doubtful(t, f)) {
+                        println!("  check: {} | {} ({:.0}s) -> {} | {}", t.title, t.artists.join(", "), t.duration_secs(), f.title, f.subtitle);
+                    }
+                }
+            }
+            return;
+        }
+        // `--probe songs <query>`: the Songs tab of a search, with lengths,
+        // as matching a Spotify song sees it. `--probe songs <query> 6`
+        // searches videos instead.
+        "songs" => {
+            match client.search_in(arg(1), arg(2).parse().unwrap_or(1)) {
+                Ok(page) => {
+                    for item in page.shelves.iter().flat_map(|s| &s.items).take(8) {
+                        println!(
+                            "{} | {} | {} | {:?} | {:?}",
+                            item.title,
+                            item.subtitle,
+                            item.duration,
+                            item.video_id,
+                            item.artists.iter().map(|a| &a.0).collect::<Vec<_>>()
+                        );
+                    }
+                }
+                Err(e) => println!("error: {e}"),
+            }
             return;
         }
         "download" => {
@@ -5143,7 +6196,14 @@ fn main() -> Result<(), slint::PlatformError> {
 
     update::clean_up();
     let ui = AppWindow::new()?;
-    wheel::install(&ui);
+    {
+        let weak = ui.as_weak();
+        wheel::install(&ui, move |active| {
+            if let Some(ui) = weak.upgrade() {
+                ui.global::<Scroll>().set_active(active);
+            }
+        });
+    }
     ui.set_app_version(update::VERSION.trim_start_matches('v').into());
     let client = Arc::new(Client::new());
     let session = store::load("session");
@@ -5171,6 +6231,8 @@ fn main() -> Result<(), slint::PlatformError> {
         history: RefCell::default(),
         page: RefCell::default(),
         taste: RefCell::new(history::History::load()),
+        quick_access: RefCell::new(quick_access::QuickAccess::load()),
+        pinned_rows: RefCell::default(),
         profile: RefCell::default(),
         account_photo: RefCell::default(),
         disk: pool::Pool::new("disk", 1),
@@ -5180,6 +6242,17 @@ fn main() -> Result<(), slint::PlatformError> {
         retried: RefCell::default(),
         playing_from: RefCell::default(),
         player: RefCell::default(),
+        spotify_jobs: RefCell::default(),
+        spotify_autoplay: RefCell::default(),
+        spotify_copying: RefCell::default(),
+        syncing: Cell::new(false),
+        sync_timer: Timer::default(),
+        check_timer: Timer::default(),
+        soon_timer: Timer::default(),
+        sync_waiting: RefCell::default(),
+        sync_running: RefCell::default(),
+        sync_rows: Rc::new(VecModel::default()),
+        sync_generation: Cell::new(0),
         lyrics: RefCell::default(),
         cover: RefCell::new(None),
         canvas: RefCell::new(None),
@@ -5243,6 +6316,7 @@ translate: Cell::new(load_translate()),
         1 => app.open(Route::Explore, true),
         2 => app.open(Route::Library, true),
         4 => app.open(Route::Downloads, true),
+        6 => app.open(Route::Browse { id: syncing::ALL.into(), params: None }, true),
         _ => {
             app.ui.set_nav(3);
             app.show_storage();
@@ -5295,6 +6369,11 @@ translate: Cell::new(load_translate()),
     on!(on_sleep_chosen, |app, choice| app.set_sleep(choice));
     on!(on_levelling_choice_changed, |app, choice| app.set_levelling(choice));
     on!(on_close_choice_changed, |app, choice| app.set_close_to_tray(choice == 0));
+    on!(on_menu_collapsed_changed, |app, collapsed| {
+        app.disk.run(move || {
+            let _ = store::save("menu-collapsed", if collapsed { "1" } else { "0" });
+        });
+    });
     on!(on_toggle_like, |app| app.toggle_like());
     on!(on_toggle_shuffle, |app| app.toggle_shuffle());
     on!(on_cycle_repeat, |app| app.cycle_repeat());
@@ -5323,6 +6402,9 @@ translate: Cell::new(load_translate()),
     on!(on_save_services, |app| app.save_services());
     on!(on_spotify_unlink, |app| app.spotify_unlink());
     on!(on_lastfm_connect, |app| app.lastfm_connect());
+    on!(on_open_spotify_web, |_app| services::open_browser("https://open.spotify.com/"));
+    on!(on_sync_open, |app, key, side| app.sync_open(&key, side));
+    on!(on_sync_act, |app, key, action| app.sync_act(key.to_string(), action));
     on!(on_discord_toggle, |app| app.discord_toggle());
     on!(on_discord_status_changed, |app, choice| app.discord_status(choice));
     on!(on_check_update, |app| app.check_update(false));
@@ -5350,6 +6432,7 @@ translate: Cell::new(load_translate()),
     on!(on_mix_filter_picked, |app, i| app.mix_choice_picked(2, i as usize));
     on!(on_mix_effect_picked, |app, i| app.mix_choice_picked(3, i as usize));
     on!(on_mix_loop_picked, |app, i| app.mix_choice_picked(4, i as usize));
+    on!(on_mix_length_picked, |app, i| app.mix_choice_picked(5, i as usize));
     on!(on_mix_beatmatch_toggled, |app| app.mix_beatmatch_toggled());
     on!(on_mix_key_lock_toggled, |app| app.mix_key_lock_toggled());
     on!(on_mix_save, |app| app.mix_save());
@@ -5357,12 +6440,17 @@ translate: Cell::new(load_translate()),
     on!(on_translate_choice_changed, |app, choice| app.set_translate_choice(choice));
     // detail pages, links and the right click menu
     on!(on_show_all, |app, id| app.show_all(id as usize));
+    on!(on_chip_clicked, |app, index| app.chip_clicked(index as usize));
     on!(on_byline_clicked, |app| app.byline_clicked());
     on!(on_toggle_follow, |app| app.toggle_follow());
     on!(on_toggle_like_page, |app| app.toggle_like_page());
     on!(on_open_browse, |app, id| app.open_browse(&id));
     on!(on_item_menu, |app, source, id| app.item_menu(source, id));
     on!(on_menu_picked, |app, index| app.menu_picked(index as usize));
+    on!(on_pinned_clicked, |app, index| app.open_pinned(index.max(0) as usize));
+    app.ui
+        .set_pinned(ModelRc::from(app.pinned_rows.borrow().model.clone()));
+    app.show_quick_access();
     app.show_services();
     app.ui.set_crossfade_choice(
         CROSSFADE_CHOICES
@@ -5376,6 +6464,8 @@ translate: Cell::new(load_translate()),
     app.ui.set_panel_cover(panel_cover);
     app.ui.set_wide_cover(wide_cover);
     app.ui.set_close_choice(if app.close_to_tray.get() { 0 } else { 1 });
+    // The side menu as it was left: folded to its icons, or open.
+    app.ui.set_menu_collapsed(store::load("menu-collapsed").is_some_and(|v| v.trim() == "1"));
     {
         let weak = Rc::downgrade(&app);
         app.ui.window().on_close_requested(move || {
@@ -5387,6 +6477,7 @@ translate: Cell::new(load_translate()),
     }
     app.ui
         .set_suggestions(ModelRc::from(app.suggest.borrow().rows.clone()));
+    app.ui.set_sync_rows(ModelRc::from(app.sync_rows.clone()));
     app.show_recent_searches();
 
     let weak = Rc::downgrade(&app);
@@ -5405,6 +6496,7 @@ translate: Cell::new(load_translate()),
     app.restore_session();
     app.repair_downloads();
     app.check_update(true);
+    app.schedule_syncs();
     // Not `run`, which quits as soon as the window hides in the tray.
     #[cfg(windows)]
     instance.listen(|| on_ui(|app| app.show_window()));
@@ -5477,6 +6569,19 @@ mod tests {
 
     fn ids(items: &[Item]) -> Vec<String> {
         items.iter().filter_map(|i| i.video_id.clone()).collect()
+    }
+
+    #[test]
+    fn late_songs_shuffle_in_after_the_playing_one_and_join_the_order() {
+        let mut queue = songs(&["a", "b", "c"]);
+        let mut order = songs(&["a", "b", "c"]);
+        // Always the latest spot, then always the earliest.
+        shuffle_into(&mut queue, 1, Some(&mut order), songs(&["d"]), |n| n - 1);
+        assert_eq!(ids(&queue), ["a", "b", "c", "d"]);
+        shuffle_into(&mut queue, 1, Some(&mut order), songs(&["e", "b"]), |_| 0);
+        // Never before or onto the playing song, and never twice.
+        assert_eq!(ids(&queue), ["a", "b", "e", "c", "d"]);
+        assert_eq!(ids(&order), ["a", "b", "c", "d", "e"]);
     }
 
     #[test]

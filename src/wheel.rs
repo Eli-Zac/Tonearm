@@ -115,31 +115,57 @@ impl Pacer {
     }
 }
 
+/// How long after the list last moved hover effects come back. A
+/// touchpad's coasting can pause about this long between steps, and the
+/// list must not count as still in the middle of one.
+const HOLD: Duration = Duration::from_millis(300);
+
 /// Takes the window's wheel steps over from Slint and scrolls smoothly.
-pub fn install<C: ComponentHandle + 'static>(ui: &C) {
+/// `scrolling` hears when scrolling starts, and when it has stopped for
+/// `HOLD` (or the mouse moved once the list was still), so lists can hold
+/// their hover effects meanwhile. A row lighting up as it slid under the
+/// cursor made Windows send a touchpad flick's coasting as one jump half a
+/// second late, rather than the stream of small steps it sends elsewhere.
+pub fn install<C: ComponentHandle + 'static>(ui: &C, scrolling: impl Fn(bool) + 'static) {
     let pacer = Rc::new(RefCell::new(Pacer::default()));
     // Where the mouse is, in logical pixels: the scrolling goes there.
     let cursor = Rc::new(Cell::new(LogicalPosition::default()));
     let timer = Rc::new(Timer::default());
     let weak = ui.as_weak();
+    let settle = Rc::new(Settle {
+        active: Cell::new(false),
+        timer: Timer::default(),
+        notify: Box::new(scrolling),
+    });
+    // For tests driving a copy with posted mouse moves: Windows sends a
+    // mouse leave at once, as the real cursor is elsewhere, which would
+    // drop hover (and tooltips) straight away.
+    let keep_hover = std::env::var_os("TONEARM_TEST_HOVER").is_some();
     ui.window().on_winit_window_event(move |window, event| match event {
+        WinitEvent::CursorLeft { .. } if keep_hover => EventResult::PreventDefault,
         WinitEvent::CursorMoved { position, .. } => {
             let scale = window.scale_factor();
-            cursor.set(LogicalPosition::new(
-                position.x as f32 / scale,
-                position.y as f32 / scale,
-            ));
+            let at = LogicalPosition::new(position.x as f32 / scale, position.y as f32 / scale);
+            let before = cursor.replace(at);
+            // The hand is back on the mouse: hover at once. Windows also
+            // sends moves that go nowhere, which do not count.
+            let moved = (at.x - before.x).abs() + (at.y - before.y).abs() > 1.0;
+            if moved && pacer.borrow().idle() {
+                settle.end();
+            }
             EventResult::Propagate
         }
         WinitEvent::MouseWheel {
             delta: MouseScrollDelta::LineDelta(x, y),
             ..
         } => {
+            settle.busy();
             pacer
                 .borrow_mut()
                 .push(Instant::now(), [x * LINE, y * LINE]);
             if !timer.running() {
-                let (pacer, cursor, weak) = (pacer.clone(), cursor.clone(), weak.clone());
+                let (pacer, cursor, weak, settle) =
+                    (pacer.clone(), cursor.clone(), weak.clone(), settle.clone());
                 let stop = Rc::downgrade(&timer);
                 let last = Cell::new(Instant::now());
                 timer.start(TimerMode::Repeated, TICK, move || {
@@ -147,6 +173,7 @@ pub fn install<C: ComponentHandle + 'static>(ui: &C) {
                     let [dx, dy] = pacer.borrow_mut().take(now, now - last.replace(now));
                     if let Some(ui) = weak.upgrade() {
                         if dx != 0.0 || dy != 0.0 {
+                            settle.busy();
                             ui.window().dispatch_event(WindowEvent::PointerScrolled {
                                 position: cursor.get(),
                                 delta_x: dx,
@@ -163,9 +190,43 @@ pub fn install<C: ComponentHandle + 'static>(ui: &C) {
             }
             EventResult::PreventDefault
         }
-        // A touchpad that reports pixels scrolls the way Slint does it.
+        // A touchpad that reports pixels scrolls the way Slint does it,
+        // gliding a little after each step, which HOLD outlasts.
+        WinitEvent::MouseWheel { .. } => {
+            settle.busy();
+            EventResult::Propagate
+        }
         _ => EventResult::Propagate,
     });
+}
+
+/// Whether the list is scrolling, as `install` reports it.
+struct Settle {
+    active: Cell<bool>,
+    timer: Timer,
+    notify: Box<dyn Fn(bool)>,
+}
+
+impl Settle {
+    /// The list moved: scrolling, until it has been still for `HOLD`.
+    fn busy(self: &Rc<Self>) {
+        if !self.active.replace(true) {
+            (self.notify)(true);
+        }
+        let this = Rc::downgrade(self);
+        self.timer.start(TimerMode::SingleShot, HOLD, move || {
+            if let Some(this) = this.upgrade() {
+                this.end();
+            }
+        });
+    }
+
+    fn end(&self) {
+        self.timer.stop();
+        if self.active.replace(false) {
+            (self.notify)(false);
+        }
+    }
 }
 
 #[cfg(test)]

@@ -325,6 +325,9 @@ impl Client {
             3 => "Ig",
             4 => "Io",
             5 => "JQ",
+            // Videos: no tab of ours, but matching a Spotify song falls
+            // back to them for songs only uploaded as a video.
+            6 => "IQ",
             _ => return self.search(query),
         };
         let params = format!("EgWKAQ{filter}AWoMEA4QChADEAQQCRAF");
@@ -506,7 +509,12 @@ impl Client {
 
     /// Makes a playlist, private, with these songs in it. Gives its id.
     pub fn create_playlist(&self, title: &str, video_ids: &[String]) -> Result<String, String> {
-        let mut body = json!({"title": title, "description": "", "privacyStatus": "PRIVATE"});
+        self.create_described(title, "", video_ids)
+    }
+
+    /// As `create_playlist`, with a description under the title.
+    pub fn create_described(&self, title: &str, description: &str, video_ids: &[String]) -> Result<String, String> {
+        let mut body = json!({"title": title, "description": description, "privacyStatus": "PRIVATE"});
         if !video_ids.is_empty() {
             body["videoIds"] = json!(video_ids);
         }
@@ -540,6 +548,32 @@ impl Client {
                 "dedupeOption": "DEDUPE_OPTION_SKIP"
             }]),
         )
+    }
+
+    /// Adds songs to a playlist in order, a batch per request, skipping any
+    /// already in it. Calls `progress` with how many are in so far.
+    pub fn add_many(
+        &self,
+        playlist_id: &str,
+        video_ids: &[String],
+        mut progress: impl FnMut(usize),
+    ) -> Result<(), String> {
+        // YouTube Music's own app sends at most a few dozen at a time.
+        for (n, batch) in video_ids.chunks(50).enumerate() {
+            let actions: Vec<Value> = batch
+                .iter()
+                .map(|id| {
+                    json!({
+                        "action": "ACTION_ADD_VIDEO",
+                        "addedVideoId": id,
+                        "dedupeOption": "DEDUPE_OPTION_SKIP"
+                    })
+                })
+                .collect();
+            self.edit_playlist(playlist_id, Value::Array(actions))?;
+            progress((n * 50 + batch.len()).min(video_ids.len()));
+        }
+        Ok(())
     }
 
     /// Takes a song out of a playlist. `set_video_id` says which copy.

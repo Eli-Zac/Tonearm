@@ -32,6 +32,9 @@ pub fn guess_kind(route: &Route) -> i32 {
         Route::Browse { id, .. } if id.starts_with("MPREb_") => 2,
         Route::Browse { id, .. } if id.starts_with("VL") || id.starts_with("PL") => 3,
         Route::Browse { id, .. } if id.starts_with("MPSP") => 5,
+        // Your Spotify library is a grid; the rest are playlists.
+        Route::Browse { id, .. } if id == "spotify:library" => 0,
+        Route::Browse { id, .. } if id.starts_with(crate::spotify::PREFIX) => 3,
         _ => 0,
     }
 }
@@ -152,6 +155,24 @@ impl App {
         let more = self.page.borrow().mores.get(id).cloned();
         if let Some((id, params)) = more {
             self.open(Route::Browse { id, params }, true);
+        }
+    }
+
+    /// Opens Home picked for the mood of the chip at `index`, or plain
+    /// Home again when that mood is the one showing.
+    pub fn chip_clicked(self: &Rc<Self>, index: usize) {
+        let chip = self.page.borrow().chips.get(index).cloned();
+        let Some(chip) = chip else { return };
+        if chip.selected || chip.browse_id.is_empty() {
+            self.open(Route::Home, true);
+        } else {
+            self.open(
+                Route::Browse {
+                    id: chip.browse_id,
+                    params: chip.params,
+                },
+                true,
+            );
         }
     }
 

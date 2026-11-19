@@ -4,9 +4,9 @@
 //! up, offer only what makes sense for it, and keep what each line does
 //! until one is picked.
 
-use crate::innertube::model::{Item, Kind, PageKind};
+use crate::innertube::model::{Header, Item, Kind, PageKind};
 use crate::innertube::Client;
-use crate::{offline, on_ui, shuffled, App, Icons, MenuEntry, Target};
+use crate::{offline, quick_access, on_ui, shuffled, App, Icons, MenuEntry, Target};
 use slint::{ComponentHandle, ModelRc, VecModel};
 use std::rc::Rc;
 
@@ -52,6 +52,26 @@ pub enum Action {
     Follow(String, bool, String),
     RenamePlaylist(String, String),
     DeletePlaylist(String, String),
+    /// Pins an album, artist or playlist to the side menu's Quick access,
+    /// or unpins it.
+    Pin(Item),
+    /// Copies a Spotify playlist into YouTube Music: its browse id and name.
+    CopyToYouTube(String, String),
+    /// Pairs a playlist with one on the other service and syncs them: a
+    /// Spotify browse id or a YouTube Music browse id, and its name.
+    StartSync(String, String),
+    /// Syncs a pair now, by its Spotify browse id.
+    SyncNow(String),
+    /// Undoes a pair's latest sync.
+    UndoSync(String),
+    /// Stops syncing a pair: its Spotify browse id and name.
+    StopSync(String, String),
+    /// Makes the removals held for the user, or keeps the songs.
+    RemoveHeld(String),
+    KeepHeld(String),
+    /// One of the hero's buttons, folded into the dots menu for want of
+    /// room: 1 shuffle, 2 mix, 3 follow, 4 save, 5 download.
+    Hero(u8),
 }
 
 /// What the name prompt is asking for.
@@ -69,6 +89,7 @@ const PAGE_ITEM: i32 = 0;
 const QUEUE_ITEM: i32 = 1;
 const PLAYING: i32 = 2;
 const PAGE: i32 = 3;
+const QUICK_ACCESS: i32 = 4;
 
 struct Lines<'a> {
     icons: Icons<'a>,
@@ -105,9 +126,13 @@ impl Lines<'_> {
     }
 }
 
-/// An album or playlist that can be fetched for its songs.
+/// An album or playlist that can be fetched for its songs from YouTube
+/// Music. A Spotify playlist cannot: its songs are matched as its page
+/// opens, so its menu offers Open instead.
 fn is_collection(item: &Item) -> bool {
+    let spotify = item.browse_id.as_deref().is_some_and(|id| id.starts_with(crate::spotify::PREFIX));
     item.video_id.is_none()
+        && !spotify
         && (matches!(item.kind, Kind::Album | Kind::Playlist)
             || item.browse_id.as_deref().is_some_and(|id| {
                 id.starts_with("MPREb_") || id.starts_with("VL") || id.starts_with("OLAK")
@@ -184,6 +209,14 @@ impl App {
                 }
             }
             PAGE => self.page_lines(&mut lines),
+            // An entry in the side menu's Quick access: the same lines as
+            // its card, ending with Unpin.
+            QUICK_ACCESS => {
+                let item = self.quick_access.borrow().items().get(id).cloned();
+                if let Some(item) = item {
+                    self.item_lines(&mut lines, &item, false);
+                }
+            }
             _ => {}
         }
         let Lines { entries, actions, .. } = lines;
@@ -272,6 +305,92 @@ impl App {
             }
         } else if let Some(id) = &item.browse_id {
             lines.glyph("Open", open, Action::Browse(id.clone()));
+            self.copy_line(lines, id, &item.title);
+        }
+        if let Some(id) = &item.browse_id {
+            self.sync_lines(lines, id, &item.title);
+        }
+        self.pin_line(lines, item);
+    }
+
+    /// Sync's lines for a playlist: "Sync with …" to pair it, or, once it
+    /// is paired, syncing now, reviewing held removals, the songs one side
+    /// cannot have, undoing and stopping.
+    fn sync_lines(&self, lines: &mut Lines, id: &str, title: &str) {
+        let spotify = crate::spotify::is_playlist(id);
+        let youtube = id.starts_with("VL") && !id.starts_with(crate::spotify::PREFIX);
+        if !(spotify || youtube) || !self.client.signed_in() || self.settings.borrow().spotify_cookie.is_empty() {
+            return;
+        }
+        let (repeat, trash) = (lines.icons.get_repeat(), lines.icons.get_trash());
+        let other = if spotify { "YouTube Music" } else { "Spotify" };
+        let Some(pair) = crate::syncing::pair_of(id) else {
+            let label = format!("Sync to {other}");
+            lines.glyph(&label, repeat, Action::StartSync(id.to_string(), title.to_string()));
+            return;
+        };
+        // The way the pair was made: to the copy from the playlist it was
+        // made from. Songs still go both ways.
+        let origin = pair.from_spotify == spotify;
+        let label = if origin { format!("Sync to {other} now") } else { format!("Sync from {other} now") };
+        let key = pair.spotify.clone();
+        lines.glyph(&label, repeat, Action::SyncNow(key.clone()));
+        if pair.held_count() > 0 {
+            let label = format!("Review {} held removals", pair.held_count());
+            let icon = lines.icons.get_queue();
+            lines.glyph(&label, icon, Action::Browse(format!("{}{key}", crate::syncing::REVIEW)));
+        }
+        let missing = pair.not_on_youtube.len() + pair.not_on_spotify.len();
+        if missing > 0 {
+            let label = format!("Songs not synced ({missing})");
+            let icon = lines.icons.get_queue();
+            lines.glyph(&label, icon, Action::Browse(format!("{}{key}", crate::syncing::MISSING)));
+        }
+        if !pair.log.is_empty() {
+            let icon = lines.icons.get_back();
+            lines.glyph("Undo last sync", icon, Action::UndoSync(key.clone()));
+        }
+        lines.glyph("Stop syncing", trash, Action::StopSync(key, pair.name.clone()));
+    }
+
+    /// "Copy to YouTube Music" for a Spotify playlist, or "Update YouTube
+    /// Music copy" once it has been copied, which adds what it lacks. A
+    /// playlist that syncs has no need of either.
+    fn copy_line(&self, lines: &mut Lines, id: &str, title: &str) {
+        if !crate::spotify::is_playlist(id) || !self.client.signed_in() || crate::syncing::pair_of(id).is_some() {
+            return;
+        }
+        let label = if crate::spotify::copy_of(id).is_some() {
+            "Update YouTube Music copy"
+        } else {
+            "Copy to YouTube Music"
+        };
+        let icon = lines.icons.get_library();
+        lines.glyph(label, icon, Action::CopyToYouTube(id.to_string(), title.to_string()));
+    }
+
+    /// "Pin to Quick access", or "Unpin from Quick access" when it is
+    /// pinned. Quick access is the side menu's list of shortcuts.
+    fn pin_line(&self, lines: &mut Lines, item: &Item) {
+        if !quick_access::can_pin(item) {
+            return;
+        }
+        let label = if self.quick_access.borrow().contains(item) {
+            "Unpin from Quick access"
+        } else {
+            "Pin to Quick access"
+        };
+        let pin = lines.icons.get_pin();
+        lines.glyph(label, pin, Action::Pin(item.clone()));
+    }
+
+    /// The album, artist or playlist the open page is, as a pin.
+    fn page_pin(&self, header: &Header) -> Option<Item> {
+        match self.history.borrow().last() {
+            Some(crate::Route::Browse { id, params }) => {
+                quick_access::from_page(header, id, params.as_deref())
+            }
+            _ => None,
         }
     }
 
@@ -279,6 +398,14 @@ impl App {
     fn page_lines(self: &Rc<Self>, lines: &mut Lines) {
         let header = self.page.borrow().header.clone();
         let Some(header) = header else { return };
+        // The removals sync held back: make them, or keep the songs.
+        let open = self.page_key();
+        if let Some(key) = open.strip_prefix(crate::syncing::REVIEW) {
+            let (trash, heart) = (lines.icons.get_trash(), lines.icons.get_heart());
+            lines.glyph("Remove these songs", trash, Action::RemoveHeld(key.to_string()));
+            lines.glyph("Keep these songs", heart, Action::KeepHeld(key.to_string()));
+            return;
+        }
         let songs = self.page_songs();
         let icons = &lines.icons;
         let (play, radio, artist) = (icons.get_play(), icons.get_radio(), icons.get_artist());
@@ -289,11 +416,15 @@ impl App {
             if let Some(endpoint) = header.radio.clone() {
                 lines.glyph("Start radio", radio, Action::Endpoint(endpoint));
             }
+            if let Some(item) = self.page_pin(&header) {
+                self.pin_line(lines, &item);
+            }
             return;
         }
         if !songs.is_empty() {
             lines.glyph("Play", play, Action::PlayPage(false));
         }
+        self.folded_lines(lines);
         if let Some(id) = header.byline_browse_id.clone() {
             lines.glyph("Go to artist", artist, Action::Browse(id));
         }
@@ -301,6 +432,36 @@ impl App {
             let (settings, trash) = (lines.icons.get_settings(), lines.icons.get_trash());
             lines.glyph("Rename playlist", settings, Action::RenamePlaylist(playlist.clone(), header.title.clone()));
             lines.glyph("Delete playlist", trash, Action::DeletePlaylist(playlist, header.title.clone()));
+        }
+        self.copy_line(lines, &open, &header.title);
+        self.sync_lines(lines, &open, &header.title);
+        if let Some(item) = self.page_pin(&header) {
+            self.pin_line(lines, &item);
+        }
+    }
+
+    /// The hero's buttons that its row had no room for, which the dots
+    /// menu offers instead, in the row's order.
+    fn folded_lines(&self, lines: &mut Lines) {
+        let data = self.ui.get_header();
+        let fit = self.ui.get_hero_fit();
+        let icons = &lines.icons;
+        let (shuffle, heart, download, artist) = (icons.get_shuffle(), icons.get_heart(), icons.get_download(), icons.get_artist());
+        let sparkle = icons.get_sparkle();
+        if fit < 1 && data.can_shuffle {
+            lines.glyph("Shuffle play", shuffle, Action::Hero(1));
+        }
+        if fit < 2 && data.can_mix {
+            lines.glyph(if data.mixing { "Turn off mix" } else { "Mix" }, sparkle, Action::Hero(2));
+        }
+        if fit < 3 && data.can_follow {
+            lines.glyph(if data.followed { "Unfollow" } else { "Follow" }, artist, Action::Hero(3));
+        }
+        if fit < 4 && data.can_like {
+            lines.glyph(if data.liked { "Remove from library" } else { "Save to library" }, heart, Action::Hero(4));
+        }
+        if fit < 5 && data.download != 0 && data.download != 3 {
+            lines.glyph("Download all", download, Action::Hero(5));
         }
     }
 
@@ -342,7 +503,10 @@ impl App {
                     self.api.run(move || {
                         let result = client.rate(&video_id, true);
                         on_ui(move |app| match result {
-                            Ok(()) => app.toast(format!("Liked {}", item.title)),
+                            Ok(()) => {
+                                app.toast(format!("Liked {}", item.title));
+                                app.sync_soon(crate::syncing::LIKED_MUSIC);
+                            }
                             Err(message) => app.toast(message),
                         });
                     });
@@ -360,7 +524,10 @@ impl App {
                 self.api.run(move || {
                     let result = client.add_to_playlist(&playlist, &video_id);
                     on_ui(move |app| match result {
-                        Ok(()) => app.toast(format!("Added {} to {title}", item.title)),
+                        Ok(()) => {
+                            app.toast(format!("Added {} to {title}", item.title));
+                            app.sync_soon(&playlist);
+                        }
                         Err(message) => app.toast(message),
                     });
                 });
@@ -377,6 +544,7 @@ impl App {
                         Ok(()) => {
                             app.toast(format!("Removed {} from the playlist", item.title));
                             app.reload_page();
+                            app.sync_soon(&playlist);
                         }
                         Err(message) => app.toast(message),
                     });
@@ -427,6 +595,25 @@ impl App {
                 let question = format!("Delete {title}?");
                 self.ask(Prompt::Delete(playlist, title), &question, "Delete", "", true);
             }
+            Action::Pin(item) => self.toggle_pin(&item),
+            Action::CopyToYouTube(id, title) => self.copy_spotify(id, title),
+            Action::StartSync(id, title) => self.start_sync(id, title),
+            Action::SyncNow(key) => self.sync_pair(key, false),
+            Action::UndoSync(key) => self.undo_sync(key),
+            Action::StopSync(key, name) => {
+                crate::syncing::unpair(&key);
+                self.toast(format!("Stopped syncing {name}. Both playlists stay as they are."));
+                self.refresh_syncs_page();
+            }
+            Action::Hero(button) => match button {
+                1 => self.play_page(true),
+                2 => self.toggle_mix(),
+                3 => self.toggle_follow(),
+                4 => self.toggle_like_page(),
+                _ => self.download_page(),
+            },
+            Action::RemoveHeld(key) => self.settle_held(key, true),
+            Action::KeepHeld(key) => self.settle_held(key, false),
         }
     }
 

@@ -222,6 +222,10 @@ pub enum Layout {
     Grid,
     /// Wide 16:9 cards, such as "Music videos for you".
     Wide,
+    /// Square cards wrapped onto as many lines as they need, as a page
+    /// that is one row of cards draws them. Library's own grid keeps this
+    /// under the row of Spotify playlists.
+    Wrapped,
 }
 
 /// A chip over Home, such as "Relax" or "Workout": Home again, picked for
