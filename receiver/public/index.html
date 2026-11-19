@@ -4,7 +4,8 @@
   with its own receiver app (TONEARM_CAST_APP). The music is Tonearm's
   stream from the computer, played by the page's audio element. Tonearm
   sends the song playing on urn:x-cast:app.tonearm, and the page shows its
-  cover, title, artist and progress. Speakers without a screen just play.
+  cover, title, artist and progress. It also puts the song in the media
+  status, so speakers, smart clocks and the Google Home app show it too.
 -->
 <html lang="en">
 <head>
@@ -152,6 +153,22 @@
     }
     document.body.classList.toggle('paused', clock.paused);
     tick();
+    if (changed) announce(now);
+  }
+
+  // Tells everything that follows this cast (the device's own display,
+  // the Google Home app, phone notifications) about the song, through the
+  // media status. Speakers with no web page to show rely on this alone.
+  function announce(now) {
+    const media = player.getMediaInformation();
+    if (!media) return;
+    const meta = new cast.framework.messages.MusicTrackMediaMetadata();
+    meta.title = now.title || '';
+    meta.artist = now.artist || '';
+    meta.albumName = now.album || '';
+    if (now.cover) meta.images = [new cast.framework.messages.Image(now.cover)];
+    media.metadata = meta;
+    player.setMediaInformation(media, true);
   }
 
   function tick() {
@@ -176,6 +193,11 @@
       $('artist').textContent = meta.artist || '';
     }
     return request;
+  });
+
+  // A song that arrived before the stream had loaded goes out once it has.
+  player.addEventListener(cast.framework.events.EventType.PLAYER_LOAD_COMPLETE, () => {
+    if (song) announce(song);
   });
 
   context.addCustomMessageListener(NAMESPACE, (event) => {

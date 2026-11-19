@@ -1,10 +1,12 @@
 //! One cast: opens the receiver app on the device, has it play our
 //! stream, and keeps the two in step until it ends.
 //!
-//! Devices with a screen get Tonearm's own receiver (the page in
-//! `receiver/`) when the build has its id in `TONEARM_CAST_APP`, and are
-//! told the song playing so the screen can show it. Everything else, and
-//! any device that won't open ours, gets Google's Default Media Receiver.
+//! Devices get Tonearm's own receiver (the page in `receiver/`) when the
+//! build has its id in `TONEARM_CAST_APP`, and are told the song playing:
+//! a screen shows it, and the media status carries it to a smart clock's
+//! display, the Google Home app and phone notifications. Speaker groups,
+//! and any device that won't open ours, get Google's Default Media
+//! Receiver.
 //!
 //! Pause and play follow the engine, through the pipe. Volume goes to the
 //! device. When someone pauses or changes the volume on the device itself
@@ -70,11 +72,11 @@ pub struct NowPlaying {
     pub paused: bool,
 }
 
-/// The receiver to open on a device: ours where there is a screen to
-/// show the song on. A speaker gains nothing from it.
+/// The receiver to open on a device: ours, apart from speaker groups,
+/// which play Google's.
 fn app_for(device: &Device) -> &'static str {
     match TONEARM_APP {
-        Some(app) if device.screen && !device.group => app,
+        Some(app) if !device.group => app,
         _ => DEFAULT_APP,
     }
 }
