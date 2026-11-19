@@ -5,6 +5,7 @@
 //! track that finishes downloading is kept in the offline cache, and cached
 //! or downloaded tracks play straight from their file.
 
+use crate::cast::Pipe;
 use crate::mix::{self, Transition};
 use rodio::{OutputStream, OutputStreamHandle, Sink};
 use std::io::{self, Read, Seek, SeekFrom};
@@ -64,6 +65,9 @@ enum Command {
     Pause,
     Seek(f32),
     Volume(f32),
+    /// Plays into a Cast device's stream from now on, or with None, back
+    /// on this computer.
+    Route(Option<Arc<Pipe>>),
     Stop,
 }
 
@@ -81,6 +85,10 @@ pub struct Status {
     /// The `follow` token of a song that just started gaplessly. The app
     /// takes it, moves the queue on, and reports the song's generation.
     pub followed: AtomicU64,
+    /// How far what is heard trails `position_ms`: about two seconds while
+    /// casting, else zero. The position stays the mixer's own, which mixes
+    /// are timed by. Only what is shown takes this off.
+    pub lag_ms: AtomicU64,
     pub error: Mutex<String>,
 }
 
@@ -156,16 +164,125 @@ impl Audio {
     pub fn volume(&self, volume: f32) {
         let _ = self.tx.send(Command::Volume(volume));
     }
+    /// Plays into `pipe` for a Cast device, or with None, here again. The
+    /// song playing carries on where it was.
+    pub fn route(&self, pipe: Option<Arc<Pipe>>) {
+        let _ = self.tx.send(Command::Route(pipe));
+    }
     pub fn stop(&self) {
         self.status.prepared.store(0, Ordering::SeqCst);
         let _ = self.tx.send(Command::Stop);
     }
 }
 
+/// Where the mixer plays: the sound card, or the stream a Cast device
+/// pulls.
+enum Out {
+    Device(Sink),
+    Cast { pipe: Arc<Pipe>, feed: u64 },
+}
+
+/// Where to move the mixer to.
+enum Target<'a> {
+    Device(&'a OutputStreamHandle),
+    Cast(&'a Arc<Pipe>),
+}
+
+impl Out {
+    /// Plays `mixer` on `to`, and stops whatever pulled it before.
+    fn attach(mixer: &Arc<Mixer>, rate: u32, to: Target, volume: f32, paused: bool) -> Result<Out, String> {
+        let take = || {
+            let id = mixer.owner.fetch_add(1, Ordering::SeqCst) + 1;
+            Handoff::new(mixer.clone(), id, rate)
+        };
+        match to {
+            Target::Device(handle) => {
+                let sink = Sink::try_new(handle).map_err(|e| format!("No audio output: {e}"))?;
+                sink.set_volume(volume);
+                if paused {
+                    sink.pause();
+                }
+                // The old output stops pulling before the new one starts.
+                sink.append(take());
+                Ok(Out::Device(sink))
+            }
+            Target::Cast(pipe) => {
+                pipe.set_paused(paused);
+                let feed = pipe.attach(Box::new(take()));
+                Ok(Out::Cast {
+                    pipe: pipe.clone(),
+                    feed,
+                })
+            }
+        }
+    }
+
+    fn play(&self) {
+        match self {
+            Out::Device(sink) => sink.play(),
+            Out::Cast { pipe, .. } => pipe.set_paused(false),
+        }
+    }
+
+    fn pause(&self) {
+        match self {
+            Out::Device(sink) => sink.pause(),
+            Out::Cast { pipe, .. } => pipe.set_paused(true),
+        }
+    }
+
+    fn is_paused(&self) -> bool {
+        match self {
+            Out::Device(sink) => sink.is_paused(),
+            Out::Cast { pipe, .. } => pipe.paused(),
+        }
+    }
+
+    /// Whether the mixer has run out: the song ended with nothing after.
+    fn empty(&self) -> bool {
+        match self {
+            Out::Device(sink) => sink.empty(),
+            Out::Cast { pipe, feed } => !pipe.has(*feed),
+        }
+    }
+
+    fn seek(&self, to: Duration) {
+        match self {
+            Out::Device(sink) => {
+                let _ = sink.try_seek(to);
+            }
+            Out::Cast { pipe, feed } => pipe.seek(*feed, to),
+        }
+    }
+
+    /// The Cast device has a volume of its own, which the app sets.
+    fn set_volume(&self, volume: f32) {
+        if let Out::Device(sink) = self {
+            sink.set_volume(volume);
+        }
+    }
+
+    /// How long what is heard trails what the mixer has made.
+    fn lag(&self) -> Duration {
+        match self {
+            Out::Device(_) => Duration::ZERO,
+            Out::Cast { pipe, .. } => pipe.lead(),
+        }
+    }
+}
+
+impl Drop for Out {
+    fn drop(&mut self) {
+        if let Out::Cast { pipe, feed } = self {
+            pipe.detach(*feed);
+        }
+    }
+}
+
 /// The song playing through the mixer, and how to reach it.
 struct Playing {
-    sink: Sink,
-    /// The mixer behind the sink, kept so it can move to another device.
+    out: Out,
+    /// The mixer behind the output, kept so it can move to another.
     mixer: Arc<Mixer>,
     /// The mixer's sample rate. Songs prepared for it open at this rate,
     /// even after a move to a device that runs at another.
@@ -181,17 +298,11 @@ impl Playing {
         let _ = self.mix.send(command);
     }
 
-    /// Carries on through `handle` from where the old device left off.
-    fn move_to(&mut self, handle: &OutputStreamHandle, volume: f32) -> Result<(), String> {
-        let sink = Sink::try_new(handle).map_err(|e| e.to_string())?;
-        sink.set_volume(volume);
-        if self.sink.is_paused() {
-            sink.pause();
-        }
-        // The old sink stops pulling before the new one starts.
-        let id = self.mixer.owner.fetch_add(1, Ordering::SeqCst) + 1;
-        sink.append(Handoff::new(self.mixer.clone(), id, self.rate));
-        self.sink = sink;
+    /// Carries on through `to` from where the old output left off. A song
+    /// mixed at another rate is resampled by the sink.
+    fn move_to(&mut self, to: Target, volume: f32) -> Result<(), String> {
+        let paused = self.out.is_paused();
+        self.out = Out::attach(&self.mixer, self.rate, to, volume, paused)?;
         Ok(())
     }
 }
@@ -283,6 +394,22 @@ impl rodio::Source for Handoff {
     }
 }
 
+impl crate::cast::Feed for Handoff {
+    fn fill(&mut self, out: &mut [f32]) -> usize {
+        for (n, slot) in out.iter_mut().enumerate() {
+            match self.next() {
+                Some(sample) => *slot = sample,
+                None => return n,
+            }
+        }
+        out.len()
+    }
+
+    fn seek(&mut self, to: Duration) {
+        let _ = rodio::Source::try_seek(self, to);
+    }
+}
+
 fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
     // The device opens on first play, so an idle app holds no audio handle.
     let mut output: Option<Output> = None;
@@ -300,6 +427,9 @@ fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
     // Songs the mixer is done with, freed here rather than in the callback.
     let (done_tx, done_rx) = mpsc::channel::<mix::Deck>();
     let mut volume = 1.0f32;
+    // The Cast device's stream, while casting. Songs play into it in place
+    // of the sound card, at its rate.
+    let mut cast: Option<Arc<Pipe>> = None;
     let fail = |status: &Status, message: String| {
         *status.error.lock().unwrap() = message;
         status.state.store(FAILED, Ordering::SeqCst);
@@ -316,7 +446,7 @@ fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
                 if generation != status.generation.load(Ordering::SeqCst) {
                     continue; // A newer track was requested while we waited.
                 }
-                if output.is_none() {
+                if output.is_none() && cast.is_none() {
                     match open_output() {
                         Ok(opened) => output = Some(opened),
                         Err(e) => {
@@ -325,10 +455,14 @@ fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
                         }
                     }
                 }
-                let Output { handle, rate, .. } = output.as_ref().unwrap();
-                let opened = open_track(input, *rate).and_then(|track| {
+                let (target, rate) = match (&cast, &output) {
+                    (Some(pipe), _) => (Target::Cast(pipe), pipe.rate()),
+                    (None, Some(o)) => (Target::Device(&o.handle), o.rate),
+                    (None, None) => unreachable!("opened above"),
+                };
+                let opened = open_track(input, rate).and_then(|track| {
                     status.duration_ms.store(length_ms(&track), Ordering::SeqCst);
-                    start(handle, *rate, track, volume, done_tx.clone())
+                    start(target, rate, track, volume, done_tx.clone())
                 });
                 match opened {
                     Ok(started) => {
@@ -387,13 +521,13 @@ fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
             }
             Ok(Command::Play) => {
                 if let Some(p) = &playing {
-                    p.sink.play();
+                    p.out.play();
                     status.state.store(PLAYING, Ordering::SeqCst);
                 }
             }
             Ok(Command::Pause) => {
                 if let Some(p) = &playing {
-                    p.sink.pause();
+                    p.out.pause();
                     status.state.store(PAUSED, Ordering::SeqCst);
                 }
             }
@@ -401,7 +535,42 @@ fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
                 // A seek during a crossfade cuts the old song off. The new
                 // one plays on at full volume.
                 if let Some(p) = &playing {
-                    let _ = p.sink.try_seek(Duration::from_secs_f32(seconds.max(0.0)));
+                    p.out.seek(Duration::from_secs_f32(seconds.max(0.0)));
+                }
+            }
+            Ok(Command::Route(Some(pipe))) => {
+                // The stream runs at the rate the playing song is mixed at,
+                // so it carries on without resampling. Songs after it open
+                // at that rate too.
+                let rate = playing
+                    .as_ref()
+                    .map(|p| p.rate)
+                    .or(output.as_ref().map(|o| o.rate))
+                    .unwrap_or(48_000);
+                pipe.set_rate(rate);
+                if let Some(p) = &mut playing {
+                    if let Err(e) = p.move_to(Target::Cast(&pipe), volume) {
+                        eprintln!("cast: {e}");
+                    }
+                }
+                cast = Some(pipe);
+            }
+            Ok(Command::Route(None)) => {
+                if cast.take().is_some() {
+                    status.lag_ms.store(0, Ordering::SeqCst);
+                    if output.is_none() {
+                        output = open_output().map_err(|e| eprintln!("audio output: {e}")).ok();
+                    }
+                    if let Some(p) = &mut playing {
+                        let moved = match &output {
+                            Some(o) => p.move_to(Target::Device(&o.handle), volume),
+                            None => Err("no output device".into()),
+                        };
+                        if let Err(e) = moved {
+                            playing = None;
+                            fail(&status, format!("No audio output: {e}"));
+                        }
+                    }
                 }
             }
             Ok(Command::Follow { token, gain }) => {
@@ -427,7 +596,7 @@ fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
             Ok(Command::Volume(v)) => {
                 volume = v.clamp(0.0, 1.0);
                 if let Some(p) = &playing {
-                    p.sink.set_volume(volume);
+                    p.out.set_volume(volume);
                 }
             }
             Ok(Command::Stop) => {
@@ -455,7 +624,8 @@ fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
                 Err(message) => eprintln!("crossfade: {message}"),
             }
         }
-        if output.is_some() && checked.elapsed() >= Duration::from_secs(1) {
+        // While casting the sound card is not in use, so its changes wait.
+        if output.is_some() && cast.is_none() && checked.elapsed() >= Duration::from_secs(1) {
             checked = Instant::now();
             let now = default_output_name();
             let current = output.as_ref().map(|o| o.name.as_str());
@@ -464,7 +634,7 @@ fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
                 match open_output() {
                     Ok(moved) => {
                         if let Some(p) = &mut playing {
-                            if let Err(e) = p.move_to(&moved.handle, volume) {
+                            if let Err(e) = p.move_to(Target::Device(&moved.handle), volume) {
                                 eprintln!("audio output: {e}");
                             }
                         }
@@ -494,7 +664,10 @@ fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
         status
             .position_ms
             .store(p.monitor.position_ms.load(Ordering::Relaxed), Ordering::SeqCst);
-        if p.sink.empty() && status.state.load(Ordering::SeqCst) == PLAYING {
+        status
+            .lag_ms
+            .store(p.out.lag().as_millis() as u64, Ordering::SeqCst);
+        if p.out.empty() && status.state.load(Ordering::SeqCst) == PLAYING {
             status.state.store(ENDED, Ordering::SeqCst);
         }
     }
@@ -538,17 +711,15 @@ fn open_track(input: Input, rate: u32) -> Result<crate::decode::Track, String> {
     }
 }
 
-/// Plays `track` through a mixer on a sink of its own. The songs after it
-/// mix in on the same mixer.
+/// Plays `track` through a mixer on an output of its own. The songs after
+/// it mix in on the same mixer.
 fn start(
-    handle: &OutputStreamHandle,
+    target: Target,
     rate: u32,
     track: crate::decode::Track,
     volume: f32,
     done: Sender<mix::Deck>,
 ) -> Result<Playing, String> {
-    let sink = Sink::try_new(handle).map_err(|e| format!("No audio output: {e}"))?;
-    sink.set_volume(volume);
     let (tx, rx) = mpsc::channel();
     let monitor = Arc::new(mix::Monitor::default());
     let deck = mix::Deck::new(Box::new(track), 1.0);
@@ -556,9 +727,9 @@ fn start(
         mix: Mutex::new(mix::Mix::new(rate, deck, rx, monitor.clone(), done)),
         owner: AtomicU64::new(0),
     });
-    sink.append(Handoff::new(mixer.clone(), 0, rate));
+    let out = Out::attach(&mixer, rate, target, volume, false)?;
     Ok(Playing {
-        sink,
+        out,
         mixer,
         rate,
         mix: tx,
@@ -836,6 +1007,90 @@ impl symphonia::core::io::MediaSource for HttpSource {
         }
         buffer.total.or(Some(buffer.data.len() as u64))
     }
+}
+
+/// Casts a saved song as a device would hear it, over this computer's own
+/// network: the engine moves to the stream mid song and back again.
+/// `TONEARM_AUDIO_TEST="<song>" cargo test engine_casts -- --ignored`.
+#[cfg(test)]
+#[test]
+#[ignore]
+fn engine_casts_and_comes_back() {
+    use std::io::{BufRead, BufReader, Write};
+    let Ok(spec) = std::env::var("TONEARM_AUDIO_TEST") else {
+        return;
+    };
+    let file = std::path::PathBuf::from(spec.split('|').next().unwrap());
+    let audio = Audio::new();
+    let s = audio.status.clone();
+    let wait = |what: &str, ok: &dyn Fn() -> bool| {
+        let start = Instant::now();
+        while !ok() {
+            assert!(start.elapsed() < Duration::from_secs(10), "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    let pos = || s.position_ms.load(Ordering::SeqCst);
+    audio.volume(0.0);
+    audio.load(Input::File(file), 1);
+    audio.seek(60.0);
+    wait("playing", &|| s.state.load(Ordering::SeqCst) == PLAYING && pos() > 60_200);
+
+    let pipe = Pipe::new();
+    let server = crate::cast::Server::start("127.0.0.1".parse().unwrap(), pipe.clone()).unwrap();
+    audio.route(Some(pipe.clone()));
+    // Not pulled until the device connects: the song waits where it was.
+    std::thread::sleep(Duration::from_millis(400));
+    let held = pos();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(pos().abs_diff(held) < 50, "moved with no device: {held} -> {}", pos());
+
+    let address = server.url.trim_start_matches("http://");
+    let (host, path) = address.split_at(address.find('/').unwrap());
+    let mut stream = std::net::TcpStream::connect(host).unwrap();
+    write!(stream, "GET {path} HTTP/1.1\r\nHost: {host}\r\n\r\n").unwrap();
+    let mut reader = BufReader::new(stream);
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        if line.trim().is_empty() {
+            break;
+        }
+    }
+    let mut header = [0u8; 44];
+    reader.read_exact(&mut header).unwrap();
+    let rate = u32::from_le_bytes(header[24..28].try_into().unwrap());
+    // A second of the song, which is not silence.
+    let mut second = vec![0u8; rate as usize * 4];
+    reader.read_exact(&mut second).unwrap();
+    let loud = second
+        .chunks(2)
+        .map(|b| i16::from_le_bytes([b[0], b[1]]).unsigned_abs() as u64)
+        .sum::<u64>()
+        / (second.len() as u64 / 2);
+    assert!(loud > 100, "the stream is silent: {loud}");
+    // The engine ran ahead by the lead, and what shows takes it off.
+    wait("position moves on", &|| pos() > held + 1500);
+    wait("lag reported", &|| s.lag_ms.load(Ordering::SeqCst) > 1000);
+
+    // Paused: the stream stops coming once the lead is out.
+    audio.pause();
+    std::thread::sleep(Duration::from_millis(200));
+    let paused_at = pos();
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(pos(), paused_at, "moved while paused");
+    audio.play();
+    reader.read_exact(&mut second).unwrap();
+
+    // Back on this computer, where it carries on from the same place.
+    audio.route(None);
+    std::thread::sleep(Duration::from_millis(200));
+    let back = pos();
+    wait("plays here again", &|| pos() > back + 300);
+    assert_eq!(s.lag_ms.load(Ordering::SeqCst), 0);
+    assert_eq!(s.state.load(Ordering::SeqCst), PLAYING);
+    pipe.close();
+    audio.stop();
 }
 
 /// Plays saved songs through the real engine and output device, at zero

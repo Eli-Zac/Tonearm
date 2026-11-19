@@ -5,6 +5,8 @@ mod animated_art;
 mod audio;
 mod blur;
 mod canvas;
+mod cast;
+mod casting;
 mod decode;
 mod detail;
 mod quick_access;
@@ -20,6 +22,7 @@ mod menu;
 mod mix;
 mod mixing;
 mod recommend;
+mod releases;
 mod transition;
 #[cfg(windows)]
 mod shell;
@@ -33,6 +36,7 @@ mod pool;
 mod resolver;
 mod services;
 mod spotify;
+mod spotify_token;
 mod session;
 mod store;
 mod sync;
@@ -642,6 +646,8 @@ struct App {
     menu: RefCell<Vec<menu::Action>>,
     /// What the name prompt open now is for.
     prompt: RefCell<Option<menu::Prompt>>,
+    /// The Cast devices found, and the cast to one of them.
+    casting: RefCell<casting::Casting>,
     #[cfg(windows)]
     keys: RefCell<Option<media_keys::Keys>>,
 }
@@ -3167,7 +3173,7 @@ impl App {
                 queue: player.queue.clone(),
                 index: player.index,
                 position,
-                volume: self.ui.get_volume(),
+                volume: self.local_volume(),
                 shuffle: player.shuffle,
                 repeat: player.repeat,
             }
@@ -3407,6 +3413,10 @@ impl App {
     fn set_volume(&self, volume: f32) {
         let volume = volume.clamp(0.0, 1.0);
         self.ui.set_volume(volume);
+        // A Cast device has its own volume, on its own scale.
+        if self.cast_volume(volume) {
+            return;
+        }
         self.audio.volume(volume * volume);
     }
 
@@ -4752,6 +4762,10 @@ impl App {
             } else {
                 time = base;
             }
+            // While casting, what is heard trails the mixer by the stream's
+            // lead. What shows follows what is heard. Mixes keep to the
+            // mixer's own time.
+            time = time.saturating_sub(status.lag_ms.load(Ordering::SeqCst));
             let seconds = time as f32 / 1000.0;
             self.show_playhead(seconds);
             // Marks where the next song will start to mix in.
@@ -5084,13 +5098,13 @@ impl App {
             s.spotify_cookie = cookie.strip_prefix("sp_dc=").unwrap_or(cookie).trim_end_matches(';').to_string();
         }
         self.apply_services("Saved");
-        canvas::forget_token();
+        spotify_token::forget_token();
     }
 
     /// Forgets the Spotify cookie, which turns Canvas off.
     fn canvas_unlink(self: &Rc<Self>) {
         self.settings.borrow_mut().spotify_cookie.clear();
-        canvas::forget_token();
+        spotify_token::forget_token();
         self.stop_canvas();
         self.apply_services("Canvas is off");
     }
@@ -5693,6 +5707,29 @@ fn probe(args: &[String]) {
         "browse" => client.browse(arg(1), None),
         "featured" => client.search_featured(arg(1)),
         "explore" => explore(&client),
+        // `--probe cast` lists the Cast devices on the network for ten
+        // seconds, and what each is running. It changes nothing on them.
+        "cast" => {
+            let finder = cast::Finder::start(|| {});
+            std::thread::sleep(Duration::from_secs(10));
+            for device in finder.devices() {
+                println!(
+                    "{} | {} | {} | group {} | screen {} | {}",
+                    device.name, device.model, device.addr, device.group, device.screen, device.id
+                );
+                match cast::status(&device) {
+                    Ok(status) => {
+                        let apps: Vec<&str> = status["applications"]
+                            .as_array()
+                            .map(|a| a.iter().filter_map(|a| a["displayName"].as_str()).collect())
+                            .unwrap_or_default();
+                        println!("    running {apps:?}, volume {}", status["volume"]["level"]);
+                    }
+                    Err(e) => println!("    status: {e}"),
+                }
+            }
+            return;
+        }
         // The song a video in a radio stands for: --probe song <videoId>
         "song" => {
             let video = client
@@ -6295,6 +6332,7 @@ translate: Cell::new(load_translate()),
         recent_searches: RefCell::new(load_recent_searches()),
         menu: RefCell::default(),
         prompt: RefCell::default(),
+        casting: RefCell::default(),
         #[cfg(windows)]
         keys: RefCell::new(None),
     });
@@ -6358,6 +6396,7 @@ translate: Cell::new(load_translate()),
         app.seek_to(fraction * duration);
     });
     on!(on_set_volume, |app, volume| app.set_volume(volume));
+    on!(on_cast_picked, |app, index| app.cast_picked(index));
     {
         // Returns a value, which `on!` cannot.
         let weak = Rc::downgrade(&app);
@@ -6497,12 +6536,14 @@ translate: Cell::new(load_translate()),
     app.repair_downloads();
     app.check_update(true);
     app.schedule_syncs();
+    app.start_cast_search();
     // Not `run`, which quits as soon as the window hides in the tray.
     #[cfg(windows)]
     instance.listen(|| on_ui(|app| app.show_window()));
     app.ui.show()?;
     let result = slint::run_event_loop_until_quit();
     let _ = app.ui.hide();
+    app.finish_cast();
     #[cfg(windows)]
     taskbar::detach();
     // Save where we are, and wait for it behind any saves still queued.

@@ -111,7 +111,7 @@ fn query(http: &ureq::Agent, token: &str, (name, hash): (&str, &str), variables:
     let root: Value = match response {
         Ok(r) => r.into_json().map_err(|e| e.to_string())?,
         Err(ureq::Error::Status(401, _)) => {
-            crate::canvas::forget_token();
+            crate::spotify_token::forget_token();
             return Err("Spotify signed Tonearm out. Copy a fresh sp_dc cookie in Settings.".into());
         }
         Err(ureq::Error::Status(429, _)) => return Err("Spotify is busy. Try again in a minute.".into()),
@@ -239,7 +239,7 @@ fn track_of(data: &Value, uri: &str) -> Option<Track> {
 /// Your playlists, the ones you made and the ones you follow, in your
 /// library's order. Liked Songs is not among them: see `liked`.
 pub fn playlists(http: &ureq::Agent, cookie: &str) -> Result<Vec<Playlist>, String> {
-    let token = crate::canvas::web_token(http, cookie)?;
+    let token = crate::spotify_token::web_token(http, cookie)?;
     let vars = json!({
         "filters": ["Playlists"],
         "order": null,
@@ -279,7 +279,7 @@ pub fn playlists(http: &ureq::Agent, cookie: &str) -> Result<Vec<Playlist>, Stri
 
 /// Your Liked Songs, newest first.
 pub fn liked(http: &ureq::Agent, cookie: &str) -> Result<Vec<Track>, String> {
-    let token = crate::canvas::web_token(http, cookie)?;
+    let token = crate::spotify_token::web_token(http, cookie)?;
     let mut tracks = Vec::new();
     paged(http, &token, LIKED_SONGS, 100, json!({}), "/data/me/library/tracks", |_| {}, |_, entry| {
         let wrapper = &entry["track"];
@@ -294,7 +294,7 @@ pub fn liked(http: &ureq::Agent, cookie: &str) -> Result<Vec<Track>, String> {
 
 /// A playlist and its songs.
 pub fn playlist(http: &ureq::Agent, cookie: &str, id: &str) -> Result<(Playlist, Vec<Track>), String> {
-    let token = crate::canvas::web_token(http, cookie)?;
+    let token = crate::spotify_token::web_token(http, cookie)?;
     let vars = json!({ "uri": format!("spotify:playlist:{id}"), "enableWatchFeedEntrypoint": false });
     let mut head: Option<Playlist> = None;
     let mut tracks = Vec::new();
@@ -335,7 +335,7 @@ pub fn playlist(http: &ureq::Agent, cookie: &str, id: &str) -> Result<(Playlist,
 /// whenever a song is added or taken out: a playlist's revision, or Liked
 /// Songs' count and newest song.
 pub fn fingerprint(http: &ureq::Agent, cookie: &str, id: &str) -> Result<String, String> {
-    let token = crate::canvas::web_token(http, cookie)?;
+    let token = crate::spotify_token::web_token(http, cookie)?;
     if id == LIKED {
         let root = query(http, &token, LIKED_SONGS, json!({ "offset": 0, "limit": 1 }))?;
         let list = root.pointer("/data/me/library/tracks").ok_or("Spotify sent nothing")?;
@@ -415,7 +415,7 @@ fn track_uris(ids: &[String]) -> Vec<String> {
 
 /// Adds songs, by track id, to the end of a playlist, in order.
 pub fn add_tracks(http: &ureq::Agent, cookie: &str, playlist_id: &str, ids: &[String]) -> Result<(), String> {
-    let token = crate::canvas::web_token(http, cookie)?;
+    let token = crate::spotify_token::web_token(http, cookie)?;
     for batch in ids.chunks(100) {
         mutate(
             http,
@@ -434,7 +434,7 @@ pub fn add_tracks(http: &ureq::Agent, cookie: &str, playlist_id: &str, ids: &[St
 
 /// Takes songs out of a playlist, by their places in it (`Track::uid`).
 pub fn remove_tracks(http: &ureq::Agent, cookie: &str, playlist_id: &str, uids: &[String]) -> Result<(), String> {
-    let token = crate::canvas::web_token(http, cookie)?;
+    let token = crate::spotify_token::web_token(http, cookie)?;
     for batch in uids.chunks(100) {
         mutate(
             http,
@@ -448,7 +448,7 @@ pub fn remove_tracks(http: &ureq::Agent, cookie: &str, playlist_id: &str, uids: 
 
 /// Likes songs, or takes them out of Liked Songs.
 pub fn like_tracks(http: &ureq::Agent, cookie: &str, ids: &[String], like: bool) -> Result<(), String> {
-    let token = crate::canvas::web_token(http, cookie)?;
+    let token = crate::spotify_token::web_token(http, cookie)?;
     for batch in ids.chunks(50) {
         let (op, vars) = if like {
             (ADD_TO_LIBRARY, json!({ "libraryItemUris": track_uris(batch), "interactionId": null }))
@@ -488,7 +488,7 @@ fn playlist_service(http: &ureq::Agent, token: &str, step: &str, path: &str, bod
     match response {
         Ok(r) => Ok(r.into_json().unwrap_or(Value::Null)),
         Err(ureq::Error::Status(401, _)) => {
-            crate::canvas::forget_token();
+            crate::spotify_token::forget_token();
             Err("Spotify signed Tonearm out. Copy a fresh sp_dc cookie in Settings.".into())
         }
         Err(ureq::Error::Status(code, r)) => {
@@ -504,7 +504,7 @@ fn playlist_service(http: &ureq::Agent, token: &str, step: &str, path: &str, bod
 /// Makes a new, empty playlist in your library, at the top as Spotify
 /// puts new ones, and gives its id.
 pub fn create_playlist(http: &ureq::Agent, cookie: &str, name: &str) -> Result<String, String> {
-    let token = crate::canvas::web_token(http, cookie)?;
+    let token = crate::spotify_token::web_token(http, cookie)?;
     // A new playlist is one change to an empty one: its name. Only the
     // list of changes goes, with no "info" beside it, unlike the library
     // change below.

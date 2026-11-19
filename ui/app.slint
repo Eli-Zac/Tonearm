@@ -168,6 +168,20 @@ component ServiceBadge inherits Rectangle {
     }
 }
 
+// A Cast device in the cast menu. `kind` is 0 for a speaker, 1 for a TV or
+// anything else with a screen, 2 for a speaker group.
+export struct CastDevice {
+    name: string,
+    model: string,
+    kind: int,
+}
+
+// The cast button's icon: a screen with the corner waves, as a filled
+// path in a 24 unit box. The icon font has no cast glyph.
+global CastIcon {
+    out property <string> shape: "M 2 8 L 2 4 L 22 4 L 22 20 L 14 20 L 14 18.5 L 20.5 18.5 L 20.5 5.5 L 3.5 5.5 L 3.5 8 Z M 2 17.8 A 2.2 2.2 0 0 1 4.2 20 L 2 20 Z M 2 13.5 A 6.5 6.5 0 0 1 8.5 20 L 7 20 A 5 5 0 0 0 2 15 Z M 2 9.5 A 10.5 10.5 0 0 1 12.5 20 L 11 20 A 9 9 0 0 0 2 11 Z";
+}
+
 // A synced pair on the Syncs page: the playlist it was made from, the one
 // it syncs to, and what can be done with it. `key` is its Spotify browse id.
 export struct SyncRowData {
@@ -4602,6 +4616,77 @@ component MixToggle inherits Rectangle {
     }
 }
 
+// A line of the cast menu: a device, or this computer. `kind` as in
+// CastDevice, with 3 for this computer. The icons are drawn, as the icon
+// font has none for devices.
+component CastLine inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <int> kind;
+    in property <bool> active;
+    callback clicked;
+    height: 46px;
+    border-radius: 8px;
+    background: (touch.has-hover && !Scroll.active) ? Theme.hover : transparent;
+    Path {
+        x: 10px;
+        y: (parent.height - self.height) / 2;
+        width: 22px;
+        height: 22px;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        fill: transparent;
+        stroke: root.active ? Theme.accent : Theme.dim;
+        stroke-width: 1.6px;
+        commands: root.kind == 0
+            // a speaker
+            ? "M 8 3 L 16 3 A 2 2 0 0 1 18 5 L 18 19 A 2 2 0 0 1 16 21 L 8 21 A 2 2 0 0 1 6 19 L 6 5 A 2 2 0 0 1 8 3 Z M 9 14.5 A 3 3 0 1 0 15 14.5 A 3 3 0 1 0 9 14.5 M 11 8 A 1 1 0 1 0 13 8 A 1 1 0 1 0 11 8"
+            : root.kind == 1
+            // a TV on its stand
+            ? "M 4 4 L 20 4 A 2 2 0 0 1 22 6 L 22 15 A 2 2 0 0 1 20 17 L 4 17 A 2 2 0 0 1 2 15 L 2 6 A 2 2 0 0 1 4 4 Z M 8 21 L 16 21 M 12 17 L 12 21"
+            : root.kind == 2
+            // two speakers
+            ? "M 4 4 L 9 4 A 1.5 1.5 0 0 1 10.5 5.5 L 10.5 18.5 A 1.5 1.5 0 0 1 9 20 L 4 20 A 1.5 1.5 0 0 1 2.5 18.5 L 2.5 5.5 A 1.5 1.5 0 0 1 4 4 Z M 15 4 L 20 4 A 1.5 1.5 0 0 1 21.5 5.5 L 21.5 18.5 A 1.5 1.5 0 0 1 20 20 L 15 20 A 1.5 1.5 0 0 1 13.5 18.5 L 13.5 5.5 A 1.5 1.5 0 0 1 15 4 Z M 4.5 14 A 2 2 0 1 0 8.5 14 A 2 2 0 1 0 4.5 14 M 15.5 14 A 2 2 0 1 0 19.5 14 A 2 2 0 1 0 15.5 14"
+            // a laptop
+            : "M 5 5 L 19 5 A 1 1 0 0 1 20 6 L 20 16 L 4 16 L 4 6 A 1 1 0 0 1 5 5 Z M 2 19 L 22 19";
+    }
+    Text {
+        x: 44px;
+        y: root.subtitle == "" ? (parent.height - self.height) / 2 : 6px;
+        width: parent.width - 44px - 26px;
+        height: 18px;
+        text: root.title;
+        color: root.active ? Theme.accent : Theme.text;
+        font-size: 14px;
+        font-weight: root.active ? 600 : 400;
+        overflow: elide;
+        vertical-alignment: center;
+    }
+    if root.subtitle != "": Text {
+        x: 44px;
+        y: 24px;
+        width: parent.width - 44px - 26px;
+        height: 16px;
+        text: root.subtitle;
+        color: Theme.dim;
+        font-size: 12px;
+        overflow: elide;
+        vertical-alignment: center;
+    }
+    if root.active: Rectangle {
+        x: parent.width - 16px;
+        y: (parent.height - self.height) / 2;
+        width: 6px;
+        height: 6px;
+        border-radius: 3px;
+        background: Theme.accent;
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
 export component AppWindow inherits Window {
     title: "Tonearm";
     // Takes the keys whenever no text box has the cursor. The app gives
@@ -4944,6 +5029,12 @@ export component AppWindow inherits Window {
     in property <string> position-text: "0:00";
     in property <string> duration-text: "0:00";
     in property <float> volume: 1.0;
+    // The cast menu: the devices on the network, the one cast to (-1 for
+    // none), whether it has started playing, and its name.
+    in property <[CastDevice]> cast-devices;
+    in property <int> cast-active: -1;
+    in property <bool> cast-connecting;
+    in property <string> cast-name;
     in property <[ItemData]> queue;
     in property <int> queue-index: -1;
     // The queue after the playing song, for "Next up".
@@ -5058,6 +5149,9 @@ export component AppWindow inherits Window {
     callback previous();
     callback seek(float);
     callback set-volume(float);
+    // A line of the cast menu: a device by its index, or -1 for this
+    // computer.
+    callback cast-picked(int);
     callback toggle-like();
     callback panel-changed(int);
     callback lyrics-seek(int);
@@ -5168,15 +5262,39 @@ export component AppWindow inherits Window {
     property <float> lyrics-t: shown-panel == 2 ? 1 : 0;
     property <float> np-t: shown-panel == 3 ? 1 : 0;
     property <float> mix-t: shown-panel == 4 ? 1 : 0;
-    animate queue-t, lyrics-t, np-t, mix-t { duration: 220ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
-    // How far a panel's content sits to the right while it fades in or out.
+    property <float> cast-t: shown-panel == 5 ? 1 : 0;
+    animate queue-t, lyrics-t, np-t, mix-t, cast-t { duration: 220ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+    // How far Now playing's content sits to the right while it fades in or
+    // out. It is the panel's own view, and slides with the panel.
     pure function panel-slide(t: float) -> length {
         return (1 - t) * 24px;
     }
-    property <length> main-width: root.width - side - gap * 3 - (panel-width + gap) * panel-t;
+    // How far the panel's other views, the queue, lyrics, devices and the
+    // mix editor, sit below their place while they fade in or out.
+    pure function panel-rise(t: float) -> length {
+        return (1 - t) * 16px;
+    }
+    // Closed, the panel leaves a rail at the window's edge with a chevron
+    // that opens Now playing. Hovered, the rail widens a little and Now
+    // playing shows faintly through it.
+    property <length> rail: 32px;
+    property <length> rail-peek: 60px;
+    in-out property <bool> rail-hovered;
+    // The mouse is over the open panel, and Now playing's heading makes
+    // room for its hide button.
+    in-out property <bool> panel-hovered;
+    property <float> np-head-t: panel-hovered && panel == 3 ? 1 : 0;
+    animate np-head-t { duration: 160ms; easing: ease-out; }
+    property <float> peek-t: rail-hovered && panel == 0 ? 1 : 0;
+    animate peek-t { duration: 200ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+    // How much of the panel shows: the rail, the peek, or all of it.
+    property <length> shown-width: (rail + (rail-peek - rail) * peek-t) * (1 - panel-t) + panel-width * panel-t;
+    // The page keeps out of the rail, but not the peek, so a passing mouse
+    // never reflows it.
+    property <length> main-width: root.width - side - gap * 4 - rail - (panel-width - rail) * panel-t;
     // The width the page ends up at, for choices that should not flip
     // halfway through the slide.
-    property <length> settled-width: root.width - side - gap * 3 - (panel != 0 ? panel-width + gap : 0px);
+    property <length> settled-width: root.width - side - gap * 4 - (panel != 0 ? panel-width : rail);
     // The search box lives at window level; the header keeps a gap for it.
     property <length> search-width: min(480px, max(220px, root.width - 440px));
     // Narrow windows get a smaller hero.
@@ -5259,7 +5377,7 @@ export component AppWindow inherits Window {
     property <length> wide-x: side + gap * 2;
     property <length> wide-width: root.width - side - gap * 3;
     // Where the panel sits, for the expanded view to grow from.
-    property <length> panel-x: root.width - (panel-width + gap) * panel-t;
+    property <length> panel-x: root.width - gap - shown-width;
     // The cover's column takes this share of the expanded view.
     property <float> art-share: 0.46;
     // How far the Now playing panel is scrolled. Zero or less.
@@ -6670,28 +6788,41 @@ export component AppWindow inherits Window {
         }
     }
 
-    // side panel island
-    if root.panel-t > 0: Rectangle {
-        // Slides in from the right edge as it opens.
-        x: root.width - (panel-width + gap) * root.panel-t;
+    // side panel island: the rail at the window's edge while closed, and
+    // the panel once open. It grows from the rail as it opens. Its content
+    // is laid out at the panel's full width and clipped, so nothing in it
+    // reflows on the way.
+    Rectangle {
+        x: root.panel-x;
         y: top-bar;
-        width: panel-width;
+        width: root.shown-width;
         height: body-height;
         border-radius: Theme.radius;
         clip: true;
         // The panel's colour. Under Now playing's cover it starts a little
         // below the cover's top, so it never reaches the rounded corners the
         // cover fills: at those edge pixels it showed through as a pale rim.
+        // The rail and the peek are solid, as the cover shows faintly there.
         Rectangle {
-            property <bool> under-cover: root.np-t >= 1 && root.expand-t <= 0 && root.track-has-art;
+            property <bool> under-cover: root.np-t >= 1 && root.expand-t <= 0 && root.track-has-art && root.panel-t >= 1;
             y: self.under-cover ? max(0px, root.np-art-h + root.np-scroll - 24px) : 0px;
             height: parent.height - self.y;
             border-radius: Theme.radius;
             background: root.panel-color;
         }
+        // Hovering anywhere on the open panel shows Now playing's hide
+        // button. Faint while it only peeks through the rail.
+        if root.panel-t > 0 || root.peek-t > 0: panel-hover := TouchArea {
+            width: root.panel-width;
+            height: parent.height;
+            changed has-hover => { root.panel-hovered = self.has-hover; }
+            Rectangle {
+            width: root.panel-width;
+            height: parent.height;
+            opacity: max(root.panel-t, 0.3 * root.peek-t);
         if root.queue-t > 0: Text {
-            x: 20px + root.panel-slide(root.queue-t);
-            y: 14px;
+            x: 20px;
+            y: 14px + root.panel-rise(root.queue-t);
             height: 32px;
             opacity: root.queue-t;
             text: "Queue";
@@ -6701,8 +6832,8 @@ export component AppWindow inherits Window {
             vertical-alignment: center;
         }
         if root.lyrics-t > 0: Text {
-            x: 20px + root.panel-slide(root.lyrics-t);
-            y: 14px;
+            x: 20px;
+            y: 14px + root.panel-rise(root.lyrics-t);
             height: 32px;
             opacity: root.lyrics-t;
             text: "Lyrics";
@@ -6711,26 +6842,50 @@ export component AppWindow inherits Window {
             font-weight: 700;
             vertical-alignment: center;
         }
-        // Back to Now playing, which shows the lyrics too.
+        if root.cast-t > 0: Text {
+            x: 20px;
+            y: 14px + root.panel-rise(root.cast-t);
+            height: 32px;
+            opacity: root.cast-t;
+            text: "Devices";
+            color: Theme.text;
+            font-size: 20px;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+        // Queue and Devices close. Lyrics goes back to Now playing, which
+        // shows the lyrics too.
+        if root.queue-t > 0: CloseButton {
+            x: parent.width - self.width - 14px;
+            y: 12px + root.panel-rise(root.queue-t);
+            opacity: root.queue-t;
+            clicked => { root.show-panel(1); }
+        }
+        if root.cast-t > 0: CloseButton {
+            x: parent.width - self.width - 14px;
+            y: 12px + root.panel-rise(root.cast-t);
+            opacity: root.cast-t;
+            clicked => { root.show-panel(5); }
+        }
         if root.lyrics-t > 0: CloseButton {
-            x: parent.width - self.width - 14px + root.panel-slide(root.lyrics-t);
-            y: 12px;
+            x: parent.width - self.width - 14px;
+            y: 12px + root.panel-rise(root.lyrics-t);
             opacity: root.lyrics-t;
             clicked => { root.show-panel(3); }
         }
 
         // Queue: what plays now, then what plays next. Drag to reorder.
         if root.queue-t > 0 && root.queue-index < 0: Text {
-            x: 20px + root.panel-slide(root.queue-t);
-            y: 56px;
+            x: 20px;
+            y: 56px + root.panel-rise(root.queue-t);
             opacity: root.queue-t;
             text: "Play something to start a queue";
             color: Theme.dim;
             font-size: 14px;
         }
         if root.queue-t > 0 && root.queue-index >= 0: Rectangle {
-            x: root.panel-slide(root.queue-t);
-            y: 52px;
+            x: 0;
+            y: 52px + root.panel-rise(root.queue-t);
             opacity: root.queue-t;
             width: parent.width;
             height: parent.height - 52px;
@@ -6803,9 +6958,87 @@ export component AppWindow inherits Window {
             }
         }
 
+        // Devices: where the music plays now, then the other Cast devices
+        // on the network to move it to, with this computer among them while
+        // casting.
+        if root.cast-t > 0: Rectangle {
+            x: 0;
+            y: 52px + root.panel-rise(root.cast-t);
+            opacity: root.cast-t;
+            width: parent.width;
+            height: parent.height - 52px;
+            property <bool> casting: root.cast-name != "";
+            // Devices other than the one playing.
+            property <int> others: root.cast-devices.length - (root.cast-active >= 0 ? 1 : 0) + (casting ? 1 : 0);
+            SectionLabel {
+                x: 20px;
+                y: 0;
+                text: "Playing on";
+            }
+            CastLine {
+                x: 8px;
+                y: 28px;
+                width: parent.width - 16px;
+                title: casting ? root.cast-name : "This computer";
+                subtitle: !casting ? "" : root.cast-connecting ? "Connecting…" : "Casting from this computer";
+                kind: !casting ? 3 : root.cast-active >= 0 ? root.cast-devices[root.cast-active].kind : 0;
+                active: true;
+            }
+            SectionLabel {
+                x: 20px;
+                y: 92px;
+                text: "Other devices";
+            }
+            if others == 0: Text {
+                x: 20px;
+                y: 122px;
+                width: parent.width - 40px;
+                text: "Looking for speakers and TVs on your network…";
+                color: Theme.dim;
+                font-size: 14px;
+                wrap: word-wrap;
+            }
+            devices-flick := Flickable {
+                x: 8px;
+                y: 120px;
+                width: parent.width - 16px;
+                height: parent.height - 120px - 64px;
+                content-height: devices-list.preferred-height;
+                devices-list := VerticalLayout {
+                    alignment: start;
+                    if casting: CastLine {
+                        title: "This computer";
+                        kind: 3;
+                        clicked => { root.cast-picked(-1); }
+                    }
+                    // The one playing is listed above, so it takes no room here.
+                    for device[i] in root.cast-devices: CastLine {
+                        height: i == root.cast-active ? 0px : 46px;
+                        visible: i != root.cast-active;
+                        title: device.name;
+                        subtitle: device.kind == 2 ? "Speaker group" : device.model;
+                        kind: device.kind;
+                        clicked => { root.cast-picked(i); }
+                    }
+                }
+            }
+            Text {
+                x: 20px;
+                y: parent.height - 56px;
+                width: parent.width - 40px;
+                height: 44px;
+                text: "Chromecasts, Google TVs and Nest speakers on your network show up here. While casting, skips take a moment to be heard.";
+                color: Theme.dim;
+                font-size: 12px;
+                wrap: word-wrap;
+                vertical-alignment: bottom;
+            }
+        }
+
         // The transition editor, for a chip on a playlist in mix mode.
         if root.mix-t > 0: Rectangle {
-            x: root.panel-slide(root.mix-t);
+            x: 0;
+            y: root.panel-rise(root.mix-t);
             opacity: root.mix-t;
             editor-flick := Flickable {
                 content-height: editor-body.preferred-height;
@@ -7616,9 +7849,10 @@ export component AppWindow inherits Window {
             opacity: (root.expand-t > 0 ? 0 : self.hovered ? 1 : 0.7) * root.np-t;
             clicked => { root.np-expanded = true; }
         }
-        // Drawn over the cover, so it comes after it.
+        // Drawn over the cover, so it comes after it. Moves over for the hide
+        // button while the panel is hovered.
         if root.np-t > 0: Text {
-            x: 20px + root.panel-slide(root.np-t);
+            x: 20px + 32px * root.np-head-t + root.panel-slide(root.np-t);
             y: 14px;
             height: 32px;
             opacity: root.expand-t > 0 ? 0 : root.np-t;
@@ -7627,6 +7861,47 @@ export component AppWindow inherits Window {
             font-size: 20px;
             font-weight: 700;
             vertical-alignment: center;
+        }
+        // Hides Now playing, back to the rail. Only while the panel is
+        // hovered, as in other players.
+        if root.np-t > 0 && root.np-head-t > 0: IconButton {
+            x: 10px + root.panel-slide(root.np-t);
+            y: 12px;
+            shape: "M 3 4 L 21 4 L 21 20 L 3 20 Z M 4.6 5.6 L 4.6 18.4 L 19.4 18.4 L 19.4 5.6 Z M 8.2 5.6 L 9.8 5.6 L 9.8 18.4 L 8.2 18.4 Z";
+            size: 20px;
+            tint: Theme.text;
+            tip: "Hide Now playing view";
+            opacity: (root.expand-t > 0 ? 0 : root.np-head-t) * root.np-t;
+            clicked => { root.show-panel(3); }
+        }
+            }
+        }
+        // The rail: a chevron that opens Now playing. Hovered, the panel
+        // widens a little and Now playing shows through. Only once the panel
+        // has closed: while it shrinks it is still under the mouse that
+        // closed it, which would leave the rail peeking.
+        if root.panel == 0 && root.panel-t <= 0: TouchArea {
+            mouse-cursor: pointer;
+            changed has-hover => {
+                root.rail-hovered = self.has-hover;
+                if self.has-hover {
+                    root.shown-panel = 3;
+                }
+            }
+            clicked => {
+                root.rail-hovered = false;
+                root.show-panel(3);
+            }
+            Icon {
+                x: (root.rail - self.width) / 2 + (root.rail-peek - root.rail) / 2 * root.peek-t;
+                y: (parent.height - self.height) / 2;
+                width: 24px;
+                height: 24px;
+                text: Icons.left;
+                font-size: 18px;
+                color: parent.has-hover ? Theme.text : Theme.dim;
+                opacity: 1 - root.panel-t;
+            }
         }
     }
 
@@ -7751,7 +8026,7 @@ export component AppWindow inherits Window {
         }
         // The panel's heading, expand button and heart fade as it leaves.
         Text {
-            x: root.panel-x + 20px;
+            x: root.panel-x + 20px + 32px * root.np-head-t;
             y: top-bar + 14px;
             height: 32px;
             opacity: 1 - parent.t;
@@ -7806,9 +8081,11 @@ export component AppWindow inherits Window {
     lyrics-view := Flickable {
         property <bool> wide: root.expand-t > 0;
         visible: (root.lyrics-t > 0 && root.panel-t > 0) || wide;
-        opacity: wide ? root.expand-t : root.lyrics-t;
-        x: wide ? root.wide-x + root.wide-width * root.art-share : root.panel-x + root.panel-slide(root.lyrics-t);
-        y: wide ? top-bar + 72px : top-bar + 56px;
+        // Fades as the panel closes: drawn at window level, the panel's
+        // edge does not clip it.
+        opacity: wide ? root.expand-t : root.lyrics-t * root.panel-t;
+        x: wide ? root.wide-x + root.wide-width * root.art-share : root.panel-x;
+        y: wide ? top-bar + 72px : top-bar + 56px + root.panel-rise(root.lyrics-t);
         width: wide ? root.wide-width * (1 - root.art-share) - 32px : panel-width;
         height: wide ? body-height - 104px : body-height - 64px;
         content-height: max(self.height, lines.preferred-height);
@@ -8303,19 +8580,11 @@ export component AppWindow inherits Window {
             tip: root.panel == 2 ? "Hide lyrics" : "Show lyrics";
             clicked => { root.show-panel(2); }
         }
-        IconButton {
-            x: parent.width - 16px - 96px - 28px - 4px - 108px;
-            y: (parent.height - self.height) / 2;
-            icon: Icons.now-playing;
-            size: 20px;
-            tint: root.panel == 3 ? Theme.accent : Theme.dim;
-            dot: root.panel == 3;
-            tip: root.panel == 3 ? "Hide Now playing" : "Show Now playing";
-            clicked => { root.show-panel(3); }
-        }
+        // Now playing opens from the rail at the window's edge, or the
+        // cover, so it has no button here.
         // The sleep timer. The moon lights up while one runs.
         sleep-button := IconButton {
-            x: parent.width - 16px - 96px - 28px - 4px - 144px;
+            x: parent.width - 16px - 96px - 28px - 4px - 108px;
             y: (parent.height - self.height) / 2;
             icon: Icons.moon;
             size: 19px;
@@ -8323,6 +8592,20 @@ export component AppWindow inherits Window {
             dot: root.sleep-choice != 0;
             tip: root.sleep-choice != 0 ? "Sleep timer: " + root.sleep-options[root.sleep-choice] : "Sleep timer";
             clicked => { sleep-menu.show(); }
+        }
+        // Devices: opens the panel of devices to cast to. Lights up while
+        // casting, as on other players, and shows its dot while open.
+        IconButton {
+            x: parent.width - 16px - 96px - 28px - 4px - 144px;
+            y: (parent.height - self.height) / 2;
+            shape: CastIcon.shape;
+            size: 19px;
+            tint: root.cast-name != "" || root.panel == 5 ? Theme.accent : Theme.dim;
+            dot: root.panel == 5;
+            tip: root.panel == 5 ? "Hide devices"
+                : root.cast-name == "" ? "Devices"
+                : (root.cast-connecting ? "Connecting to " : "Playing on ") + root.cast-name;
+            clicked => { root.show-panel(5); }
         }
         sleep-menu := PopupWindow {
             width: 200px;

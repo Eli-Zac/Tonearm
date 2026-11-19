@@ -22,6 +22,8 @@ HTTPS, so it starts fast and stays small in memory.
 * A queue you can drag to reorder, radio, smart shuffle, and autoplay when
   the queue runs out
 * Crossfade, volume levelling and a sleep timer
+* Casting to Chromecasts, Google TVs, Nest speakers and speaker groups,
+  with mixes and crossfades intact
 * Synced lyrics, timed by the syllable where the source allows, with duet
   sides and out of focus lines
 * A Now playing panel with animated covers and Spotify Canvas clips
@@ -92,6 +94,21 @@ a JavaScript runtime, so yt-dlp uses Deno, Node or Bun if one is installed.
 
 The resolver lives behind one trait in `src/resolver.rs`. Set
 `TONEARM_TEST_STREAM` to any M4A URL to test the audio path without it.
+
+## Casting
+
+The cast button by the sleep timer lists the Google Cast devices on your
+network. The device plays Tonearm's own output as a live stream from your
+computer, so crossfades, mixes and offline songs all carry over. Skips and
+seeks take about two seconds to be heard, and the computer has to stay on.
+
+The device fetches the stream from your computer, so Windows Firewall asks
+the first time you cast. If casting fails with "couldn't reach this
+computer", allow Tonearm in that prompt, or set your network to private in
+Windows settings: Windows blocks incoming connections on public networks.
+
+`tonearm --probe cast` lists the devices found and what each is running,
+without changing anything on them.
 
 ## Lyrics
 
@@ -192,6 +209,7 @@ secrets.
 | `src/services.rs` | Discord, Last.fm and Spotify |
 | `src/canvas.rs`, `src/motion.rs` | Spotify Canvas clips and animated covers |
 | `src/offline.rs` | Offline songs and the song cache |
+| `src/cast/`, `src/casting.rs` | Finding Cast devices, streaming to them, and the cast menu |
 | `src/history.rs`, `src/session.rs` | Listening history, and where you left off |
 | `src/media_keys.rs`, `src/taskbar.rs`, `src/shell.rs` | Media keys, taskbar buttons, tray and Start menu shortcut |
 | `src/update.rs` | In-app updates |

@@ -423,7 +423,7 @@ fn read(client: &Client, http: &ureq::Agent, cookie: &str, pair: &Pair) -> Resul
     let (list, tracks) = spotify::load(http, cookie, &pair.spotify)?;
     let found = spotify::match_all(client, &tracks, |_| {});
     let (items, youtube_writable, (youtube_title, youtube_thumb)) = youtube_songs(client, &pair.youtube)?;
-    let token = crate::canvas::web_token(http, cookie)?;
+    let token = crate::spotify_token::web_token(http, cookie)?;
     let mut k = Keyed {
         spotify_writable: list.editable,
         youtube_writable,

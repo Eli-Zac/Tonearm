@@ -550,7 +550,7 @@ impl Tool {
             }
             if best
                 .as_ref()
-                .is_none_or(|(version, _)| crate::update::newer(&name, version))
+                .is_none_or(|(version, _)| crate::releases::newer(&name, version))
             {
                 best = Some((name, exe));
             }
@@ -558,14 +558,14 @@ impl Tool {
         best
     }
 
-    fn latest(&self, http: &ureq::Agent) -> Result<crate::update::Release, String> {
-        crate::update::latest(http, self.repo, self.asset)
+    fn latest(&self, http: &ureq::Agent) -> Result<crate::releases::Release, String> {
+        crate::releases::latest(http, self.repo, self.asset)
             .map_err(|e| format!("Could not get {}: {e}", self.name))
     }
 
     /// Downloads a release's zip, checks it, and unpacks it into the
     /// tool's folder. Returns the new program.
-    fn install(&self, http: &ureq::Agent, release: &crate::update::Release) -> Result<PathBuf, String> {
+    fn install(&self, http: &ureq::Agent, release: &crate::releases::Release) -> Result<PathBuf, String> {
         let name = self.name;
         if !is_version(&release.version) {
             return Err(format!("Unexpected {name} version {:?}", release.version));
@@ -576,7 +576,7 @@ impl Tool {
         let builds = self.dir().ok_or("No local data folder")?;
         let failed = |e: std::io::Error| format!("Could not save {name}: {e}");
         std::fs::create_dir_all(&builds).map_err(failed)?;
-        let bytes = crate::update::download(http, release).map_err(|e| format!("Could not get {name}: {e}"))?;
+        let bytes = crate::releases::download(http, release).map_err(|e| format!("Could not get {name}: {e}"))?;
         // Named for this process, so two Tonearms never unpack into one folder.
         let work = format!("{}.{}", release.version, std::process::id());
         let zip = builds.join(format!("{work}.zip"));
@@ -630,7 +630,7 @@ impl Tool {
     fn update(&self, http: &ureq::Agent) -> Result<PathBuf, String> {
         let release = self.latest(http)?;
         match self.newest() {
-            Some((version, exe)) if !crate::update::newer(&release.version, &version) => Ok(exe),
+            Some((version, exe)) if !crate::releases::newer(&release.version, &version) => Ok(exe),
             _ => self.install(http, &release),
         }
     }
@@ -788,9 +788,9 @@ impl YtDlp {
             return Ok(path);
         }
         let http = crate::innertube::agent(Duration::from_secs(30));
-        let release = crate::update::latest(&http, REPO, ASSET)
+        let release = crate::releases::latest(&http, REPO, ASSET)
             .map_err(|e| format!("Could not get yt-dlp: {e}"))?;
-        let bytes = crate::update::download(&http, &release)
+        let bytes = crate::releases::download(&http, &release)
             .map_err(|e| format!("Could not get yt-dlp: {e}"))?;
         std::fs::create_dir_all(&folder).map_err(|e| format!("Could not save yt-dlp: {e}"))?;
         let partial = path.with_extension("part");
