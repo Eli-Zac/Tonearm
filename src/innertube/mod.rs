@@ -22,6 +22,16 @@ const IOS_VERSION: &str = "20.10.4";
 pub const USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0";
 
+/// Google's image hosts resize on request. Asking for the size we draw
+/// saves both download and decode work.
+pub fn sized(url: &str, px: u32) -> String {
+    let resizable = url.contains("googleusercontent.com") || url.contains("ggpht.com");
+    match url.rfind('=') {
+        Some(i) if resizable => format!("{}=w{px}-h{px}-l90-rj", &url[..i]),
+        _ => url.to_string(),
+    }
+}
+
 struct Auth {
     cookie: String,
     sapisid: String,

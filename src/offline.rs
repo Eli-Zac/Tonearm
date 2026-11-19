@@ -10,13 +10,35 @@
 //!   carry their details and cover in `index.json`, and play with no
 //!   connection at all.
 
+use crate::hook::Hook;
 use crate::innertube::model::{Item, Kind, Page, Shelf};
+use crate::innertube::Client;
+use crate::resolver::Resolver;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::rc::Rc;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// What the download queue tells the app. Sent from worker threads.
+pub enum Event {
+    /// A running download got further. Read it with `progress`.
+    Progress(String),
+    /// One song of a batch finished, `n` of `total` counting from zero.
+    Finished {
+        item: Item,
+        result: Result<(), String>,
+        n: usize,
+        total: usize,
+    },
+}
+
+static EVENTS: Hook<Event> = Hook::new();
+
+/// Where download events go. Set once at start.
+pub fn listen(listener: impl Fn(Event) + Send + Sync + 'static) {
+    EVENTS.set(listener);
+}
 
 /// Cache size when the user has not picked one.
 pub const DEFAULT_CACHE_MB: u64 = 1024;
@@ -423,7 +445,7 @@ fn save_cover(http: &ureq::Agent, item: &Item, video_id: &str) {
     let url = if item.thumb.starts_with("//") {
         format!("https:{}", item.thumb)
     } else {
-        crate::images::sized(&item.thumb, COVER_PX)
+        crate::innertube::sized(&item.thumb, COVER_PX)
     };
     let Ok(response) = http
         .get(&url)
@@ -473,8 +495,7 @@ pub fn download(
             if done - *last >= 0.02 || done >= 1.0 {
                 *last = done;
                 state().progress.insert(id.clone(), done);
-                let id = id.clone();
-                crate::on_ui(move |app| app.show_download_progress(&id));
+                EVENTS.emit(Event::Progress(id.clone()));
             }
         };
         let bytes =
@@ -535,7 +556,13 @@ fn credit(tracks: &[Item]) -> bool {
     changed
 }
 
-fn remove(video_id: &str) {
+/// The title of a downloaded song.
+pub fn title_of(video_id: &str) -> Option<String> {
+    state().downloads.get(video_id).map(|s| s.item.title.clone())
+}
+
+/// Deletes a download and its cover. Blocks on the disk.
+pub fn remove(video_id: &str) {
     let mut state = state();
     if state.downloads.remove(video_id).is_none() {
         return;
@@ -557,193 +584,109 @@ fn workers() -> &'static Mutex<crate::pool::Pool> {
     POOL.get_or_init(|| Mutex::new(crate::pool::Pool::new("save", 1)))
 }
 
-// --------------------------------------------------------------------- app
+// ------------------------------------------------------------------- queue
 
-impl crate::App {
-    /// Downloads songs in the background. Songs already saved or on their
-    /// way are skipped.
-    pub fn download_items(self: &Rc<Self>, items: Vec<Item>) {
-        let fresh: Vec<Item> = {
-            let mut state = state();
-            items
-                .into_iter()
-                .filter(|i| {
-                    i.video_id.as_deref().is_some_and(|id| {
-                        safe(id) && !state.downloads.contains_key(id) && state.busy.insert(id.into())
-                    })
+/// Queues songs to download in the background. Songs already saved or on
+/// their way are skipped. Returns the songs queued; each one's result
+/// comes back as `Event::Finished`.
+pub fn queue(
+    resolver: Option<Arc<dyn Resolver>>,
+    http: &ureq::Agent,
+    items: Vec<Item>,
+) -> Vec<Item> {
+    let fresh: Vec<Item> = {
+        let mut state = state();
+        items
+            .into_iter()
+            .filter(|i| {
+                i.video_id.as_deref().is_some_and(|id| {
+                    safe(id) && !state.downloads.contains_key(id) && state.busy.insert(id.into())
                 })
-                .collect()
-        };
-        if fresh.is_empty() {
-            self.toast("Already downloaded");
-            return;
-        }
-        let total = fresh.len();
-        self.toast(if total == 1 {
-            format!("Downloading {}", fresh[0].title)
-        } else {
-            format!("Downloading {total} songs")
-        });
-        self.downloads_changed();
-        for (n, item) in fresh.into_iter().enumerate() {
-            let resolver = self.resolver.clone();
-            let http = self.http.clone();
-            workers().lock().unwrap().run(move || {
-                let result = download(resolver.as_deref(), &http, &item);
-                let video_id = item.video_id.clone().unwrap_or_default();
-                {
-                    let mut state = state();
-                    state.busy.remove(&video_id);
-                    state.progress.remove(&video_id);
-                }
-                crate::on_ui(move |app| {
-                    match result {
-                        Ok(()) if total == 1 => app.toast(format!("Downloaded {}", item.title)),
-                        Ok(()) if n + 1 == total => app.toast(format!("Downloaded {total} songs")),
-                        Ok(()) => {}
-                        Err(message) => {
-                            app.toast(format!("Could not download {}: {message}", item.title))
-                        }
-                    }
-                    app.downloads_changed();
-                });
-            });
-        }
-    }
-
-    /// Fills in the artist of downloads saved without one, from their
-    /// album pages. Quiet, and a no-op once every song is credited.
-    pub fn repair_downloads(self: &Rc<Self>) {
-        let albums = uncredited_albums();
-        if albums.is_empty() {
-            return;
-        }
-        let client = self.client.clone();
-        self.api.run(move || {
-            let mut changed = false;
-            for id in albums {
-                if let Ok(page) = client.browse(&id, None) {
-                    let tracks: Vec<Item> =
-                        page.shelves.into_iter().flat_map(|s| s.items).collect();
-                    changed |= credit(&tracks);
-                }
+            })
+            .collect()
+    };
+    let total = fresh.len();
+    for (n, item) in fresh.iter().cloned().enumerate() {
+        let resolver = resolver.clone();
+        let http = http.clone();
+        workers().lock().unwrap().run(move || {
+            let result = download(resolver.as_deref(), &http, &item);
+            let video_id = item.video_id.clone().unwrap_or_default();
+            {
+                let mut state = state();
+                state.busy.remove(&video_id);
+                state.progress.remove(&video_id);
             }
-            if changed {
-                crate::on_ui(|app| app.downloads_changed());
-            }
-        });
-    }
-
-    /// Downloads a song, or removes it when it is already downloaded.
-    pub fn toggle_download(self: &Rc<Self>, item: Item) {
-        let Some(video_id) = item.video_id.clone() else {
-            return;
-        };
-        if is_downloaded(&video_id) {
-            self.remove_download(&video_id);
-        } else if !is_downloading(&video_id) {
-            self.download_items(vec![item]);
-        }
-    }
-
-    pub fn remove_download(self: &Rc<Self>, video_id: &str) {
-        let video_id = video_id.to_string();
-        let title = state()
-            .downloads
-            .get(&video_id)
-            .map(|s| s.item.title.clone())
-            .unwrap_or_default();
-        self.disk.run(move || {
-            remove(&video_id);
-            crate::on_ui(move |app| {
-                app.toast(format!("Removed {title} from downloads"));
-                app.downloads_changed();
+            EVENTS.emit(Event::Finished {
+                item,
+                result,
+                n,
+                total,
             });
         });
     }
-
-    /// Fetches the whole next track into the cache, so it starts at once
-    /// and keeps playing if the connection drops.
-    pub fn cache_ahead(self: &Rc<Self>, video_id: String) {
-        if cache_limit_mb() == 0 || has_local(&video_id) {
-            return;
-        }
-        let Some(resolver) = self.resolver.clone() else {
-            return;
-        };
-        {
-            let mut state = state();
-            if !state.busy.insert(video_id.clone()) {
-                return;
-            }
-        }
-        self.api.run(move || {
-            if let Ok(stream) = resolver.resolve(&video_id) {
-                if let Ok(bytes) = crate::audio::fetch_all(&stream.url, &stream.headers) {
-                    store_cache(&video_id, &bytes);
-                }
-            }
-            state().busy.remove(&video_id);
-        });
-    }
-
-    /// Refreshes whatever shows what is downloaded: the Downloads page if
-    /// it is open, and the storage line in Settings.
-    pub fn downloads_changed(self: &Rc<Self>) {
-        self.show_storage();
-        self.refresh_downloaded();
-        let on_downloads = matches!(self.history.borrow().last(), Some(crate::Route::Downloads))
-            && self.ui.get_nav() != 3;
-        if on_downloads {
-            self.open(crate::Route::Downloads, false);
-        }
-    }
-
-    /// The storage card in Settings.
-    pub fn show_storage(&self) {
-        let (cache, saved) = usage();
-        self.ui.set_storage_note(
-            format!(
-                "Cache {} of {} · Downloads {}",
-                size_text(cache),
-                match cache_limit_mb() {
-                    0 => "off".to_string(),
-                    mb => size_text(mb * 1024 * 1024),
-                },
-                size_text(saved),
-            )
-            .into(),
-        );
-        let limit = cache_limit_mb();
-        let choice = CACHE_CHOICES
-            .iter()
-            .position(|&c| c == limit)
-            .unwrap_or(2);
-        self.ui.set_cache_choice(choice as i32);
-    }
-
-    pub fn set_cache_choice(self: &Rc<Self>, choice: i32) {
-        let mb = CACHE_CHOICES
-            .get(choice.max(0) as usize)
-            .copied()
-            .unwrap_or(DEFAULT_CACHE_MB);
-        self.disk.run(move || {
-            set_cache_limit_mb(mb);
-            crate::on_ui(|app| app.show_storage());
-        });
-    }
-
-    pub fn clear_cache(self: &Rc<Self>) {
-        self.disk.run(|| {
-            clear_cache();
-            crate::on_ui(|app| {
-                app.show_storage();
-                app.toast("Cache cleared");
-            });
-        });
-    }
+    fresh
 }
 
+/// Fills in the artist of downloads saved without one, from their album
+/// pages. Blocks on the network; a no-op once every song is credited.
+/// True when any changed.
+pub fn repair(client: &Client) -> bool {
+    let mut changed = false;
+    for id in uncredited_albums() {
+        if let Ok(page) = client.browse(&id, None) {
+            let tracks: Vec<Item> = page.shelves.into_iter().flat_map(|s| s.items).collect();
+            changed |= credit(&tracks);
+        }
+    }
+    changed
+}
+
+/// Fetches the whole of a track into the cache, so it starts at once and
+/// keeps playing if the connection drops. Blocks on the network. Does
+/// nothing when the cache is off or the track is already here.
+pub fn fetch_ahead(resolver: &dyn Resolver, video_id: &str) {
+    if cache_limit_mb() == 0 || has_local(video_id) {
+        return;
+    }
+    if !state().busy.insert(video_id.to_string()) {
+        return;
+    }
+    if let Ok(stream) = resolver.resolve(video_id) {
+        if let Ok(bytes) = crate::audio::fetch_all(&stream.url, &stream.headers) {
+            store_cache(video_id, &bytes);
+        }
+    }
+    state().busy.remove(video_id);
+}
+
+/// The storage line in Settings.
+pub fn storage_note() -> String {
+    let (cache, saved) = usage();
+    format!(
+        "Cache {} of {} · Downloads {}",
+        size_text(cache),
+        match cache_limit_mb() {
+            0 => "off".to_string(),
+            mb => size_text(mb * 1024 * 1024),
+        },
+        size_text(saved),
+    )
+}
+
+/// Which of `CACHE_CHOICES` is in use.
+pub fn cache_choice() -> usize {
+    let limit = cache_limit_mb();
+    CACHE_CHOICES.iter().position(|&c| c == limit).unwrap_or(2)
+}
+
+/// The size in MB of one of `CACHE_CHOICES`.
+pub fn choice_mb(choice: i32) -> u64 {
+    CACHE_CHOICES
+        .get(choice.max(0) as usize)
+        .copied()
+        .unwrap_or(DEFAULT_CACHE_MB)
+}
 #[cfg(test)]
 mod tests {
     use super::*;

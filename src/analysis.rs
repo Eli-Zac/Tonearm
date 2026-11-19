@@ -22,6 +22,21 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Mutex, OnceLock};
 
+/// What the analyzer tells the app. Sent from its thread.
+pub enum Event {
+    /// It started on a song.
+    Started(String),
+    /// It finished a song, or gave up on it.
+    Ready(String),
+}
+
+static EVENTS: crate::hook::Hook<Event> = crate::hook::Hook::new();
+
+/// Where analyzer events go. Set once at start.
+pub fn listen(listener: impl Fn(Event) + Send + Sync + 'static) {
+    EVENTS.set(listener);
+}
+
 /// Bump when the analysis changes, so every song is worked out again.
 pub const ANALYZER_VERSION: u32 = 3;
 
@@ -284,10 +299,7 @@ fn worker() -> std::sync::MutexGuard<'static, Worker> {
                 .spawn(move || {
                     for (video_id, audio) in rx {
                         worker().current = Some(video_id.clone());
-                        {
-                            let id = video_id.clone();
-                            crate::on_ui(move |app| app.analysis_started(&id));
-                        }
+                        EVENTS.emit(Event::Started(video_id.clone()));
                         let result = match audio {
                             Audio::Bytes(bytes) => analyze_source(Box::new(std::io::Cursor::new(bytes))),
                             Audio::File(path) => std::fs::File::open(&path)
@@ -298,15 +310,10 @@ fn worker() -> std::sync::MutexGuard<'static, Worker> {
                         match result {
                             Ok(analysis) => {
                                 crate::library::save_analysis(&video_id, &analysis);
-                                let id = video_id.clone();
-                                crate::on_ui(move |app| app.analysis_ready(&id));
                             }
-                            Err(message) => {
-                                eprintln!("analysis of {video_id}: {message}");
-                                let id = video_id.clone();
-                                crate::on_ui(move |app| app.analysis_ready(&id));
-                            }
+                            Err(message) => eprintln!("analysis of {video_id}: {message}"),
                         }
+                        EVENTS.emit(Event::Ready(video_id.clone()));
                         let mut done = worker();
                         done.busy.remove(&video_id);
                         done.current = None;

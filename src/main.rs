@@ -9,6 +9,8 @@ mod cast;
 mod casting;
 mod decode;
 mod detail;
+mod downloading;
+mod hook;
 mod quick_access;
 mod history;
 mod home;
@@ -6337,6 +6339,13 @@ translate: Cell::new(load_translate()),
         keys: RefCell::new(None),
     });
     APP.with(|slot| *slot.borrow_mut() = Some(app.clone()));
+    App::listen_for_downloads();
+    analysis::listen(|event| {
+        on_ui(move |app| match event {
+            analysis::Event::Started(id) => app.analysis_started(&id),
+            analysis::Event::Ready(id) => app.analysis_ready(&id),
+        })
+    });
 
     // Each callback holds a weak handle, so closing the window frees the app.
     macro_rules! on {

@@ -164,15 +164,7 @@ fn trim(folder: &Path) {
     }
 }
 
-/// Google's image hosts resize on request. Asking for the size we draw
-/// saves both download and decode work.
-pub fn sized(url: &str, px: u32) -> String {
-    let resizable = url.contains("googleusercontent.com") || url.contains("ggpht.com");
-    match url.rfind('=') {
-        Some(i) if resizable => format!("{}=w{px}-h{px}-l90-rj", &url[..i]),
-        _ => url.to_string(),
-    }
-}
+pub use crate::innertube::sized;
 
 /// The cache key of a wide picture, kept apart from the squares.
 pub fn wide_key(url: &str, width: u32) -> String {
