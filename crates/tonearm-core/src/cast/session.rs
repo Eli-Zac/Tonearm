@@ -9,8 +9,9 @@
 //! Receiver.
 //!
 //! Pause and play follow the engine, through the pipe. Volume goes to the
-//! device. When someone pauses or changes the volume on the device itself
-//! (its remote, or the Google Home app), the app hears of it.
+//! device, apart from TVs known to ignore it (LG's), where it scales the
+//! stream instead. When someone pauses or changes the volume on the device
+//! itself (its remote, or the Google Home app), the app hears of it.
 
 use super::channel::{Channel, Message, CONNECTION, HEARTBEAT, MEDIA, PLATFORM, RECEIVER};
 use super::stream::{Pipe, Server};
@@ -39,7 +40,7 @@ const SILENT: Duration = Duration::from_secs(20);
 /// How often to ask how far the device has played.
 const STATUS_EVERY: Duration = Duration::from_secs(1);
 /// How long a device has to take up a volume change before the cast
-/// sets the stream's volume instead.
+/// scales the stream instead.
 const VOLUME_IGNORED: Duration = Duration::from_millis(1500);
 /// A device that has not fetched the stream this long after being told
 /// the link never will: something between is turning it away.
@@ -86,6 +87,16 @@ fn app_for(device: &Device) -> &'static str {
         Some(app) if !device.group => app,
         _ => DEFAULT_APP,
     }
+}
+
+/// Whether the device's volume is no use, so the cast scales the stream
+/// instead. LG's TVs say their volume can be set, and even report the new
+/// level back, but play on as loud as before. They don't say who made
+/// them: their model is a sales code like "86UT8050PSB.AAUFLJD", where the
+/// dot is LG's.
+fn ignores_its_volume(device: &Device) -> bool {
+    let model = device.model.to_ascii_lowercase();
+    device.screen && !device.group && (model.starts_with("lg") || model.contains("webos") || model.contains('.'))
 }
 
 /// A line of synced lyrics, for a receiver with a screen.
@@ -256,7 +267,12 @@ impl Cast {
         // can still name the session of an earlier cast, which the launch
         // is about to replace.
         let started = Instant::now();
+        // The device's volume as it last reported it, to tell its own
+        // changes from ours.
         let mut volume: Option<f32> = None;
+        // The volume is the stream's scale, not the device's. It starts
+        // full, which is how loud the device's own remote has it.
+        let mut scaled = ignores_its_volume(&self.device);
         let mut answered = false;
         let (transport, session) = loop {
             if started.elapsed() > Duration::from_secs(20) {
@@ -276,7 +292,7 @@ impl Cast {
                     // The slider shows the device's volume from the start.
                     if let Some(level) = p["status"]["volume"]["level"].as_f64() {
                         if volume.is_none() {
-                            (self.events)(Event::Volume(level as f32));
+                            (self.events)(Event::Volume(if scaled { 1.0 } else { level as f32 }));
                         }
                         volume = Some(level as f32);
                     }
@@ -326,11 +342,9 @@ impl Cast {
         let mut told_paused = false;
         let mut wanted_volume: Option<f32> = None;
         let mut volume_sent = Instant::now() - Duration::from_secs(1);
-        // Some devices, LG TVs among them, say their volume can be set and
-        // then ignore it. A level the device hasn't taken up by this long
-        // after it was sent moves the cast to the stream's own volume.
+        // A device that doesn't take up a level by this long after it was
+        // sent moves the cast to scaling the stream.
         let mut volume_check: Option<(f32, Instant)> = None;
-        let mut stream_volume = false;
         let mut heard = Instant::now();
         let mut pinged = Instant::now();
         let mut asked = Instant::now();
@@ -353,7 +367,13 @@ impl Cast {
                     let _ = channel.send(PLATFORM, RECEIVER, &json!({"type": "STOP", "sessionId": session, "requestId": id}));
                     return Ok(());
                 }
-                Ok(Command::Volume(level)) => wanted_volume = Some(level.clamp(0.0, 1.0)),
+                Ok(Command::Volume(level)) => {
+                    let level = level.clamp(0.0, 1.0);
+                    if scaled {
+                        self.pipe.set_gain(gain_for(level));
+                    }
+                    wanted_volume = Some(level);
+                }
                 Ok(Command::Now(now)) => screen.update(now, self.pipe.lead()),
                 Ok(Command::Lyrics(message)) => channel.send(&transport, TONEARM, &message)?,
                 Err(TryRecvError::Empty) => {}
@@ -379,25 +399,22 @@ impl Cast {
             // one every tenth of a second.
             if volume_check.is_some_and(|(_, at)| at.elapsed() > VOLUME_IGNORED) {
                 let (level, _) = volume_check.take().unwrap();
-                eprintln!("cast: {name} ignored a volume change, using the stream's volume");
-                stream_volume = true;
-                wanted_volume = Some(level);
+                eprintln!("cast: {name} ignored a volume change, scaling the stream instead");
+                scaled = true;
+                self.pipe.set_gain(gain_for(level));
             }
+            // The device is told the level even when it ignores it, so a
+            // phone following the cast shows the same as the slider.
             if let Some(level) = wanted_volume {
                 if volume_sent.elapsed() >= Duration::from_millis(100) {
                     let id = self.next_request();
-                    if !stream_volume {
-                        channel.send(PLATFORM, RECEIVER, &json!({"type": "SET_VOLUME", "volume": {"level": level}, "requestId": id}))?;
+                    channel.send(PLATFORM, RECEIVER, &json!({"type": "SET_VOLUME", "volume": {"level": level}, "requestId": id}))?;
+                    if !scaled {
                         volume_check.get_or_insert((level, Instant::now())).0 = level;
-                        volume = Some(level);
-                        wanted_volume = None;
-                        volume_sent = Instant::now();
-                    } else if let Some(media) = media {
-                        channel.send(&transport, MEDIA, &json!({"type": "SET_VOLUME", "mediaSessionId": media, "volume": {"level": level}, "requestId": id}))?;
-                        volume = Some(level);
-                        wanted_volume = None;
-                        volume_sent = Instant::now();
                     }
+                    volume = Some(level);
+                    wanted_volume = None;
+                    volume_sent = Instant::now();
                 }
             }
             if let Some(media) = media {
@@ -434,15 +451,19 @@ impl Cast {
                     if our_app(p, self.app).is_none_or(|(_, s)| s != session) {
                         return Err(format!("{name} is playing something else now"));
                     }
-                    if let Some(level) = p["status"]["volume"]["level"].as_f64().filter(|_| !stream_volume) {
+                    if let Some(level) = p["status"]["volume"]["level"].as_f64() {
                         let level = level as f32;
                         if volume_check.is_some_and(|(want, _)| (want - level).abs() < 0.02) {
                             volume_check = None;
                         }
-                        // Ours coming back changes nothing. Anyone else's
-                        // moves the slider.
+                        // Ours coming back changes nothing. Anyone else's,
+                        // such as a phone's slider, moves ours, and with a
+                        // device that ignores its volume, the stream's.
                         if wanted_volume.is_none() && volume_check.is_none() && volume.is_none_or(|v| (v - level).abs() > 0.01) {
                             volume = Some(level);
+                            if scaled {
+                                self.pipe.set_gain(gain_for(level));
+                            }
                             (self.events)(Event::Volume(level));
                         }
                     }
@@ -457,14 +478,6 @@ impl Cast {
                     };
                     if let Some(id) = status["mediaSessionId"].as_u64() {
                         media = Some(id);
-                    }
-                    // With the stream's volume in use, a phone's slider moves ours.
-                    if let Some(level) = status["volume"]["level"].as_f64().filter(|_| stream_volume) {
-                        let level = level as f32;
-                        if wanted_volume.is_none() && volume.is_none_or(|v| (v - level).abs() > 0.01) {
-                            volume = Some(level);
-                            (self.events)(Event::Volume(level));
-                        }
                     }
                     let state = status["playerState"].as_str().unwrap_or("");
                     if let Some(seconds) = status["currentTime"].as_f64() {
@@ -570,6 +583,12 @@ impl Screen {
     }
 }
 
+/// The stream's scale for a slider level, on the same curve as this
+/// computer's volume.
+fn gain_for(level: f32) -> f32 {
+    level * level
+}
+
 /// Our receiver app's transport id and session id, from a receiver status.
 fn our_app(payload: &Value, app: &str) -> Option<(String, String)> {
     payload["status"]["applications"]
@@ -624,6 +643,26 @@ mod tests {
         assert!(screen.due().is_some_and(|n| n.paused));
         screen.update(song("a", 60.0, true), Duration::ZERO);
         assert!(screen.due().is_some_and(|n| n.position == 60.0));
+    }
+
+    #[test]
+    fn lg_tvs_get_the_streams_volume() {
+        let device = |model: &str, screen: bool| Device {
+            id: String::new(),
+            name: String::new(),
+            model: model.into(),
+            addr: "127.0.0.1:8009".parse().unwrap(),
+            group: false,
+            screen,
+        };
+        // The user's own devices, as they name themselves.
+        assert!(ignores_its_volume(&device("86UT8050PSB.AAUFLJD", true)));
+        assert!(!ignores_its_volume(&device("HK Citation One", false)));
+        assert!(!ignores_its_volume(&device("Lenovo Smart Clock", false)));
+        assert!(!ignores_its_volume(&device("Chromecast", true)));
+        assert!(!ignores_its_volume(&device("Google TV Streamer", true)));
+        assert!(ignores_its_volume(&device("LG webOS TV", true)));
+        assert_eq!(gain_for(0.5), 0.25);
     }
 
     #[test]

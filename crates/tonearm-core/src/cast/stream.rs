@@ -74,11 +74,25 @@ pub struct Pipe {
     /// Bumped by each connection from the device. Older ones stop.
     connection: AtomicU64,
     closed: AtomicBool,
+    /// What the stream's samples are scaled by, as f32 bits.
+    gain: AtomicU32,
 }
 
 impl Pipe {
     pub fn new() -> Arc<Pipe> {
-        Arc::new(Pipe::default())
+        let pipe = Pipe::default();
+        pipe.set_gain(1.0);
+        Arc::new(pipe)
+    }
+
+    /// Scales the stream, for a device that ignores its own volume. Heard
+    /// once the device has played the lead already sent.
+    pub fn set_gain(&self, gain: f32) {
+        self.gain.store(gain.clamp(0.0, 1.0).to_bits(), Ordering::SeqCst);
+    }
+
+    pub fn gain(&self) -> f32 {
+        f32::from_bits(self.gain.load(Ordering::SeqCst))
     }
 
     pub fn set_rate(&self, rate: u32) {
@@ -276,6 +290,8 @@ fn answer(mut stream: TcpStream, path: &str, pipe: &Pipe) -> std::io::Result<()>
     let mut samples = vec![0f32; FRAMES * 2];
     let mut bytes = Vec::with_capacity(FRAMES * 4);
     let mut last = Instant::now();
+    // The gain moves to a new level across one chunk, so it doesn't click.
+    let mut gain = pipe.gain();
     loop {
         if pipe.is_closed() || pipe.connection.load(Ordering::SeqCst) != id {
             return Ok(());
@@ -304,11 +320,17 @@ fn answer(mut stream: TcpStream, path: &str, pipe: &Pipe) -> std::io::Result<()>
                 }
             }
         }
+        let wanted = pipe.gain();
+        let step = (wanted - gain) / FRAMES as f32;
         bytes.clear();
-        for s in &samples {
-            let v = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
-            bytes.extend_from_slice(&v.to_le_bytes());
+        for frame in samples.chunks_exact(2) {
+            gain += step;
+            for s in frame {
+                let v = ((s * gain).clamp(-1.0, 1.0) * 32767.0) as i16;
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
         }
+        gain = wanted;
         stream.write_all(&bytes)?;
         pipe.clock.lock().unwrap().sent += FRAMES as f64 / rate as f64;
     }
@@ -388,6 +410,12 @@ fn serves_a_paced_wav() {
     reader.read_exact(&mut more).unwrap();
     assert!(start.elapsed() >= Duration::from_millis(400), "{:?}", start.elapsed());
     assert!(pipe.has(id));
+    // A gain set now is in the stream by the end of what is sent next.
+    pipe.set_gain(0.25);
+    let mut quieter = vec![0u8; 48_000 * 4 / 2];
+    reader.read_exact(&mut quieter).unwrap();
+    let n = quieter.len();
+    assert_eq!(i16::from_le_bytes([quieter[n - 4], quieter[n - 3]]), 4095);
     // The device's report moves the pacing: it has played 1 s and stopped.
     pipe.heard(1.0, false);
     assert!(pipe.lead() > Duration::from_millis(1000), "{:?}", pipe.lead());
