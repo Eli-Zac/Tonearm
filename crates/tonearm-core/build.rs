@@ -1,12 +1,14 @@
-/// Passes Tonearm's own service keys to the compiler, for `services.rs`.
+/// Passes Tonearm's own service keys to the compiler, for `services.rs`,
+/// and the id of Tonearm's Cast receiver, for `cast/session.rs`.
 /// They come from the environment, or from the `keys.env` file of
 /// NAME=value lines at the top of the repo, which stays out of git. A build
 /// without them still works. It asks the user for keys.
 fn main() {
-    const NAMES: [&str; 3] = [
+    const NAMES: [&str; 4] = [
         "TONEARM_DISCORD_APP",
         "TONEARM_LASTFM_KEY",
         "TONEARM_LASTFM_SECRET",
+        "TONEARM_CAST_APP",
     ];
     const FILE: &str = "../../keys.env";
     println!("cargo:rerun-if-changed={FILE}");

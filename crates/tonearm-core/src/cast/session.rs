@@ -1,5 +1,9 @@
-//! One cast: opens Google's Default Media Receiver on the device, has it
-//! play our stream, and keeps the two in step until it ends.
+//! One cast: opens the receiver app on the device, has it play our
+//! stream, and keeps the two in step until it ends.
+//!
+//! The receiver is Google's Default Media Receiver, unless the build names
+//! Tonearm's own (`TONEARM_CAST_APP`, the page in `receiver/`). Ours is
+//! also told the song playing, so the screen can show it.
 //!
 //! Pause and play follow the engine, through the pipe. Volume goes to the
 //! device. When someone pauses or changes the volume on the device itself
@@ -14,7 +18,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Google's Default Media Receiver. It needs no registration.
-const APP: &str = "CC1AD845";
+const DEFAULT_APP: &str = "CC1AD845";
+/// The receiver app to open: Tonearm's own when the build has its id.
+const APP: &str = match option_env!("TONEARM_CAST_APP") {
+    Some(id) if !id.is_empty() => id,
+    _ => DEFAULT_APP,
+};
+/// Where Tonearm's receiver hears about the song playing.
+const TONEARM: &str = "urn:x-cast:app.tonearm";
+/// A song's position this far from where the receiver's own clock puts
+/// it is a seek, and the receiver is told.
+const DRIFT: f32 = 1.5;
 const PING_EVERY: Duration = Duration::from_secs(5);
 /// No word at all from the device for this long: it has gone.
 const SILENT: Duration = Duration::from_secs(20);
@@ -37,8 +51,32 @@ pub enum Event {
     Ended(Option<String>),
 }
 
+/// The song playing, for a receiver with a screen.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NowPlaying {
+    /// Tells songs apart. Its video id.
+    pub id: String,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    /// The cover's link.
+    pub cover: String,
+    /// Seconds. Zero when unknown.
+    pub duration: f32,
+    /// Seconds into the song, as heard on the device.
+    pub position: f32,
+    pub paused: bool,
+}
+
+/// Whether the device is told the song playing: only Tonearm's own
+/// receiver has a use for it.
+pub fn shows_songs() -> bool {
+    APP != DEFAULT_APP
+}
+
 enum Command {
     Volume(f32),
+    Now(NowPlaying),
     Stop,
 }
 
@@ -83,6 +121,14 @@ impl Session {
 
     pub fn volume(&self, level: f32) {
         let _ = self.tx.send(Command::Volume(level));
+    }
+
+    /// The song playing now. Cheap, so call it as often as the playhead
+    /// moves: the device is told only of changes.
+    pub fn now_playing(&self, now: NowPlaying) {
+        if shows_songs() {
+            let _ = self.tx.send(Command::Now(now));
+        }
     }
 
     /// Ends the cast and waits a moment for the device to be told, as
@@ -182,6 +228,7 @@ impl Cast {
         let mut pinged = Instant::now();
         let mut asked = Instant::now();
         let loaded = Instant::now();
+        let mut screen = Screen::default();
         loop {
             if !self.pipe.reached() && loaded.elapsed() > UNREACHED {
                 return Err(format!(
@@ -196,7 +243,24 @@ impl Cast {
                     return Ok(());
                 }
                 Ok(Command::Volume(level)) => wanted_volume = Some(level.clamp(0.0, 1.0)),
+                Ok(Command::Now(now)) => screen.update(now, self.pipe.lead()),
                 Err(TryRecvError::Empty) => {}
+            }
+            if let Some(now) = screen.due() {
+                channel.send(
+                    &transport,
+                    TONEARM,
+                    &json!({
+                        "type": "NOW",
+                        "title": now.title,
+                        "artist": now.artist,
+                        "album": now.album,
+                        "cover": now.cover,
+                        "duration": now.duration,
+                        "position": now.position,
+                        "paused": now.paused,
+                    }),
+                )?;
             }
             // A slider dragged sends a stream of levels. The device gets
             // one every tenth of a second.
@@ -317,6 +381,51 @@ impl Cast {
     }
 }
 
+/// What the receiver's screen was last told, and what it is to be told.
+#[derive(Default)]
+struct Screen {
+    /// Last sent, and when.
+    shown: Option<(NowPlaying, Instant)>,
+    /// A new song, held back until the device plays it.
+    next: Option<(NowPlaying, Instant)>,
+    /// A change to the song shown, to send now.
+    change: Option<NowPlaying>,
+}
+
+impl Screen {
+    /// `lead` is how far the device trails the engine. A new song waits
+    /// that long, so the screen changes with the sound.
+    fn update(&mut self, now: NowPlaying, lead: Duration) {
+        match (&mut self.next, &self.shown) {
+            (Some((next, _)), _) if next.id == now.id => *next = now,
+            (_, Some((shown, at))) if shown.id == now.id => {
+                self.next = None;
+                let expected = if shown.paused {
+                    shown.position
+                } else {
+                    shown.position + at.elapsed().as_secs_f32()
+                };
+                if now.paused != shown.paused || (now.position - expected).abs() > DRIFT {
+                    self.change = Some(now);
+                }
+            }
+            (_, None) => self.change = Some(now),
+            _ => self.next = Some((now, Instant::now() + lead)),
+        }
+    }
+
+    /// What to send now, if anything.
+    fn due(&mut self) -> Option<NowPlaying> {
+        let now = match self.change.take() {
+            Some(now) => now,
+            None if self.next.as_ref().is_some_and(|(_, at)| Instant::now() >= *at) => self.next.take()?.0,
+            None => return None,
+        };
+        self.shown = Some((now.clone(), Instant::now()));
+        Some(now)
+    }
+}
+
 /// Our receiver app's transport id and session id, from a receiver status.
 fn our_app(payload: &Value) -> Option<(String, String)> {
     payload["status"]["applications"]
@@ -342,4 +451,49 @@ pub fn status(device: &Device) -> Result<Value, String> {
         }
     }
     Err("no answer".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn song(id: &str, position: f32, paused: bool) -> NowPlaying {
+        NowPlaying {
+            id: id.into(),
+            title: id.into(),
+            position,
+            paused,
+            ..NowPlaying::default()
+        }
+    }
+
+    #[test]
+    fn the_screen_hears_only_of_changes() {
+        let mut screen = Screen::default();
+        screen.update(song("a", 0.0, false), Duration::ZERO);
+        assert_eq!(screen.due().map(|n| n.id), Some("a".into()));
+        // Playing on as expected: nothing to say.
+        screen.update(song("a", 0.1, false), Duration::ZERO);
+        assert!(screen.due().is_none());
+        // Paused, then a seek.
+        screen.update(song("a", 0.1, true), Duration::ZERO);
+        assert!(screen.due().is_some_and(|n| n.paused));
+        screen.update(song("a", 60.0, true), Duration::ZERO);
+        assert!(screen.due().is_some_and(|n| n.position == 60.0));
+    }
+
+    #[test]
+    fn a_new_song_waits_for_the_sound() {
+        let mut screen = Screen::default();
+        screen.update(song("a", 0.0, false), Duration::ZERO);
+        screen.due();
+        screen.update(song("b", 0.0, false), Duration::from_secs(60));
+        assert!(screen.due().is_none());
+        // A later word on the same new song keeps its place in line.
+        screen.update(song("b", 0.5, false), Duration::ZERO);
+        assert!(screen.due().is_none());
+
+        screen.update(song("c", 0.0, false), Duration::ZERO);
+        assert_eq!(screen.due().map(|n| n.id), Some("c".into()));
+    }
 }

@@ -9,8 +9,9 @@ use crate::{cast, on_ui, App, CastDevice};
 use slint::{ModelRc, SharedString, VecModel};
 use std::rc::Rc;
 
-/// What the device shows as playing. Its Default Media Receiver can't be
-/// told when the song changes, so it names the app and the computer.
+/// What the device shows as playing until it hears of a song. Google's
+/// Default Media Receiver can't be told when the song changes, so with it
+/// this stays: the app and the computer.
 const TITLE: &str = "Tonearm";
 
 #[derive(Default)]
@@ -182,6 +183,44 @@ impl App {
             }
             None => false,
         }
+    }
+
+    /// Tells the device the song playing and how far in, for Tonearm's own
+    /// receiver to show. `seconds` is where the playhead shows, which
+    /// follows what the device plays.
+    pub(crate) fn cast_now_playing(&self, seconds: f32, duration: f32, playing: bool) {
+        if !cast::shows_songs() {
+            return;
+        }
+        let casting = self.casting.borrow();
+        let Some(session) = &casting.session else {
+            return;
+        };
+        let player = self.player.borrow();
+        let Some(item) = player.queue.get(player.index) else {
+            return;
+        };
+        let artist = if item.artists.is_empty() {
+            item.subtitle.split(" • ").next().unwrap_or_default().to_string()
+        } else {
+            item.artists.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(", ")
+        };
+        let cover = if item.thumb.starts_with("//") {
+            format!("https:{}", item.thumb)
+        } else {
+            crate::images::sized(&item.thumb, 720)
+        };
+        session.now_playing(cast::NowPlaying {
+            id: item.video_id.clone().unwrap_or_else(|| item.title.clone()),
+            title: item.title.clone(),
+            artist,
+            album: item.album.as_ref().map(|(name, _)| name.clone()).unwrap_or_default(),
+            // A downloaded song's cover is a file here, out of the device's reach.
+            cover: if cover.starts_with("http") { cover } else { String::new() },
+            duration,
+            position: seconds,
+            paused: !playing,
+        });
     }
 
     /// This computer's volume, also while the slider shows the device's.

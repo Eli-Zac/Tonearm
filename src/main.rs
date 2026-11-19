@@ -4724,6 +4724,7 @@ impl App {
             time = time.saturating_sub(status.lag_ms.load(Ordering::SeqCst));
             let seconds = time as f32 / 1000.0;
             self.show_playhead(seconds);
+            self.cast_now_playing(seconds, duration, playing);
             // Marks where the next song will start to mix in.
             let fade_from = self.mix_start(duration).map_or(1.0, |at| (at / duration).clamp(0.0, 1.0));
             ui.set_fade_from(fade_from);
