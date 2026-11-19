@@ -205,9 +205,34 @@ pub struct Shelf {
     pub title: String,
     /// Horizontal row of cards when true, vertical list when false.
     pub carousel: bool,
+    /// How a carousel draws its items.
+    pub layout: Layout,
     pub items: Vec<Item>,
     /// The page behind "Show all": browse id and params.
     pub more: Option<(String, Option<String>)>,
+}
+
+/// How a carousel draws its items, as YouTube Music does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Layout {
+    /// Square cards.
+    #[default]
+    Cards,
+    /// Song rows four to a column, such as "Song mixes" and "Quick picks".
+    Grid,
+    /// Wide 16:9 cards, such as "Music videos for you".
+    Wide,
+}
+
+/// A chip over Home, such as "Relax" or "Workout": Home again, picked for
+/// that mood.
+#[derive(Clone, Debug, Default)]
+pub struct Chip {
+    pub title: String,
+    pub browse_id: String,
+    pub params: Option<String>,
+    /// The chip this page was opened with.
+    pub selected: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -216,6 +241,8 @@ pub struct Page {
     pub subtitle: String,
     pub thumb: String,
     pub shelves: Vec<Shelf>,
+    /// Home's mood chips. Empty on other pages.
+    pub chips: Vec<Chip>,
     pub continuation: Option<String>,
     /// Only artist, album and playlist pages have one.
     pub header: Option<Header>,

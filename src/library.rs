@@ -111,15 +111,26 @@ pub fn analysis(video_id: &str) -> Option<Analysis> {
          FROM analysis WHERE video_id = ?1 AND analyzer_version = ?2",
         params![video_id, ANALYZER_VERSION],
         |row| {
+            // The beats, then a NaN, then the downbeats, so the table needs
+            // no new column and older copies of Tonearm can still open it.
+            let mut beats = blob_to_floats(&row.get::<_, Vec<u8>>(4)?);
+            let downbeats = match beats.iter().position(|b| b.is_nan()) {
+                Some(at) => {
+                    let after = beats.split_off(at);
+                    after[1..].to_vec()
+                }
+                None => Vec::new(),
+            };
             Ok(Analysis {
                 length: row.get(0)?,
                 bpm: row.get(1)?,
                 bpm_confidence: row.get(2)?,
                 grid_start: row.get(3)?,
-                beats: blob_to_floats(&row.get::<_, Vec<u8>>(4)?),
+                beats,
                 key: row.get::<_, Option<u8>>(5)?,
                 key_confidence: row.get(6)?,
                 waveform: row.get(7)?,
+                downbeats,
             })
         },
     )
@@ -164,7 +175,7 @@ pub fn save_analysis(video_id: &str, a: &Analysis) {
             a.bpm,
             a.bpm_confidence,
             a.grid_start,
-            floats_to_blob(&a.beats),
+            floats_to_blob(&a.beats.iter().copied().chain([f32::NAN]).chain(a.downbeats.iter().copied()).collect::<Vec<_>>()),
             a.key,
             a.key_confidence,
             a.waveform,

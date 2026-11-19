@@ -375,7 +375,7 @@ fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
                             }
                         }
                         // The app sends the new song's gain straight after.
-                        p.send(mix::Command::Start { deck, plan });
+                        p.send(mix::Command::start(deck, plan, p.rate));
                     }
                     // The app checks `prepared` first, so this is a race lost
                     // to another command. The player retries the song afresh.

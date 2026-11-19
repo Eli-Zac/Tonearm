@@ -1,6 +1,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod analysis;
+mod animated_art;
 mod audio;
 mod blur;
 mod canvas;
@@ -379,12 +380,6 @@ const PREPARE_AHEAD_MIXING: f32 = 75.0;
 /// How long mixes last in a playlist's mix mode when crossfade is off.
 const MIX_MODE_SECONDS: f32 = 8.0;
 
-/// Whether crossfades are beat matched where the songs allow. On unless
-/// turned off.
-fn load_beat_match() -> bool {
-    store::load("beat-match").map_or(true, |text| text.trim() != "0")
-}
-
 /// The crossfade length saved in Settings. Off when none is saved.
 fn load_crossfade() -> u32 {
     store::load("crossfade")
@@ -414,11 +409,39 @@ struct Cover {
     due: Instant,
 }
 
+/// A looping clip in place of the cover: a Spotify Canvas or Apple's
+/// moving cover, and which views it shows in.
+struct Motion {
+    /// Unique to this clip, so frames from one stopped since are dropped.
+    id: u64,
+    clip: canvas::Clip,
+    /// Shows in the Now playing panel.
+    panel: bool,
+    /// Shows in expanded Now playing.
+    wide: bool,
+}
+
+/// What the Now playing panel shows for the cover, as chosen in Settings.
+const PANEL_CANVAS: i32 = 0;
+const PANEL_ANIMATED: i32 = 1;
+/// What expanded Now playing shows for the cover.
+const WIDE_ANIMATED: i32 = 0;
+
+/// The cover choices in Settings, for the panel and the expanded view.
+/// The moving album cover in both when none are saved.
+fn load_cover_choices() -> (i32, i32) {
+    let text = store::load("cover-choices").unwrap_or_default();
+    let mut parts = text.trim().split(',').map(|p| p.parse::<i32>().ok());
+    let panel = parts.next().flatten().filter(|c| (0..3).contains(c)).unwrap_or(PANEL_ANIMATED);
+    let wide = parts.next().flatten().filter(|c| (0..2).contains(c)).unwrap_or(WIDE_ANIMATED);
+    (panel, wide)
+}
+
 /// The song going out during a crossfade. Its moving cover or Canvas keeps
 /// playing while it fades out under the new song's.
 struct Outgoing {
     cover: Option<Cover>,
-    canvas: Option<(u64, canvas::Clip)>,
+    canvas: Option<Motion>,
     /// The song going out, for the pulse on its row's transition line.
     video_id: String,
     started: Instant,
@@ -459,14 +482,19 @@ struct App {
     player: RefCell<Player>,
     lyrics: RefCell<LyricsState>,
     cover: RefCell<Option<Cover>>,
-    /// The Spotify Canvas looping as the cover, with the track it is for.
-    canvas: RefCell<Option<(u64, canvas::Clip)>>,
+    /// The clip looping as the cover: in the panel, or in both views when
+    /// they show the same one.
+    canvas: RefCell<Option<Motion>>,
+    /// The clip in expanded Now playing, when it is not the panel's.
+    wide: RefCell<Option<Motion>>,
+    /// Counts clips, for `Motion::id`.
+    clips: Cell<u64>,
+    /// The cover choices in Settings: the panel's and the expanded view's.
+    cover_choices: Cell<(i32, i32)>,
     outgoing: RefCell<Option<Outgoing>>,
     clock: Cell<(u64, Instant)>,
     /// Seconds a song crossfades into the next one over. Zero is off.
     crossfade: Cell<u32>,
-    /// Whether crossfades are beat matched where the songs allow.
-    beat_match: Cell<bool>,
     /// Songs' analyses read from the library, by video id.
     analyses: RefCell<HashMap<String, Rc<analysis::Analysis>>>,
     /// Songs looked for in the library and not found, so the next tick does
@@ -507,6 +535,10 @@ struct App {
     fast: Cell<bool>,
     /// Moves the playing bars while a song plays and the window is seen.
     beat_timer: Timer,
+    /// Waves the expanded view's background while it is open.
+    wave_timer: Timer,
+    /// The still cover's blur that the background waves from.
+    backdrop_base: RefCell<Option<slint::SharedPixelBuffer<slint::Rgba8Pixel>>>,
     /// Whether closing the window sends Tonearm to the tray.
     close_to_tray: Cell<bool>,
     /// Whether the window is closed to the tray.
@@ -1596,6 +1628,7 @@ impl App {
                     carousel: false,
                     items: vec![best],
                     more: None,
+                    ..Default::default()
                 },
             ),
         }
@@ -1738,12 +1771,19 @@ impl App {
         let pick = self.suggest.borrow().picks.get(index).cloned();
         match pick {
             Some(Pick::Query(query)) => {
+                self.ui.set_np_expanded(false);
                 self.ui.set_search_text(query.as_str().into());
                 self.suggest_edited(&query);
                 self.remember_search(&query);
                 self.open(Route::Search(query, 0), true);
             }
-            Some(Pick::Item(item)) => self.open_item(item),
+            Some(Pick::Item(item)) => {
+                // A song plays without leaving expanded Now playing.
+                if item.video_id.is_none() {
+                    self.ui.set_np_expanded(false);
+                }
+                self.open_item(item)
+            }
             None => {}
         }
     }
@@ -2660,15 +2700,6 @@ impl App {
         self.forget_plan();
     }
 
-    fn set_beat_match_choice(&self, choice: i32) {
-        let on = choice != 0;
-        self.beat_match.set(on);
-        self.disk.run(move || {
-            let _ = store::save("beat-match", if on { "1" } else { "0" });
-        });
-        self.forget_plan();
-    }
-
     /// A setting changed, so the mix into the next song is worked out again.
     fn forget_plan(&self) {
         self.planned.borrow_mut().take();
@@ -2800,8 +2831,7 @@ impl App {
         library::transition(from, to).unwrap_or_else(|| {
             let out = self.analysis_of(from);
             let inn = self.analysis_of(to);
-            let beat_match = self.beat_match.get() || self.mix_mode();
-            transition::Settings::auto(out.as_deref(), inn.as_deref(), beat_match)
+            transition::Settings::auto(out.as_deref(), inn.as_deref(), self.mix_mode())
         })
     }
 
@@ -2874,7 +2904,7 @@ impl App {
             // planned needs time to fetch and analyze the next song.
             let ahead = match planned.as_ref().map(|(_, p)| (p.out_at, p.length)) {
                 Some((Some(at), _)) => duration - at as f32 + PREPARE_AHEAD,
-                Some((None, length)) if self.beat_match.get() || self.mix_mode() => {
+                Some((None, length)) if self.mix_mode() => {
                     length as f32 + PREPARE_AHEAD_MIXING
                 }
                 Some((None, length)) => length as f32 + PREPARE_AHEAD,
@@ -3000,6 +3030,9 @@ impl App {
         let motion_on = ui.get_track_motion_on();
         let cover = self.cover.borrow_mut().take();
         let canvas = self.canvas.borrow_mut().take();
+        // The expanded view's own clip ends with its song.
+        self.wide.borrow_mut().take();
+        ui.set_wide_motion_on(false);
         let seconds = plan.length as f32;
         let video_id = {
             let player = self.player.borrow();
@@ -3134,76 +3167,144 @@ impl App {
         });
     }
 
-    /// Looks for the track's Spotify Canvas and, when there is one, loops it
-    /// in place of the cover. The still cover stays when there is none.
+    /// Finds what each view shows for the cover, as Settings say: the
+    /// track's Spotify Canvas, or the album's moving cover from Apple Music,
+    /// or the still cover. Each view falls back to the still cover when its
+    /// clip cannot be had. A clip both views show plays once for both.
     fn load_canvas(self: &Rc<Self>, title: &str, artist: &str, generation: u64) {
+        let (panel, wide) = self.cover_choices.get();
         let keys = canvas_keys(&self.settings.borrow());
-        if keys.cookie.is_empty() || title.is_empty() {
+        // Set by show_track just before.
+        let album = self.ui.get_track_album().to_string();
+        let want_canvas = panel == PANEL_CANVAS && !keys.cookie.is_empty() && !title.is_empty();
+        let want_apple =
+            (panel == PANEL_ANIMATED || wide == WIDE_ANIMATED) && !(album.is_empty() && title.is_empty());
+        if !want_canvas && !want_apple {
             return;
         }
         let (http, title, artist) = (self.http.clone(), title.to_string(), artist.to_string());
         self.api.run(move || {
-            let found = canvas::fetch(&http, &keys, &title, &artist);
+            let apple = if want_apple {
+                animated_art::fetch(&http, &album, &title, &artist).unwrap_or_else(|message| {
+                    eprintln!("animated cover: {message}");
+                    None
+                })
+            } else {
+                None
+            };
+            let spotify = if want_canvas {
+                canvas::fetch(&http, &keys, &title, &artist).unwrap_or_else(|message| {
+                    eprintln!("canvas: {message}");
+                    None
+                })
+            } else {
+                None
+            };
             on_ui(move |app| {
                 if app.player.borrow().generation != generation {
                     return;
                 }
-                let path = match found {
-                    Ok(Some(path)) => path,
-                    Ok(None) => return,
-                    Err(message) => return eprintln!("canvas: {message}"),
-                };
-                let clip = canvas::Clip::play(
-                    path,
-                    move |pixels, blur| {
-                        on_ui(move |app| {
-                            let live = app
-                                .canvas
-                                .borrow()
-                                .as_ref()
-                                .is_some_and(|(g, _)| *g == generation);
-                            if live {
-                                app.ui.set_track_backdrop(Image::from_rgba8(blur));
-                                app.ui.set_track_motion(Image::from_rgba8(pixels));
-                                app.ui.set_track_motion_on(true);
-                            } else if app
-                                .outgoing
-                                .borrow()
-                                .as_ref()
-                                .and_then(|o| o.canvas.as_ref())
-                                .is_some_and(|(g, _)| *g == generation)
-                            {
-                                // Fading out under the next song.
-                                app.ui.set_fade_motion(Image::from_rgba8(pixels));
-                            }
-                        })
-                    },
-                    move |message| {
-                        eprintln!("canvas: {message}");
-                        // Back to the still cover.
-                        on_ui(move |app| {
-                            let ours = app
-                                .canvas
-                                .borrow()
-                                .as_ref()
-                                .is_some_and(|(g, _)| *g == generation);
-                            if ours {
-                                app.stop_canvas();
-                                app.restore_still_cover();
-                            }
-                        });
-                    },
-                );
-                *app.canvas.borrow_mut() = Some((generation, clip));
+                // The choices as they are now, which may have changed meanwhile.
+                let (panel, wide) = app.cover_choices.get();
+                let apple_in_panel = panel == PANEL_ANIMATED && apple.is_some();
+                let apple_in_wide = wide == WIDE_ANIMATED && apple.is_some();
+                if let Some(path) = apple.filter(|_| apple_in_panel || apple_in_wide) {
+                    let motion = app.start_clip(path, animated_art::WIDTH, apple_in_panel, apple_in_wide);
+                    if apple_in_panel {
+                        *app.canvas.borrow_mut() = Some(motion);
+                    } else {
+                        *app.wide.borrow_mut() = Some(motion);
+                    }
+                }
+                if let Some(path) = spotify.filter(|_| panel == PANEL_CANVAS) {
+                    let motion = app.start_clip(path, canvas::WIDTH, true, false);
+                    *app.canvas.borrow_mut() = Some(motion);
+                }
             });
         });
     }
 
+    /// Plays the clip at `path`, `width` pixels wide, in the views asked for.
+    fn start_clip(self: &Rc<Self>, path: std::path::PathBuf, width: u32, panel: bool, wide: bool) -> Motion {
+        let id = self.clips.get() + 1;
+        self.clips.set(id);
+        let clip = canvas::Clip::play_at(
+            path,
+            width,
+            move |pixels, _blur| {
+                on_ui(move |app| {
+                    let live = |slot: &RefCell<Option<Motion>>| slot.borrow().as_ref().is_some_and(|m| m.id == id);
+                    if live(&app.canvas) || live(&app.wide) {
+                        let image = Image::from_rgba8(pixels);
+                        if panel {
+                            app.ui.set_track_motion(image.clone());
+                            app.ui.set_track_motion_on(true);
+                        }
+                        if wide {
+                            app.ui.set_wide_motion(image);
+                            app.ui.set_wide_motion_on(true);
+                        }
+                    } else if panel
+                        && app
+                            .outgoing
+                            .borrow()
+                            .as_ref()
+                            .and_then(|o| o.canvas.as_ref())
+                            .is_some_and(|m| m.id == id)
+                    {
+                        // Fading out under the next song.
+                        app.ui.set_fade_motion(Image::from_rgba8(pixels));
+                    }
+                })
+            },
+            move |message| {
+                eprintln!("canvas: {message}");
+                // Back to the still cover in the views it showed in.
+                on_ui(move |app| {
+                    for slot in [&app.canvas, &app.wide] {
+                        if slot.borrow().as_ref().is_some_and(|m| m.id == id) {
+                            slot.borrow_mut().take();
+                            if panel {
+                                app.ui.set_track_motion_on(false);
+                            }
+                            if wide {
+                                app.ui.set_wide_motion_on(false);
+                            }
+                        }
+                    }
+                });
+            },
+        );
+        Motion { id, clip, panel, wide }
+    }
+
+    /// Changes what a view shows for the cover, and starts the playing
+    /// song's clips again to match.
+    fn set_cover_choice(self: &Rc<Self>, panel: i32, wide: i32) {
+        let choices = (panel.clamp(0, 2), wide.clamp(0, 1));
+        if choices == self.cover_choices.get() {
+            return;
+        }
+        self.cover_choices.set(choices);
+        self.disk.run(move || {
+            let _ = store::save("cover-choices", &format!("{},{}", choices.0, choices.1));
+        });
+        self.stop_canvas();
+        let (title, artist, generation) = {
+            let player = self.player.borrow();
+            let Some(item) = player.queue.get(player.index) else { return };
+            (item.title.clone(), credits(item).0, player.generation)
+        };
+        self.load_canvas(&title, &artist, generation);
+    }
+
     /// Stops the Canvas and fades back to the still cover underneath.
     fn stop_canvas(&self) {
-        // Dropping the clip stops its thread.
+        // Dropping the clips stops their threads.
         self.canvas.borrow_mut().take();
+        self.wide.borrow_mut().take();
         self.ui.set_track_motion_on(false);
+        self.ui.set_wide_motion_on(false);
         let still = self.ui.get_track_art();
         self.backdrop_of(&still);
     }
@@ -3211,9 +3312,39 @@ impl App {
     /// Fills the expanded view's background with a blur of `image`.
     fn backdrop_of(&self, image: &Image) {
         match image.to_rgba8() {
-            Some(pixels) => self.ui.set_track_backdrop(Image::from_rgba8(blur::backdrop(&pixels))),
-            None => self.ui.set_track_backdrop(Image::default()),
+            Some(pixels) => {
+                let base = blur::backdrop(&pixels);
+                self.ui.set_track_backdrop(Image::from_rgba8(base.clone()));
+                *self.backdrop_base.borrow_mut() = Some(base);
+            }
+            None => {
+                self.ui.set_track_backdrop(Image::default());
+                *self.backdrop_base.borrow_mut() = None;
+            }
         }
+    }
+
+    /// Starts or stops the background's waves, as expanded Now playing
+    /// opens and closes. About 30 small frames a second, made here, as
+    /// moving big images in the window costs far more.
+    fn wave(self: &Rc<Self>) {
+        let on = self.ui.get_np_expanded() && !self.hidden.get() && !self.minimized.get();
+        if on == self.wave_timer.running() {
+            return;
+        }
+        if !on {
+            self.wave_timer.stop();
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        let start = Instant::now();
+        self.wave_timer.start(TimerMode::Repeated, Duration::from_millis(33), move || {
+            let Some(app) = weak.upgrade() else { return };
+            let frame = app.backdrop_base.borrow().as_ref().map(|base| blur::wave(base, start.elapsed().as_secs_f32()));
+            if let Some(frame) = frame {
+                app.ui.set_track_backdrop(Image::from_rgba8(frame));
+            }
+        });
     }
 
     /// Shows the playing track's still cover again.
@@ -3653,6 +3784,7 @@ impl App {
 
     fn tick(self: &Rc<Self>) {
         self.repaint_after_restore();
+        self.wave();
         #[cfg(windows)]
         self.attach_taskbar();
         // Shortcuts reach the window only while something holds focus.
@@ -3670,9 +3802,13 @@ impl App {
         // music is paused or no one can see it, and decodes nothing meanwhile.
         let seen = !self.minimized.get() && !self.hidden.get();
         let cover_seen = seen && self.ui.get_panel() == 3;
-        if let Some((_, clip)) = self.canvas.borrow().as_ref() {
-            clip.paused
-                .store(!cover_seen || state != audio::PLAYING, Ordering::SeqCst);
+        // The panel's cover is out of sight while the view is expanded.
+        let expanded = self.ui.get_np_expanded();
+        for slot in [&self.canvas, &self.wide] {
+            if let Some(m) = slot.borrow().as_ref() {
+                let shown = cover_seen && ((m.panel && !expanded) || (m.wide && expanded));
+                m.clip.paused.store(!shown || state != audio::PLAYING, Ordering::SeqCst);
+            }
         }
         let (generation, duration) = {
             let player = self.player.borrow();
@@ -3782,9 +3918,16 @@ impl App {
                 animating = true;
                 if Instant::now() >= cover.due {
                     let frame = &cover.frames[cover.index];
-                    ui.set_track_backdrop(Image::from_rgba8(blur::backdrop(&frame.pixels)));
-                    ui.set_track_motion(Image::from_rgba8(frame.pixels.clone()));
-                    ui.set_track_motion_on(true);
+                    // A moving cover, so it shows where Settings ask for one.
+                    let (panel, wide) = self.cover_choices.get();
+                    if panel == PANEL_ANIMATED {
+                        ui.set_track_motion(Image::from_rgba8(frame.pixels.clone()));
+                        ui.set_track_motion_on(true);
+                    }
+                    if wide == WIDE_ANIMATED {
+                        ui.set_wide_motion(Image::from_rgba8(frame.pixels.clone()));
+                        ui.set_wide_motion_on(true);
+                    }
                     cover.due = Instant::now() + frame.delay;
                     cover.index = (cover.index + 1) % cover.frames.len();
                 }
@@ -3973,6 +4116,16 @@ impl App {
                 };
                 if let Some(item) = item {
                     self.remember(&item, 0.75);
+                    // And in the account's YouTube Music history, as a play
+                    // in YouTube Music's own player would be.
+                    if let Some(video_id) = item.video_id.clone().filter(|_| self.client.signed_in()) {
+                        let client = self.client.clone();
+                        self.api.run(move || {
+                            if let Err(message) = client.add_to_history(&video_id) {
+                                eprintln!("history: {message}");
+                            }
+                        });
+                    }
                 }
             }
         }
@@ -4547,6 +4700,7 @@ fn chart_shelf(client: &Client) -> Option<innertube::model::Shelf> {
         carousel: false,
         items,
         more: Some((id, None)),
+        ..Default::default()
     })
 }
 
@@ -4609,6 +4763,7 @@ fn probe(args: &[String]) {
                     carousel: false,
                     items,
                     more: None,
+                    ..Default::default()
                 }],
                 ..Page::default()
             }
@@ -4637,6 +4792,7 @@ fn probe(args: &[String]) {
                 carousel: false,
                 items,
                 more: None,
+                ..Default::default()
             }],
             ..Page::default()
         }),
@@ -4768,13 +4924,53 @@ fn probe(args: &[String]) {
             return;
         }
         // Decodes a video for three seconds: --probe clip <file.mp4>
+        // A browse response as YouTube Music sends it, and its next pages:
+        // --probe raw <browse id> <folder>
+        "raw" => {
+            let mut body = serde_json::json!({"browseId": arg(1)});
+            for page in 0..6 {
+                let Ok(json) = client.post("browse", body) else { break };
+                let _ = std::fs::write(format!("{}/raw{page}.json", arg(2)), json.to_string());
+                let token = innertube::parse::page(&json).continuation;
+                let Some(token) = token else { break };
+                body = serde_json::json!({"continuation": token});
+            }
+            return;
+        }
+        // Records one play in the account's YouTube Music history:
+        // --probe history <video id>
+        "history" => {
+            match client.add_to_history(arg(1)) {
+                Ok(()) => println!("recorded"),
+                Err(message) => println!("failed: {message}"),
+            }
+            return;
+        }
+        // The background's flow, as frames to look at:
+        // --probe wave <picture> <folder>
+        "wave" => {
+            let picture = image::open(arg(1)).expect("picture").to_rgba8();
+            let pixels = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+                picture.as_raw(),
+                picture.width(),
+                picture.height(),
+            );
+            let base = blur::backdrop(&pixels);
+            for (i, t) in [0.0f32, 1.0, 2.0, 4.0, 8.0, 16.0].into_iter().enumerate() {
+                let frame = blur::wave(&base, t);
+                let path = format!("{}/wave{i}.png", arg(2));
+                let _ = image::save_buffer(&path, frame.as_bytes(), frame.width(), frame.height(), image::ExtendedColorType::Rgba8);
+            }
+            return;
+        }
         "clip" => {
             let frames = Arc::new(std::sync::Mutex::new(Vec::<(u32, u32)>::new()));
             let seen = frames.clone();
             // Saves the first frame here when given, to look at.
             let arg_owned = arg(2).to_string();
-            let clip = canvas::Clip::play(
+            let clip = canvas::Clip::play_at(
                 std::path::PathBuf::from(arg(1)),
+                animated_art::WIDTH,
                 move |p, _blur| {
                     let mut seen = seen.lock().unwrap();
                     if seen.is_empty() && !arg_owned.is_empty() {
@@ -4784,7 +4980,9 @@ fn probe(args: &[String]) {
                 },
                 |message| println!("failed: {message}"),
             );
-            std::thread::sleep(Duration::from_secs(3));
+            std::thread::sleep(Duration::from_secs(
+                std::env::var("CLIP_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(3),
+            ));
             drop(clip);
             let frames = frames.lock().unwrap();
             println!("{} frames, first {:?}", frames.len(), frames.first());
@@ -4794,6 +4992,11 @@ fn probe(args: &[String]) {
         "canvas" => {
             let settings = services::Settings::load();
             canvas::probe(&canvas_keys(&settings), arg(1), arg(2));
+            return;
+        }
+        // Whether Apple Music has a moving cover: --probe motion <album> <artist>
+        "motion" => {
+            animated_art::probe(arg(1), arg(2));
             return;
         }
         "lyrics" => {
@@ -4980,10 +5183,12 @@ fn main() -> Result<(), slint::PlatformError> {
         lyrics: RefCell::default(),
         cover: RefCell::new(None),
         canvas: RefCell::new(None),
+        wide: RefCell::new(None),
+        clips: Cell::new(0),
+        cover_choices: Cell::new(load_cover_choices()),
         outgoing: RefCell::new(None),
         clock: Cell::new((0, Instant::now())),
         crossfade: Cell::new(load_crossfade()),
-        beat_match: Cell::new(load_beat_match()),
         analyses: RefCell::new(HashMap::new()),
         unanalyzed: RefCell::new(HashSet::new()),
         planned: RefCell::new(None),
@@ -5003,6 +5208,8 @@ translate: Cell::new(load_translate()),
         timer: Timer::default(),
         fast: Cell::new(false),
         beat_timer: Timer::default(),
+        wave_timer: Timer::default(),
+        backdrop_base: RefCell::new(None),
         close_to_tray: Cell::new(load_close_to_tray()),
         hidden: Cell::new(false),
         attached: Cell::new(false),
@@ -5124,6 +5331,14 @@ translate: Cell::new(load_translate()),
     on!(on_cache_choice_changed, |app, choice| app.set_cache_choice(choice));
     on!(on_clear_cache, |app| app.clear_cache());
     on!(on_crossfade_choice_changed, |app, choice| app.set_crossfade_choice(choice));
+    on!(on_panel_cover_changed, |app, choice| {
+        let wide = app.cover_choices.get().1;
+        app.set_cover_choice(choice, wide);
+    });
+    on!(on_wide_cover_changed, |app, choice| {
+        let panel = app.cover_choices.get().0;
+        app.set_cover_choice(panel, choice);
+    });
     on!(on_toggle_mix, |app| app.toggle_mix());
     on!(on_download_page, |app| app.download_page());
     on!(on_edit_mix, |app, id| app.edit_mix(id as usize));
@@ -5133,10 +5348,12 @@ translate: Cell::new(load_translate()),
     on!(on_mix_volume_picked, |app, i| app.mix_choice_picked(0, i as usize));
     on!(on_mix_eq_picked, |app, i| app.mix_choice_picked(1, i as usize));
     on!(on_mix_filter_picked, |app, i| app.mix_choice_picked(2, i as usize));
+    on!(on_mix_effect_picked, |app, i| app.mix_choice_picked(3, i as usize));
+    on!(on_mix_loop_picked, |app, i| app.mix_choice_picked(4, i as usize));
     on!(on_mix_beatmatch_toggled, |app| app.mix_beatmatch_toggled());
+    on!(on_mix_key_lock_toggled, |app| app.mix_key_lock_toggled());
     on!(on_mix_save, |app| app.mix_save());
     on!(on_mix_dragged, |app, side, seconds, exact| app.mix_dragged(side, seconds as f64, exact));
-    on!(on_beat_match_choice_changed, |app, choice| app.set_beat_match_choice(choice));
     on!(on_translate_choice_changed, |app, choice| app.set_translate_choice(choice));
     // detail pages, links and the right click menu
     on!(on_show_all, |app, id| app.show_all(id as usize));
@@ -5153,9 +5370,11 @@ translate: Cell::new(load_translate()),
             .position(|&c| c == app.crossfade.get())
             .unwrap_or(0) as i32,
     );
-    app.ui.set_beat_match_choice(if app.beat_match.get() { 1 } else { 0 });
     app.ui.set_translate_choice(app.translate.get() as i32);
     app.ui.set_levelling_choice(app.levelling.get());
+    let (panel_cover, wide_cover) = app.cover_choices.get();
+    app.ui.set_panel_cover(panel_cover);
+    app.ui.set_wide_cover(wide_cover);
     app.ui.set_close_choice(if app.close_to_tray.get() { 0 } else { 1 });
     {
         let weak = Rc::downgrade(&app);

@@ -23,7 +23,7 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::{Mutex, OnceLock};
 
 /// Bump when the analysis changes, so every song is worked out again.
-pub const ANALYZER_VERSION: u32 = 2;
+pub const ANALYZER_VERSION: u32 = 3;
 
 /// The rate analysis runs at, about. The real one depends on the song.
 const TARGET_RATE: f32 = 11_025.0;
@@ -57,6 +57,10 @@ pub struct Analysis {
     /// Each beat as tracked, in seconds. Follows the song where the grid
     /// cannot, as through a tempo change.
     pub beats: Vec<f32>,
+    /// Each bar's first beat, in seconds, found bar by bar, so a bar of two
+    /// or six beats, or a beat the tracker missed, does not throw the rest.
+    /// Empty from an analysis that did not find them.
+    pub downbeats: Vec<f32>,
     /// 0 to 11 is C major to B major, 12 to 23 C minor to B minor.
     pub key: Option<u8>,
     /// How well the key profile fits, -1 to 1.
@@ -94,6 +98,140 @@ impl Analysis {
         let key = self.key? as usize;
         let mode = if key >= 12 { "minor" } else { "major" };
         Some(format!("{} {mode}", NAMES[key % 12]))
+    }
+
+    /// Each tracked beat's number, counting from the first. A gap of two
+    /// beats counts two, as the tracker can skip one, and the count follows
+    /// the tempo as it changes, so bars stay bars through a tempo change.
+    fn beat_numbers(&self) -> Vec<i64> {
+        let gaps: Vec<f32> = self.beats.windows(2).map(|w| w[1] - w[0]).collect();
+        let mut numbers = Vec::with_capacity(self.beats.len());
+        let mut n = 0i64;
+        numbers.push(n);
+        for i in 0..gaps.len() {
+            // The usual gap here, from the beats either side.
+            let mut near: Vec<f32> = gaps[i.saturating_sub(4)..(i + 5).min(gaps.len())].to_vec();
+            near.sort_by(f32::total_cmp);
+            let usual = near[near.len() / 2].max(1e-3);
+            n += (gaps[i] / usual).round() as i64;
+            numbers.push(n);
+        }
+        numbers
+    }
+
+    /// The found downbeat nearest `t`, if one is within `reach` seconds.
+    fn downbeat_near(&self, t: f64, reach: f64) -> Option<f64> {
+        self.downbeats
+            .iter()
+            .map(|&d| d as f64)
+            .min_by(|a, b| (a - t).abs().total_cmp(&(b - t).abs()))
+            .filter(|d| (d - t).abs() <= reach)
+    }
+
+    /// The beat grid of the part of the song from `from` to `to` seconds,
+    /// fitted to the beats tracked there and a little either side. Follows
+    /// a song whose tempo changes, where the one grid of the whole song
+    /// (`bpm`, `grid_start`) cannot. None with too few beats there.
+    pub fn local(&self, from: f64, to: f64) -> Option<LocalGrid> {
+        const MARGIN: f64 = 2.0;
+        if self.beats.len() < 8 {
+            return None;
+        }
+        let numbers = self.beat_numbers();
+        let picked: Vec<(f64, f64)> = self
+            .beats
+            .iter()
+            .zip(&numbers)
+            .filter(|(&t, _)| (from - MARGIN..=to + MARGIN).contains(&(t as f64)))
+            .map(|(&t, &n)| (n as f64, t as f64))
+            .collect();
+        if picked.len() < 8 {
+            return None;
+        }
+        // A straight line through them, then again without the ones far off it.
+        let fit = |points: &[(f64, f64)]| -> Option<(f64, f64)> {
+            let count = points.len() as f64;
+            let (mk, mt) = points.iter().fold((0.0, 0.0), |(a, b), (k, t)| (a + k / count, b + t / count));
+            let (mut kk, mut kt) = (0.0, 0.0);
+            for (k, t) in points {
+                kk += (k - mk) * (k - mk);
+                kt += (k - mk) * (t - mt);
+            }
+            (kk > 0.0).then(|| (mt - kt / kk * mk, kt / kk))
+        };
+        let (mut a, mut beat) = fit(&picked)?;
+        let near: Vec<(f64, f64)> = picked
+            .iter()
+            .copied()
+            .filter(|(k, t)| (t - (a + beat * k)).abs() < ON_GRID as f64 * 2.0)
+            .collect();
+        if near.len() >= 8 {
+            (a, beat) = fit(&near)?;
+        }
+        if !(60.0 / FASTEST as f64..=60.0 / SLOWEST as f64).contains(&beat) {
+            return None;
+        }
+        let on = picked
+            .iter()
+            .filter(|(k, t)| (t - (a + beat * k)).abs() < ON_GRID as f64)
+            .count();
+        let downbeat = match self.downbeat_near((from + to) / 2.0, (to - from) / 2.0 + MARGIN) {
+            // The bar found there, on the grid of the part.
+            Some(t) => a + beat * ((t - a) / beat).round(),
+            // Without them, the tracked beat nearest the song's first
+            // downbeat is one, and so is every fourth beat counted from it.
+            None => {
+                let first_down = self
+                    .beats
+                    .iter()
+                    .position(|&t| t >= self.grid_start - 0.1)
+                    .unwrap_or(0);
+                a + beat * numbers[first_down] as f64
+            }
+        };
+        Some(LocalGrid {
+            beat,
+            downbeat,
+            confidence: on as f32 / picked.len() as f32,
+            beats: picked.len(),
+        })
+    }
+}
+
+/// The beat grid of one part of a song.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LocalGrid {
+    /// Seconds between beats.
+    pub beat: f64,
+    /// A downbeat on the grid, in seconds. It may lie outside the part.
+    pub downbeat: f64,
+    /// The share of the part's beats on the grid, 0 to 1.
+    pub confidence: f32,
+    /// How many tracked beats the part has.
+    pub beats: usize,
+}
+
+impl LocalGrid {
+    /// Whether the part keeps a steady enough beat to mix on.
+    pub fn steady(&self) -> bool {
+        self.confidence >= 0.6 && self.beats >= 8
+    }
+
+    /// The beat on the grid nearest `t`.
+    pub fn nearest_beat(&self, t: f64) -> f64 {
+        self.downbeat + ((t - self.downbeat) / self.beat).round() * self.beat
+    }
+
+    /// The downbeat on the grid nearest `t`.
+    pub fn nearest_downbeat(&self, t: f64) -> f64 {
+        let bar = 4.0 * self.beat;
+        self.downbeat + ((t - self.downbeat) / bar).round() * bar
+    }
+
+    /// The last downbeat at or before `t`.
+    pub fn downbeat_before(&self, t: f64) -> f64 {
+        let bar = 4.0 * self.beat;
+        self.downbeat + ((t - self.downbeat) / bar + 1e-9).floor() * bar
     }
 }
 
@@ -398,22 +536,36 @@ fn analyze(samples: &[f32], rate: f32) -> Analysis {
 
     let onsets = normalized(&flux);
     let lows = normalized(&low_flux);
-    let period = tempo_period(&onsets, frame_rate);
-    let tracked = track_beats(&onsets, period);
-    let beats: Vec<f32> = tracked.iter().map(|&f| frame_time(f as f32)).collect();
-    let (bpm, offset, bpm_confidence) = fit_grid(&onsets, period, frame_time, frame_rate, &beats);
+    // Each likely tempo, tracked. The one whose beats keep best to a grid
+    // wins, the first guess on a near tie.
+    let mut best: Option<(Vec<f32>, (f32, f32, f32))> = None;
+    for (i, period) in tempo_periods(&onsets, frame_rate).into_iter().enumerate() {
+        let beats: Vec<f32> = track_beats(&onsets, period).iter().map(|&f| frame_time(f as f32)).collect();
+        let grid = fit_grid(&onsets, period, frame_time, frame_rate, &beats);
+        let margin = if i == 0 { 0.0 } else { 0.05 };
+        if best.as_ref().is_none_or(|(_, b)| grid.2 > b.2 + margin) {
+            best = Some((beats, grid));
+        }
+    }
+    let (beats, (bpm, offset, bpm_confidence)) = best.unwrap_or_default();
 
     let chroma = chroma_frames(samples, rate);
     let chroma_time = |i: usize| (i * CHROMA_HOP + CHROMA_FRAME / 2) as f32 / rate;
     let beat = 60.0 / bpm;
     let first = beats.first().copied().unwrap_or(0.0);
+    let onset_frame = |t: f32| ((t - frame_time(0.0)) * frame_rate).round();
+    let downbeats = find_downbeats(&beats, &lows, &bands, &chroma, onset_frame, chroma_time);
     let grid_start = if bpm > 0.0 {
-        let onset_frame = |t: f32| ((t - frame_time(0.0)) * frame_rate).round();
         let phase = downbeat_phase(&lows, &chroma, onset_frame, chroma_time, offset, beat, length);
         // The first downbeat at or after the first tracked beat.
         let mut start = offset + phase as f32 * beat;
         let bar = 4.0 * beat;
         start -= ((start - first + beat / 2.0) / bar).floor() * bar;
+        // The bars found one by one know better where the song starts.
+        if let Some(&down) = downbeats.first() {
+            start += ((down - start) / beat).round() * beat;
+            start -= ((start - first + beat / 2.0) / bar).floor() * bar;
+        }
         start
     } else {
         0.0
@@ -426,6 +578,7 @@ fn analyze(samples: &[f32], rate: f32) -> Analysis {
         bpm_confidence,
         grid_start,
         beats,
+        downbeats,
         key,
         key_confidence,
         waveform: waveform(&bands),
@@ -443,13 +596,18 @@ fn normalized(values: &[f32]) -> Vec<f32> {
 
 /// Frames between beats, from the onset curve's autocorrelation. Weighted
 /// towards 120 BPM, as half and double the tempo repeat nearly as well.
-fn tempo_period(onsets: &[f32], frame_rate: f32) -> f32 {
+///
+/// The first is the best guess. Any after it are a third faster or slower
+/// and nearly as likely: triplet hi-hats and 3+3+2 rhythms, as in drill,
+/// repeat at those lags too. Tracking the beats at each tells them apart.
+fn tempo_periods(onsets: &[f32], frame_rate: f32) -> Vec<f32> {
     let n = onsets.len();
     let mean = onsets.iter().sum::<f32>() / n.max(1) as f32;
     let centred: Vec<f32> = onsets.iter().map(|v| v - mean).collect();
     let shortest = (frame_rate * 60.0 / FASTEST).floor() as usize;
     let longest = (frame_rate * 60.0 / SLOWEST).ceil() as usize;
-    let most = (longest * 2 + 2).min(n.saturating_sub(1));
+    // Out to four of the slowest beats, to see bars.
+    let most = (longest * 4 + 4).min(n.saturating_sub(1));
     let ac: Vec<f32> = (0..=most)
         .map(|lag| {
             centred[..n - lag]
@@ -471,15 +629,35 @@ fn tempo_period(onsets: &[f32], frame_rate: f32) -> f32 {
             best = (lag, score);
         }
     }
-    // Between frames, from the peak's neighbours.
-    let lag = best.0;
-    if lag == 0 || lag + 1 > most {
-        return lag.max(1) as f32;
+    // The highest repeat within 2% of a lag.
+    let peak = |lag: f32| -> (usize, f32) {
+        let (from, to) = ((lag * 0.98).floor() as usize, (lag * 1.02).ceil() as usize);
+        (from.max(1)..=to.max(1))
+            .map(|l| (l, at(l)))
+            .fold((lag.round() as usize, f32::MIN), |b, c| if c.1 > b.1 { c } else { b })
+    };
+    // A real beat repeats at the half bar and, above all, the bar.
+    let metre = |lag: f32| peak(lag).1 + peak(2.0 * lag).1 + 2.0 * peak(4.0 * lag).1;
+    let found = metre(best.0 as f32);
+    let mut lags = vec![best.0];
+    for ratio in [4.0 / 3.0, 3.0 / 4.0, 3.0 / 2.0, 2.0 / 3.0] {
+        let lag = peak(best.0 as f32 * ratio).0;
+        if (shortest.max(1)..=longest).contains(&lag) && metre(lag as f32) > 0.9 * found && !lags.contains(&lag) {
+            lags.push(lag);
+        }
     }
-    let (a, b, c) = (ac[lag - 1], ac[lag], ac[lag + 1]);
-    let bend = a - 2.0 * b + c;
-    let shift = if bend < 0.0 { (0.5 * (a - c) / bend).clamp(-0.5, 0.5) } else { 0.0 };
-    lag as f32 + shift
+    // Between frames, from each peak's neighbours.
+    lags.into_iter()
+        .map(|lag| {
+            if lag == 0 || lag + 1 > most {
+                return lag.max(1) as f32;
+            }
+            let (a, b, c) = (ac[lag - 1], ac[lag], ac[lag + 1]);
+            let bend = a - 2.0 * b + c;
+            let shift = if bend < 0.0 { (0.5 * (a - c) / bend).clamp(-0.5, 0.5) } else { 0.0 };
+            lag as f32 + shift
+        })
+        .collect()
 }
 
 /// Beat frames by dynamic programming: each frame's best score is its own
@@ -618,6 +796,157 @@ fn fit_grid(
         })
         .count();
     ((60.0 / beat) as f32, offset as f32, on as f32 / beats.len() as f32)
+}
+
+/// The downbeats among the tracked `beats`, in seconds.
+///
+/// Each beat gets a score for how much it sounds like a bar's first: the
+/// bass hits hard and the chords change there. Then the best way through,
+/// counting one to four along the beats, with the strongest beats counted
+/// one. A beat the tracker skipped is counted too. The count only starts
+/// over where the music says so for bars on end, as where a song drops a
+/// beat or adds two, so one stray accent cannot shift it.
+fn find_downbeats(
+    beats: &[f32],
+    lows: &[f32],
+    bands: &[[f32; 3]],
+    chroma: &[[f32; 12]],
+    onset_frame: impl Fn(f32) -> f32,
+    chroma_time: impl Fn(usize) -> f32,
+) -> Vec<f32> {
+    // What starting the count over costs, in accents: some ten bars of
+    // clear evidence. Any less and the count wanders in steady songs.
+    const RESTART: f32 = 40.0;
+    let n = beats.len();
+    if n < 16 {
+        return Vec::new();
+    }
+    // How many beats each step along the tracked beats is.
+    let gaps: Vec<f32> = beats.windows(2).map(|w| w[1] - w[0]).collect();
+    let steps: Vec<usize> = (0..gaps.len())
+        .map(|i| {
+            let mut near: Vec<f32> = gaps[i.saturating_sub(4)..(i + 5).min(gaps.len())].to_vec();
+            near.sort_by(f32::total_cmp);
+            let usual = near[near.len() / 2].max(1e-3);
+            ((gaps[i] / usual).round() as usize).clamp(1, 4)
+        })
+        .collect();
+    // Each beat's pitch classes, up to the next beat.
+    let mut per_beat: Vec<[f32; 12]> = Vec::with_capacity(n);
+    let mut c = 0;
+    for i in 0..n {
+        let from = beats[i];
+        let to = beats.get(i + 1).copied().unwrap_or(from + gaps[gaps.len() - 1]);
+        while c < chroma.len() && chroma_time(c) < from {
+            c += 1;
+        }
+        let mut sum = [0.0f32; 12];
+        let mut k = c;
+        while k < chroma.len() && chroma_time(k) < to {
+            for p in 0..12 {
+                sum[p] += chroma[k][p];
+            }
+            k += 1;
+        }
+        per_beat.push(sum);
+    }
+    let distance = |a: &[f32; 12], b: &[f32; 12]| {
+        let dot: f32 = (0..12).map(|p| a[p] * b[p]).sum();
+        let size = |v: &[f32; 12]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let both = size(a) * size(b);
+        if both > 0.0 { 1.0 - dot / both } else { 0.0 }
+    };
+    let add = |a: &[f32; 12], b: &[f32; 12]| -> [f32; 12] { std::array::from_fn(|p| a[p] + b[p]) };
+    let bass: Vec<f32> = beats
+        .iter()
+        .map(|&t| {
+            let at = onset_frame(t) as i64;
+            (at - 2..=at + 2)
+                .filter_map(|f| usize::try_from(f).ok().and_then(|f| lows.get(f).copied()))
+                .fold(0.0f32, f32::max)
+        })
+        .collect();
+    // The two beats before against the two from here.
+    let change: Vec<f32> = (0..n)
+        .map(|i| {
+            if i >= 2 && i + 2 <= n {
+                distance(&add(&per_beat[i - 2], &per_beat[i - 1]), &add(&per_beat[i], &per_beat[i + 1]))
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    // On one scale each, so neither drowns out the other.
+    let standard = |v: &[f32]| -> Vec<f32> {
+        let mean = v.iter().sum::<f32>() / v.len() as f32;
+        let spread = (v.iter().map(|x| (x - mean) * (x - mean)).sum::<f32>() / v.len() as f32).sqrt();
+        v.iter()
+            .map(|x| if spread > 0.0 { ((x - mean) / spread).clamp(-3.0, 3.0) } else { 0.0 })
+            .collect()
+    };
+    // How much louder the two beats from here are than the two before:
+    // sections, drops and the beat coming in all start on a downbeat.
+    let loudness: Vec<f32> = beats
+        .iter()
+        .map(|&t| {
+            let from = onset_frame(t).max(0.0) as usize;
+            let to = onset_frame(t + gaps[0].max(0.1)).max(0.0) as usize;
+            let frames = &bands[from.min(bands.len())..to.min(bands.len())];
+            let sum: f32 = frames.iter().map(|b| b[0] + b[1] + b[2]).sum();
+            (1e-6 + sum / frames.len().max(1) as f32).ln()
+        })
+        .collect();
+    let jump: Vec<f32> = (0..n)
+        .map(|i| {
+            if i >= 2 && i + 2 <= n {
+                ((loudness[i] + loudness[i + 1]) - (loudness[i - 2] + loudness[i - 1])).max(0.0)
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    let (bass, change, jump) = (standard(&bass), standard(&change), standard(&jump));
+    let accent: Vec<f32> = (0..n).map(|i| bass[i] + 1.5 * change[i] + jump[i]).collect();
+
+    // Viterbi over where in the bar each beat falls, 0 being the downbeat.
+    let mut score: [f32; 4] = std::array::from_fn(|p| if p == 0 { accent[0] } else { 0.0 });
+    let mut back = vec![[0u8; 4]; n];
+    for i in 1..n {
+        let step = steps[i - 1];
+        let top = (0..4).max_by(|&a, &b| score[a].total_cmp(&score[b])).unwrap_or(0);
+        let restart = score[top] - RESTART;
+        let mut next = [0.0f32; 4];
+        for q in 0..4 {
+            // Counted on from the beat before, or the count started over.
+            let from = (q + 4 * 4 - step) % 4;
+            let (best, came) = if score[from] >= restart { (score[from], from) } else { (restart, top) };
+            next[q] = best + if q == 0 { accent[i] } else { 0.0 };
+            back[i][q] = came as u8;
+        }
+        score = next;
+    }
+    let mut p = (0..4).max_by(|&a, &b| score[a].total_cmp(&score[b])).unwrap_or(0);
+    let mut place = vec![0usize; n];
+    for i in (0..n).rev() {
+        place[i] = p;
+        p = back[i][p] as usize;
+    }
+    // A downbeat on each beat counted one, and between beats where the
+    // tracker skipped one that would have been.
+    let mut out = Vec::new();
+    for i in 0..n {
+        if place[i] == 0 {
+            out.push(beats[i]);
+        }
+        if i + 1 < n && steps[i] > 1 {
+            for k in 1..steps[i] {
+                if (place[i] + k) % 4 == 0 {
+                    out.push(beats[i] + gaps[i] * k as f32 / steps[i] as f32);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Which beat of four is the downbeat, counting from `offset`. Bars start
@@ -862,6 +1191,51 @@ mod tests {
         }
     }
 
+    /// Kicks on `beats`, louder on `downs`, with the chord changing on each.
+    fn song_of(beats: &[f32], downs: &[f32], seconds: f32) -> Vec<f32> {
+        let mut out = vec![0.0f32; (seconds * RATE) as usize];
+        for &at in beats {
+            let loud = if downs.iter().any(|d| (d - at).abs() < 1e-3) { 1.0 } else { 0.5 };
+            let start = (at * RATE) as usize;
+            for i in 0..(0.12 * RATE) as usize {
+                if let Some(s) = out.get_mut(start + i) {
+                    let t = i as f32 / RATE;
+                    let hz = 50.0 + 100.0 * (-t * 30.0).exp();
+                    *s += loud * (-t * 25.0).exp() * (2.0 * std::f32::consts::PI * hz * t).sin();
+                }
+            }
+        }
+        let chords = [[220.0, 261.63, 329.63], [261.63, 329.63, 392.0]];
+        for (i, s) in out.iter_mut().enumerate() {
+            let t = i as f32 / RATE;
+            let Some(bar) = downs.iter().rposition(|&d| d <= t) else { continue };
+            for hz in chords[bar % 2] {
+                *s += 0.05 * (2.0 * std::f32::consts::PI * hz * t).sin();
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn keeps_the_bars_after_a_bar_of_two() {
+        // 16 bars of four, one of two, then 16 of four.
+        let beat = 0.5f32;
+        let beats: Vec<f32> = (0..16 * 4 + 2 + 16 * 4).map(|n| 1.0 + n as f32 * beat).collect();
+        let mut downs: Vec<f32> = (0..16).map(|b| beats[b * 4]).collect();
+        downs.push(beats[16 * 4]);
+        downs.extend((0..16).map(|b| beats[16 * 4 + 2 + b * 4]));
+        let a = analyze(&song_of(&beats, &downs, 70.0), RATE);
+        assert!((a.bpm - 120.0).abs() < 0.2, "found {}", a.bpm);
+        // Each true downbeat after the short bar is found, within 30 ms.
+        for &d in downs.iter().filter(|&&d| d > 45.0 && d < 60.0) {
+            assert!(a.downbeats.iter().any(|f| (f - d).abs() < 0.03), "missed {d}: {:?}", a.downbeats);
+        }
+        // And the mix code's grid there agrees.
+        let part = a.local(50.0, 58.0).unwrap();
+        let d = part.nearest_downbeat(54.0);
+        assert!(downs.iter().any(|t| (*t as f64 - d).abs() < 0.03), "local downbeat {d}");
+    }
+
     #[test]
     fn camelot_names_match_the_wheel() {
         let with_key = |key| Analysis {
@@ -870,6 +1244,7 @@ mod tests {
             bpm_confidence: 0.0,
             grid_start: 0.0,
             beats: Vec::new(),
+            downbeats: Vec::new(),
             key: Some(key),
             key_confidence: 1.0,
             waveform: Vec::new(),
@@ -927,3 +1302,4 @@ fn analyze_folder() {
         }
     }
 }
+

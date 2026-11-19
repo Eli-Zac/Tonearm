@@ -61,6 +61,23 @@ pub(crate) fn sapisid_hash(sapisid: &str) -> String {
     format!("SAPISIDHASH {now}_{hex}")
 }
 
+/// A client playback nonce: 16 characters the player makes up for each
+/// play, from the 64 that are safe in a URL.
+fn playback_nonce(video_id: &str) -> String {
+    const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_";
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
+    let mut seed = now ^ video_id.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3));
+    (0..16)
+        .map(|_| {
+            // xorshift, enough to make each play's nonce its own.
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            CHARS[(seed & 63) as usize] as char
+        })
+        .collect()
+}
+
 /// The SAPISID a cookie header signs requests with, if it has one.
 pub(crate) fn sapisid(cookie: &str) -> Option<&str> {
     cookie_value(cookie, "__Secure-3PAPISID").or_else(|| cookie_value(cookie, "SAPISID"))
@@ -168,6 +185,40 @@ impl Client {
             }
             Err(e) => Err(format!("Network error: {e}")),
         }
+    }
+
+    /// Adds a song to the account's YouTube Music history, as the web
+    /// player does when a song plays: the player endpoint gives the song's
+    /// playback stats address, and a ping to it records the play. Does
+    /// nothing when signed out. Blocks, so call it from a worker.
+    pub fn add_to_history(&self, video_id: &str) -> Result<(), String> {
+        let Some((cookie, sapisid)) = self
+            .auth
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|a| (a.cookie.clone(), a.sapisid.clone()))
+        else {
+            return Ok(());
+        };
+        let response = self.post("player", json!({"videoId": video_id}))?;
+        let url = response
+            .pointer("/playbackTracking/videostatsPlaybackUrl/baseUrl")
+            .and_then(Value::as_str)
+            .ok_or("YouTube Music gave no address to record the play at")?;
+        self.agent
+            .get(url)
+            .query("ver", "2")
+            .query("c", "WEB_REMIX")
+            .query("cpn", &playback_nonce(video_id))
+            .set("User-Agent", USER_AGENT)
+            .set("Origin", ORIGIN)
+            .set("Cookie", &cookie)
+            .set("Authorization", &sapisid_hash(&sapisid))
+            .set("X-Goog-AuthUser", "0")
+            .call()
+            .map_err(|e| format!("Recording the play: {e}"))?;
+        Ok(())
     }
 
     pub fn browse(&self, id: &str, params: Option<&str>) -> Result<Page, String> {

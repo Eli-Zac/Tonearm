@@ -305,3 +305,78 @@ pub fn backdrop(src: &SharedPixelBuffer<Rgba8Pixel>) -> SharedPixelBuffer<Rgba8P
     }
     out
 }
+
+/// `base`, a backdrop, flowing like liquid at `t` seconds. Each point
+/// reads its colour from somewhere else, and where it reads from is itself
+/// pushed around by a slower current, twice over, so the colours curl,
+/// fold and swirl into one another like ink in water, and never repeat
+/// quite the same. Zoomed in, so the edges never show, and a little more
+/// saturated, so the movement reads. Small, as the window stretches it.
+pub fn wave(base: &SharedPixelBuffer<Rgba8Pixel>, t: f32) -> SharedPixelBuffer<Rgba8Pixel> {
+    const SIZE: u32 = 64;
+    let (w, h) = (base.width() as usize, base.height() as usize);
+    let mut out = SharedPixelBuffer::<Rgba8Pixel>::new(SIZE, SIZE);
+    if w < 2 || h < 2 {
+        return out;
+    }
+    let src = base.as_slice();
+    let at = |x: usize, y: usize| src[y.min(h - 1) * w + x.min(w - 1)];
+    let pixels = out.make_mut_slice();
+    for y in 0..SIZE as usize {
+        for x in 0..SIZE as usize {
+            // -1 to 1 across the image.
+            let u = x as f32 / (SIZE - 1) as f32 * 2.0 - 1.0;
+            let v = y as f32 / (SIZE - 1) as f32 * 2.0 - 1.0;
+            // The slow current.
+            let qx = (u * 1.7 + t * 0.21).sin() + 0.5 * (v * 2.9 - t * 0.17).sin();
+            let qy = (v * 1.9 - t * 0.19).cos() + 0.5 * (u * 2.3 + t * 0.23).cos();
+            // The current it carries, which curls the colours.
+            let rx = ((u + 0.9 * qx) * 2.1 + t * 0.29).sin();
+            let ry = ((v + 0.9 * qy) * 2.4 - t * 0.25).cos();
+            let (su, sv) = (u * 0.55 + 0.32 * rx, v * 0.55 + 0.32 * ry);
+            let fx = (su * 0.5 + 0.5).clamp(0.0, 1.0) * (w - 1) as f32;
+            let fy = (sv * 0.5 + 0.5).clamp(0.0, 1.0) * (h - 1) as f32;
+            let (x0, y0) = (fx as usize, fy as usize);
+            let (ax, ay) = (fx - x0 as f32, fy - y0 as f32);
+            let (p00, p10, p01, p11) = (at(x0, y0), at(x0 + 1, y0), at(x0, y0 + 1), at(x0 + 1, y0 + 1));
+            let mix = |a: u8, b: u8, c: u8, d: u8| {
+                let top = a as f32 + (b as f32 - a as f32) * ax;
+                let bottom = c as f32 + (d as f32 - c as f32) * ax;
+                top + (bottom - top) * ay
+            };
+            let (r, g, b) = (mix(p00.r, p10.r, p01.r, p11.r), mix(p00.g, p10.g, p01.g, p11.g), mix(p00.b, p10.b, p01.b, p11.b));
+            // Pushed away from grey, so the colours stand apart as they flow.
+            let grey = (r + g + b) / 3.0;
+            let push = |c: f32| (grey + (c - grey) * 1.35).clamp(0.0, 255.0) as u8;
+            pixels[y * SIZE as usize + x] = Rgba8Pixel { r: push(r), g: push(g), b: push(b), a: 255 };
+        }
+    }
+    // Where the flow folds over itself it leaves a crease. Two light
+    // softenings melt those into the rest.
+    let n = SIZE as usize;
+    for _ in 0..2 {
+        let copy = pixels.to_vec();
+        for y in 0..n {
+            for x in 0..n {
+                let mut sum = [0u32; 3];
+                let mut count = 0;
+                for yy in y.saturating_sub(1)..(y + 2).min(n) {
+                    for xx in x.saturating_sub(1)..(x + 2).min(n) {
+                        let p = copy[yy * n + xx];
+                        sum[0] += p.r as u32;
+                        sum[1] += p.g as u32;
+                        sum[2] += p.b as u32;
+                        count += 1;
+                    }
+                }
+                pixels[y * n + x] = Rgba8Pixel {
+                    r: (sum[0] / count) as u8,
+                    g: (sum[1] / count) as u8,
+                    b: (sum[2] / count) as u8,
+                    a: 255,
+                };
+            }
+        }
+    }
+    out
+}

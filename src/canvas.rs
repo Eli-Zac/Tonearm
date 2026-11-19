@@ -481,13 +481,24 @@ impl Clip {
         show: impl Fn(Pixels, Pixels) + Send + 'static,
         failed: impl FnOnce(String) + Send + 'static,
     ) -> Clip {
+        Clip::play_at(path, WIDTH, show, failed)
+    }
+
+    /// As `play`, decoding at `width` instead, or the clip's own width when
+    /// that is smaller. Apple's moving covers are shown larger than Canvas.
+    pub fn play_at(
+        path: PathBuf,
+        width: u32,
+        show: impl Fn(Pixels, Pixels) + Send + 'static,
+        failed: impl FnOnce(String) + Send + 'static,
+    ) -> Clip {
         let stop = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
         let (s, p) = (stop.clone(), paused.clone());
         std::thread::Builder::new()
             .name("canvas".into())
             .spawn(move || {
-                if let Err(message) = video::run(&path, &s, &p, &show) {
+                if let Err(message) = video::run(&path, width, &s, &p, &show) {
                     failed(message);
                 }
             })
@@ -498,7 +509,7 @@ impl Clip {
 
 #[cfg(windows)]
 mod video {
-    use super::{Pixels, WIDTH};
+    use super::Pixels;
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
@@ -506,11 +517,16 @@ mod video {
     use windows::Win32::Media::MediaFoundation::*;
     use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
 
+    /// MFVideoFormat_ABGR32 from mfapi.h, which the crate leaves out: bytes
+    /// in R, G, B, A order. D3DFMT_A8B8G8R8 is 32.
+    const ABGR32: windows::core::GUID = windows::core::GUID::from_u128(0x00000020_0000_0010_8000_00aa00389b71);
+
     /// MF_VERSION from mfapi.h: the SDK version in the high word.
     const MF_VERSION: u32 = (0x0002 << 16) | 0x0070;
 
     pub fn run(
         path: &Path,
+        width: u32,
         stop: &AtomicBool,
         paused: &AtomicBool,
         show: &dyn Fn(Pixels, Pixels),
@@ -518,15 +534,47 @@ mod video {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
             let started = MFStartup(MF_VERSION, MFSTARTUP_FULL).map_err(|e| e.to_string());
-            let result = started.and_then(|_| decode(path, stop, paused, show));
+            let result = started.and_then(|_| decode(path, width, stop, paused, show));
             let _ = MFShutdown();
             CoUninitialize();
             result
         }
     }
 
+    /// A Direct3D 11 device on the graphics card, wrapped for Media
+    /// Foundation to decode on.
+    unsafe fn gpu_manager() -> windows::core::Result<IMFDXGIDeviceManager> {
+        use windows::Win32::Foundation::HMODULE;
+        use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+        use windows::Win32::Graphics::Direct3D11::*;
+        let mut device: Option<ID3D11Device> = None;
+        D3D11CreateDevice(
+            None,
+            D3D_DRIVER_TYPE_HARDWARE,
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            None,
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            None,
+        )?;
+        let device = device.ok_or_else(windows::core::Error::empty)?;
+        // The decoder uses it from threads of its own.
+        if let Ok(threads) = device.cast::<ID3D11Multithread>() {
+            let _ = threads.SetMultithreadProtected(true);
+        }
+        let mut token = 0u32;
+        let mut manager: Option<IMFDXGIDeviceManager> = None;
+        MFCreateDXGIDeviceManager(&mut token, &mut manager)?;
+        let manager = manager.ok_or_else(windows::core::Error::empty)?;
+        manager.ResetDevice(&device, token)?;
+        Ok(manager)
+    }
+
     unsafe fn decode(
         path: &Path,
+        wanted_width: u32,
         stop: &AtomicBool,
         paused: &AtomicBool,
         show: &dyn Fn(Pixels, Pixels),
@@ -539,6 +587,14 @@ mod video {
         attributes
             .SetUINT32(&MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, 1)
             .map_err(err)?;
+        // On the graphics card when there is one: decoding, scaling and
+        // converting a clip there costs next to nothing, where Windows'
+        // own software takes about three cores for a 960 pixel clip. Kept
+        // until the reader is done with it.
+        let gpu = gpu_manager().ok();
+        if let Some(manager) = &gpu {
+            attributes.SetUnknown(&MF_SOURCE_READER_D3D_MANAGER, manager).map_err(err)?;
+        }
         let url = HSTRING::from(path.as_os_str());
         let reader = MFCreateSourceReaderFromURL(&url, &attributes).map_err(err)?;
         let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
@@ -554,18 +610,27 @@ mod video {
         if w == 0 || h == 0 {
             return Err("The clip has no size".into());
         }
-        let width = WIDTH.min(w) & !1;
+        let width = wanted_width.min(w) & !1;
         let height = ((h as u64 * width as u64 / w as u64) as u32).max(2) & !1;
         let wanted = MFCreateMediaType().map_err(err)?;
         wanted.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video).map_err(err)?;
-        wanted.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32).map_err(err)?;
         wanted
             .SetUINT64(&MF_MT_FRAME_SIZE, (u64::from(width) << 32) | u64::from(height))
             .map_err(err)?;
-        if reader.SetCurrentMediaType(stream, None, &wanted).is_err() {
-            // Some decoders will not scale. Take the full size instead.
-            wanted.DeleteItem(&MF_MT_FRAME_SIZE).map_err(err)?;
-            reader.SetCurrentMediaType(stream, None, &wanted).map_err(err)?;
+        // Bytes in RGBA order when the decoder can, so each row is a plain
+        // copy, which is fast even in a debug build. BGRX otherwise.
+        let mut rgba = false;
+        for (subtype, is_rgba) in [(ABGR32, true), (MFVideoFormat_RGB32, false)] {
+            wanted.SetGUID(&MF_MT_SUBTYPE, &subtype).map_err(err)?;
+            if reader.SetCurrentMediaType(stream, None, &wanted).is_ok() {
+                rgba = is_rgba;
+                break;
+            }
+            if !is_rgba {
+                // Some decoders will not scale. Take the full size instead.
+                wanted.DeleteItem(&MF_MT_FRAME_SIZE).map_err(err)?;
+                reader.SetCurrentMediaType(stream, None, &wanted).map_err(err)?;
+            }
         }
         let current = reader.GetCurrentMediaType(stream).map_err(err)?;
         let size = current.GetUINT64(&MF_MT_FRAME_SIZE).map_err(err)?;
@@ -581,6 +646,9 @@ mod video {
         // How far into the clip the last frame was, to resume from there.
         let mut last = Duration::ZERO;
         let mut was_paused = false;
+        // The first frame's time in this pass. Apple's clips count from ten
+        // seconds in, not from zero.
+        let mut base: Option<i64> = None;
         // The blurs of the first pass, kept to play back and forth after.
         // A few kilobytes each.
         let mut blurs: Vec<Pixels> = Vec::new();
@@ -612,13 +680,15 @@ mod video {
                     .SetCurrentPosition(&windows::core::GUID::zeroed(), &PROPVARIANT::from(0i64))
                     .map_err(err)?;
                 loop_start = Instant::now();
+                base = None;
                 pass += 1;
                 step = 0;
                 continue;
             }
             let Some(sample) = sample else { continue };
             // Times are in 100 ns units from the start of the clip.
-            last = Duration::from_nanos(time.max(0) as u64 * 100);
+            let first = *base.get_or_insert(time);
+            last = Duration::from_nanos((time - first).max(0) as u64 * 100);
             let due = loop_start + last;
             let now = Instant::now();
             if due > now {
@@ -627,7 +697,7 @@ mod video {
             if stop.load(Ordering::SeqCst) {
                 break;
             }
-            let pixels = frame(&sample, width, height, stride).map_err(err)?;
+            let pixels = frame(&sample, width, height, stride, rgba).map_err(err)?;
             let blur = if pass == 0 {
                 let blur = crate::blur::backdrop(&pixels);
                 blurs.push(blur.clone());
@@ -652,6 +722,7 @@ mod video {
         width: u32,
         height: u32,
         stride: i32,
+        rgba: bool,
     ) -> windows::core::Result<Pixels> {
         let buffer = sample.ConvertToContiguousBuffer()?;
         let side = width.min(height);
@@ -666,6 +737,10 @@ mod video {
                     row_bytes,
                 );
                 let dest = &mut out[y * row_bytes..(y + 1) * row_bytes];
+                if rgba {
+                    dest.copy_from_slice(row);
+                    continue;
+                }
                 for (d, s) in dest.chunks_exact_mut(4).zip(row.chunks_exact(4)) {
                     d[0] = s[2];
                     d[1] = s[1];
@@ -703,7 +778,7 @@ mod video {
     use std::path::Path;
     use std::sync::atomic::AtomicBool;
 
-    pub fn run(_: &Path, _: &AtomicBool, _: &AtomicBool, _: &dyn Fn(Pixels, Pixels)) -> Result<(), String> {
+    pub fn run(_: &Path, _: u32, _: &AtomicBool, _: &AtomicBool, _: &dyn Fn(Pixels, Pixels)) -> Result<(), String> {
         Err("Canvas plays on Windows only".into())
     }
 }

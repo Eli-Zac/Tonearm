@@ -320,6 +320,8 @@ impl App {
         ui.set_mix_volumes(choices(&transition::VOLUME_CHOICES));
         ui.set_mix_eqs(choices(&transition::EQ_CHOICES));
         ui.set_mix_filters(choices(&transition::FILTER_CHOICES));
+        ui.set_mix_effects(choices(&transition::EFFECT_CHOICES));
+        ui.set_mix_loops(choices(&transition::LOOP_CHOICES));
         ui.set_mix_from(self.mix_song(id, from));
         ui.set_mix_to(self.mix_song(songs[n + 1].0, to));
         self.show_editor();
@@ -557,10 +559,16 @@ impl App {
 
     pub fn mix_choice_picked(self: &Rc<Self>, part: u8, index: usize) {
         self.change_mix(|s, _, _, _| {
+            use transition::*;
+            fn at<T: Copy>(choices: &[(T, &str)], index: usize) -> T {
+                choices[index.min(choices.len() - 1)].0
+            }
             match part {
-                0 => s.volume = transition::VOLUME_CHOICES[index.min(2)].0,
-                1 => s.eq = transition::EQ_CHOICES[index.min(1)].0,
-                _ => s.filter = transition::FILTER_CHOICES[index.min(2)].0,
+                0 => s.volume = at(&VOLUME_CHOICES, index),
+                1 => s.eq = at(&EQ_CHOICES, index),
+                2 => s.filter = at(&FILTER_CHOICES, index),
+                3 => s.effect = at(&EFFECT_CHOICES, index),
+                _ => s.looping = at(&LOOP_CHOICES, index),
             }
             s.preset = Preset::Custom;
         });
@@ -604,8 +612,8 @@ impl App {
         let out = e.from.video_id.as_deref().and_then(|v| self.analysis_of(v));
         let inn = e.to.video_id.as_deref().and_then(|v| self.analysis_of(v));
         let length = out.as_ref().map_or(credits(&e.from).1 as f64, |a| a.length as f64);
-        let beat = transition::drag_step(out.as_deref(), length, inn.as_deref(), self.mix_length(), inn_side);
-        if settings.beatmatch && beat > 0.0 { beat } else { FREE_STEP }
+        let beat = transition::drag_step(settings, out.as_deref(), length, inn.as_deref(), self.mix_length(), inn_side);
+        if beat > 0.0 { beat } else { FREE_STEP }
     }
 
     /// The speed the song coming in plays at through the mix being edited.
@@ -627,6 +635,16 @@ impl App {
         }
         self.change_mix(|s, _, _, _| {
             s.beatmatch = !s.beatmatch;
+            s.preset = Preset::Custom;
+        });
+    }
+
+    pub fn mix_key_lock_toggled(self: &Rc<Self>) {
+        if !self.ui.get_mix_can_beatmatch() || !self.ui.get_mix_beatmatch() {
+            return;
+        }
+        self.change_mix(|s, _, _, _| {
+            s.key_lock = !s.key_lock;
             s.preset = Preset::Custom;
         });
     }
@@ -679,7 +697,10 @@ impl App {
         ui.set_mix_volume(transition::index_of(&transition::VOLUME_CHOICES, s.volume) as i32);
         ui.set_mix_eq(transition::index_of(&transition::EQ_CHOICES, s.eq) as i32);
         ui.set_mix_filter(transition::index_of(&transition::FILTER_CHOICES, s.filter) as i32);
+        ui.set_mix_effect(transition::index_of(&transition::EFFECT_CHOICES, s.effect) as i32);
+        ui.set_mix_loop(transition::index_of(&transition::LOOP_CHOICES, s.looping) as i32);
         ui.set_mix_beatmatch(s.beatmatch);
+        ui.set_mix_key_lock(s.key_lock);
         ui.set_mix_changed(s != e.saved);
         let out = e.from.video_id.as_deref().and_then(|v| self.analysis_of(v));
         let inn = e.to.video_id.as_deref().and_then(|v| self.analysis_of(v));
@@ -687,9 +708,9 @@ impl App {
         let plan = transition::plan(s, out.as_deref(), out_length, inn.as_deref(), self.mix_length());
         // Whether the songs could be beat matched at all, whatever the
         // toggle says. When not, the tempos say why and the toggle is off.
-        let possible = transition::beat_matched(out.as_deref(), out_length, inn.as_deref(), self.mix_length());
-        ui.set_mix_can_beatmatch(possible);
-        let warning = if possible { String::new() } else { why_unmatched(out.as_deref(), inn.as_deref()) };
+        let why = transition::why_unmatched(out.as_deref(), out_length, inn.as_deref(), self.mix_length());
+        ui.set_mix_can_beatmatch(why.is_none());
+        let warning = why.unwrap_or_default();
         let picture_span = Picture::new(&plan, out_length);
         ui.set_mix_span((picture_span.to - picture_span.from) as f32);
 
@@ -716,33 +737,12 @@ impl App {
         ui.set_mix_volume_path(picture.lanes(Param::Volume).into());
         ui.set_mix_bass_path(picture.lanes(Param::Bass).into());
         ui.set_mix_filter_path(picture.filters().into());
+        ui.set_mix_fx_path(picture.lanes(Param::Send).into());
         let (bars, beats) = picture.grid(self.editing_step_for(&s, false));
         ui.set_mix_bars_path(bars.into());
         ui.set_mix_beats_path(beats.into());
 
     }
-}
-
-/// Why two songs cannot be beat matched, for the warning on their tempos.
-fn why_unmatched(out: Option<&Analysis>, inn: Option<&Analysis>) -> String {
-    let (Some(a), Some(b)) = (out, inn) else {
-        return "Beat matching waits until both songs are analyzed".into();
-    };
-    let why = if !a.steady() || !b.steady() {
-        "one of them has no steady beat".to_string()
-    } else {
-        let ratio = [0.5f32, 1.0, 2.0]
-            .iter()
-            .map(|m| a.bpm / (b.bpm * m))
-            .min_by(|x, y| x.ln().abs().total_cmp(&y.ln().abs()))
-            .unwrap_or(1.0);
-        if (ratio - 1.0).abs() > 0.06 {
-            format!("their tempos are {:.0}% apart", (ratio - 1.0).abs() * 100.0)
-        } else {
-            "the first song's beat stops well before it ends".to_string()
-        }
-    };
-    format!("Beat matching not possible: {why}")
 }
 
 /// The picture's size in the editor, in logical pixels: the side panel's

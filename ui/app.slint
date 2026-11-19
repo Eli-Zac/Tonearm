@@ -580,6 +580,8 @@ component SkeletonLines inherits Rectangle {
 
 component IconButton inherits Rectangle {
     in property <string> icon;
+    // A filled path in a 24 unit box, drawn instead of `icon`.
+    in property <string> shape;
     // Draw the icon from the fill weight.
     in property <bool> fill;
     // A small dot under the icon, for a toggle that is on.
@@ -595,11 +597,21 @@ component IconButton inherits Rectangle {
     border-radius: self.height / 2;
     background: filled ? (touch.pressed ? #d0d0d6 : touch.has-hover ? #ffffff : #f0f0f3) : (touch.pressed ? #ffffff24 : touch.has-hover ? Theme.hover : transparent);
     animate background { duration: 120ms; }
-    Icon {
+    if shape == "": Icon {
         text: icon;
         fill: root.fill;
         font-size: size;
         color: filled ? #08080a : tint;
+    }
+    if shape != "": Path {
+        x: (parent.width - size) / 2;
+        y: (parent.height - size) / 2;
+        width: size;
+        height: size;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: shape;
+        fill: filled ? #08080a : tint;
     }
     if dot: Rectangle {
         x: (parent.width - 4px) / 2;
@@ -1150,14 +1162,20 @@ component Dropdown inherits Rectangle {
     in property <[string]> options;
     in-out property <int> selected;
     callback changed(int);
-    property <length> menu-width: max(self.width, 160px);
-    width: max(label.preferred-width + 52px, 140px);
+    // The menu is at least this wide, for long options, and the button at
+    // most `widest`, past which its label is cut short.
+    in property <length> menu-min: 160px;
+    in property <length> widest: 100000px;
+    property <length> menu-width: max(self.width, root.menu-min);
+    width: min(max(label.preferred-width + 52px, 140px), root.widest);
     height: 34px;
     border-radius: 10px;
     background: touch.has-hover ? #ffffff24 : #ffffff14;
     animate background { duration: 120ms; }
     label := Text {
         x: 14px;
+        width: parent.width - 14px - 34px;
+        overflow: elide;
         text: root.options[root.selected];
         color: Theme.text;
         font-size: 14px;
@@ -3482,8 +3500,51 @@ component MixChoice inherits Rectangle {
         x: parent.width - self.width - 9px;
         y: (parent.height - self.height) / 2;
         options: root.options;
+        menu-min: 300px;
+        widest: parent.width - 100px;
         selected <=> root.selected;
         changed(i) => { root.changed(i); }
+    }
+}
+
+// A switch on the right of a row in the mix editor.
+component MixToggle inherits Rectangle {
+    in property <string> title;
+    in property <bool> on;
+    in property <bool> enabled: true;
+    callback toggled();
+    height: 52px;
+    border-radius: 12px;
+    background: #ffffff0a;
+    Text {
+        x: 16px;
+        text: root.title;
+        color: root.enabled ? Theme.text : Theme.faint;
+        font-size: 15px;
+        font-weight: 600;
+        vertical-alignment: center;
+    }
+    Rectangle {
+        x: parent.width - self.width - 16px;
+        width: 42px;
+        height: 24px;
+        border-radius: 12px;
+        background: root.on && root.enabled ? Theme.accent : #ffffff30;
+        opacity: root.enabled ? 1 : 0.4;
+        animate background { duration: 150ms; }
+        Rectangle {
+            x: root.on && root.enabled ? parent.width - self.width - 3px : 3px;
+            animate x { duration: 150ms; easing: ease-out; }
+            width: 18px;
+            height: 18px;
+            border-radius: 9px;
+            background: #ffffff;
+        }
+        TouchArea {
+            enabled: root.enabled;
+            mouse-cursor: pointer;
+            clicked => { root.toggled(); }
+        }
     }
 }
 
@@ -3584,10 +3645,16 @@ export component AppWindow inherits Window {
     in property <[string]> mix-volumes;
     in property <[string]> mix-eqs;
     in property <[string]> mix-filters;
+    in property <[string]> mix-effects;
+    in property <[string]> mix-loops;
     in-out property <int> mix-volume;
     in-out property <int> mix-eq;
     in-out property <int> mix-filter;
+    in-out property <int> mix-effect;
+    in-out property <int> mix-loop;
     in property <bool> mix-beatmatch;
+    // The song coming in keeps its key as its speed changes to match.
+    in property <bool> mix-key-lock;
     // A preview is starting, so the play button shows a spinner, and the
     // spinner's running piece, in a 52 by 40 box.
     in property <bool> mix-loading;
@@ -3613,6 +3680,8 @@ export component AppWindow inherits Window {
     in property <string> mix-volume-path;
     in property <string> mix-bass-path;
     in property <string> mix-filter-path;
+    // How much of the song going out feeds the effect.
+    in property <string> mix-fx-path;
 
     // Faint lines down the picture, fixed to the transition: bars, and the
     // beats between them.
@@ -3634,7 +3703,10 @@ export component AppWindow inherits Window {
     callback mix-volume-picked(int);
     callback mix-eq-picked(int);
     callback mix-filter-picked(int);
+    callback mix-effect-picked(int);
+    callback mix-loop-picked(int);
     callback mix-beatmatch-toggled();
+    callback mix-key-lock-toggled();
     callback mix-save();
     // Opens a page by browse id, for artist and album names.
     callback open-browse(string);
@@ -3708,8 +3780,12 @@ export component AppWindow inherits Window {
     // The moving cover or Spotify Canvas. It fades in over the still
     // cover, which stays underneath, and fades out to it again.
     in property <image> track-motion;
-    // A heavy blur of the moving cover or Canvas, or of the still cover
-    // when there is neither. The expanded view's background.
+    // The moving cover in expanded Now playing, which may differ from the
+    // panel's: the panel can show a Canvas, and this only Apple's cover.
+    in property <image> wide-motion;
+    in property <bool> wide-motion-on;
+    // A heavy blur of the still cover, waved slowly from the app while
+    // the expanded view is open. Its background.
     in property <image> track-backdrop;
     in property <bool> track-motion-on;
     // The song going out during a crossfade. Its cover and name stay on
@@ -3791,6 +3867,8 @@ export component AppWindow inherits Window {
     in property <float> fade-from: 1;
     property <float> motion-t: track-motion-on ? 1 : 0;
     animate motion-t { duration: 450ms; easing: ease-in-out; }
+    property <float> wide-motion-t: wide-motion-on ? 1 : 0;
+    animate wide-motion-t { duration: 450ms; easing: ease-in-out; }
     in property <bool> playing;
     in property <bool> shuffle;
     // Shuffle that mixes in suggested songs. Only on with shuffle.
@@ -3972,9 +4050,12 @@ export component AppWindow inherits Window {
     // Index into the crossfade lengths: off, 1, 2, 3, 4, 6, 8, 10, 12 s.
     in-out property <int> crossfade-choice: 0;
     callback crossfade-choice-changed(int);
-    // Beat matching: off or on.
-    in-out property <int> beat-match-choice: 1;
-    callback beat-match-choice-changed(int);
+    // What each view shows for the cover. Panel: Spotify Canvas, Animated
+    // cover or Static cover. Expanded: Animated cover or Static cover.
+    in-out property <int> panel-cover: 1;
+    in-out property <int> wide-cover: 0;
+    callback panel-cover-changed(int);
+    callback wide-cover-changed(int);
     // Index into the languages lyrics are translated into; 0 is off.
     in-out property <int> translate-choice: 0;
     callback translate-choice-changed(int);
@@ -4565,89 +4646,23 @@ export component AppWindow inherits Window {
                         subtitle: "Discord rich presence, Last.fm and Spotify";
                         clicked => { root.settings-page = 1; }
                     }
-                    Rectangle {
-                        max-width: 880px;
-                        border-radius: 12px;
-                        background: #ffffff0a;
-                        HorizontalLayout {
-                            padding: 20px;
-                            SettingRow {
-                                title: "Listening history";
-                                subtitle: "Tonearm remembers what you play and open on this computer, and puts it first in search. It stays encrypted on this computer.";
-                                PillButton {
-                                    text: "Clear";
-                                    clicked => { root.clear-history(); }
-                                }
-                            }
-                        }
+                    SubpageRow {
+                        icon: Icons.speaker-high;
+                        title: "Playback";
+                        subtitle: "Crossfade and volume levelling";
+                        clicked => { root.settings-page = 4; }
                     }
-                    Rectangle {
-                        max-width: 880px;
-                        border-radius: 12px;
-                        background: #ffffff0a;
-                        HorizontalLayout {
-                            padding: 20px;
-                            SettingRow {
-                                title: "Crossfade";
-                                subtitle: "As a song ends, the next one fades in while it fades out. Skipping a song still switches at once.";
-                                Dropdown {
-                                    options: ["Off", "1 s", "2 s", "3 s", "4 s", "6 s", "8 s", "10 s", "12 s"];
-                                    selected <=> root.crossfade-choice;
-                                    changed(i) => { root.crossfade-choice-changed(i); }
-                                }
-                            }
-                        }
+                    SubpageRow {
+                        icon: Icons.sparkle;
+                        title: "Customization";
+                        subtitle: "Covers in Now playing, and lyrics translation";
+                        clicked => { root.settings-page = 3; }
                     }
-                    Rectangle {
-                        max-width: 880px;
-                        border-radius: 12px;
-                        background: #ffffff0a;
-                        HorizontalLayout {
-                            padding: 20px;
-                            SettingRow {
-                                title: "Beat matching";
-                                subtitle: "With crossfade on, songs with a steady beat and close tempos mix on the beat, like a DJ would. The next song speeds up or slows down a little to match, then eases back. Other songs fade as usual.";
-                                Dropdown {
-                                    options: ["Off", "On"];
-                                    selected <=> root.beat-match-choice;
-                                    changed(i) => { root.beat-match-choice-changed(i); }
-                                }
-                            }
-                        }
-                    }
-                    Rectangle {
-                        max-width: 880px;
-                        border-radius: 12px;
-                        background: #ffffff0a;
-                        HorizontalLayout {
-                            padding: 20px;
-                            SettingRow {
-                                title: "Translate lyrics";
-                                subtitle: "Shows a translation under each line of lyrics. The lyrics' own translation is used when they have one, and Google Translate otherwise.";
-                                Dropdown {
-                                    options: ["Off", "English", "Spanish", "French", "German", "Italian", "Portuguese", "Russian", "Japanese", "Korean", "Chinese (Simplified)", "Chinese (Traditional)", "Indonesian"];
-                                    selected <=> root.translate-choice;
-                                    changed(i) => { root.translate-choice-changed(i); }
-                                }
-                            }
-                        }
-                    }
-                    Rectangle {
-                        max-width: 880px;
-                        border-radius: 12px;
-                        background: #ffffff0a;
-                        HorizontalLayout {
-                            padding: 20px;
-                            SettingRow {
-                                title: "Volume levelling";
-                                subtitle: "Plays every song at about the same loudness, using YouTube's own measure of each one. Loud also lifts quiet songs a little.";
-                                Dropdown {
-                                    options: ["Off", "Quiet", "Normal", "Loud"];
-                                    selected <=> root.levelling-choice;
-                                    changed(i) => { root.levelling-choice-changed(i); }
-                                }
-                            }
-                        }
+                    SubpageRow {
+                        icon: Icons.download;
+                        title: "Storage and history";
+                        subtitle: "Song cache, and what Tonearm remembers you played";
+                        clicked => { root.settings-page = 5; }
                     }
                     Rectangle {
                         max-width: 880px;
@@ -4662,32 +4677,6 @@ export component AppWindow inherits Window {
                                     options: ["Keep playing", "Quit"];
                                     selected <=> root.close-choice;
                                     changed(i) => { root.close-choice-changed(i); }
-                                }
-                            }
-                        }
-                    }
-                    Rectangle {
-                        max-width: 880px;
-                        border-radius: 12px;
-                        background: #ffffff0a;
-                        VerticalLayout {
-                            padding: 20px;
-                            spacing: 12px;
-                            SettingRow {
-                                title: "Song cache";
-                                subtitle: "Songs you play are kept so they start at once next time. The least recently played go first when it fills up.";
-                                Dropdown {
-                                    options: ["Off", "512 MB", "1 GB", "2 GB", "5 GB"];
-                                    selected <=> root.cache-choice;
-                                    changed(i) => { root.cache-choice-changed(i); }
-                                }
-                            }
-                            SettingRow {
-                                title: "Storage";
-                                subtitle: root.storage-note;
-                                PillButton {
-                                    text: "Clear cache";
-                                    clicked => { root.clear-cache(); }
                                 }
                             }
                         }
@@ -4955,6 +4944,180 @@ export component AppWindow inherits Window {
             }
 
             // Settings sub page: the YouTube Music sign in.
+            if root.nav == 3 && root.settings-page == 3: customization-flick := Flickable {
+                // Fills the panel, as the account page does.
+                max-width: 100000px;
+                horizontal-stretch: 1;
+                content-height: customization.preferred-height;
+                customization := VerticalLayout {
+                    padding: 28px;
+                    padding-top: 12px;
+                    spacing: 14px;
+                    alignment: start;
+                    Text {
+                        text: "Customization";
+                        color: Theme.text;
+                        font-size: 32px;
+                        font-weight: 800;
+                    }
+                    Rectangle {
+                        max-width: 880px;
+                        border-radius: 12px;
+                        background: #ffffff0a;
+                        VerticalLayout {
+                            padding: 20px;
+                            spacing: 12px;
+                            SettingRow {
+                                title: "Now playing cover";
+                                subtitle: "What the Now playing panel shows for the cover. Spotify Canvas needs Spotify linked in Connections. Without a clip, the still cover shows.";
+                                Dropdown {
+                                    options: ["Spotify Canvas", "Animated cover", "Static cover"];
+                                    selected <=> root.panel-cover;
+                                    changed(i) => { root.panel-cover-changed(i); }
+                                }
+                            }
+                            SettingRow {
+                                title: "Full screen cover";
+                                subtitle: "What expanded Now playing shows for the cover. Animated cover is the album's moving cover from Apple Music, when it has one.";
+                                Dropdown {
+                                    options: ["Animated cover", "Static cover"];
+                                    selected <=> root.wide-cover;
+                                    changed(i) => { root.wide-cover-changed(i); }
+                                }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        max-width: 880px;
+                        border-radius: 12px;
+                        background: #ffffff0a;
+                        HorizontalLayout {
+                            padding: 20px;
+                            SettingRow {
+                                title: "Translate lyrics";
+                                subtitle: "Shows a translation under each line of lyrics. The lyrics' own translation is used when they have one, and Google Translate otherwise.";
+                                Dropdown {
+                                    options: ["Off", "English", "Spanish", "French", "German", "Italian", "Portuguese", "Russian", "Japanese", "Korean", "Chinese (Simplified)", "Chinese (Traditional)", "Indonesian"];
+                                    selected <=> root.translate-choice;
+                                    changed(i) => { root.translate-choice-changed(i); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if root.nav == 3 && root.settings-page == 4: playback-flick := Flickable {
+                // Fills the panel, as the account page does.
+                max-width: 100000px;
+                horizontal-stretch: 1;
+                content-height: playback.preferred-height;
+                playback := VerticalLayout {
+                    padding: 28px;
+                    padding-top: 12px;
+                    spacing: 14px;
+                    alignment: start;
+                    Text {
+                        text: "Playback";
+                        color: Theme.text;
+                        font-size: 32px;
+                        font-weight: 800;
+                    }
+                    Rectangle {
+                        max-width: 880px;
+                        border-radius: 12px;
+                        background: #ffffff0a;
+                        HorizontalLayout {
+                            padding: 20px;
+                            SettingRow {
+                                title: "Crossfade";
+                                subtitle: "As a song ends, the next one fades in while it fades out. Skipping a song still switches at once.";
+                                Dropdown {
+                                    options: ["Off", "1 s", "2 s", "3 s", "4 s", "6 s", "8 s", "10 s", "12 s"];
+                                    selected <=> root.crossfade-choice;
+                                    changed(i) => { root.crossfade-choice-changed(i); }
+                                }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        max-width: 880px;
+                        border-radius: 12px;
+                        background: #ffffff0a;
+                        HorizontalLayout {
+                            padding: 20px;
+                            SettingRow {
+                                title: "Volume levelling";
+                                subtitle: "Plays every song at about the same loudness, using YouTube's own measure of each one. Loud also lifts quiet songs a little.";
+                                Dropdown {
+                                    options: ["Off", "Quiet", "Normal", "Loud"];
+                                    selected <=> root.levelling-choice;
+                                    changed(i) => { root.levelling-choice-changed(i); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if root.nav == 3 && root.settings-page == 5: storage-flick := Flickable {
+                // Fills the panel, as the account page does.
+                max-width: 100000px;
+                horizontal-stretch: 1;
+                content-height: storage.preferred-height;
+                storage := VerticalLayout {
+                    padding: 28px;
+                    padding-top: 12px;
+                    spacing: 14px;
+                    alignment: start;
+                    Text {
+                        text: "Storage and history";
+                        color: Theme.text;
+                        font-size: 32px;
+                        font-weight: 800;
+                    }
+                    Rectangle {
+                        max-width: 880px;
+                        border-radius: 12px;
+                        background: #ffffff0a;
+                        VerticalLayout {
+                            padding: 20px;
+                            spacing: 12px;
+                            SettingRow {
+                                title: "Song cache";
+                                subtitle: "Songs you play are kept so they start at once next time. The least recently played go first when it fills up.";
+                                Dropdown {
+                                    options: ["Off", "512 MB", "1 GB", "2 GB", "5 GB"];
+                                    selected <=> root.cache-choice;
+                                    changed(i) => { root.cache-choice-changed(i); }
+                                }
+                            }
+                            SettingRow {
+                                title: "Storage";
+                                subtitle: root.storage-note;
+                                PillButton {
+                                    text: "Clear cache";
+                                    clicked => { root.clear-cache(); }
+                                }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        max-width: 880px;
+                        border-radius: 12px;
+                        background: #ffffff0a;
+                        HorizontalLayout {
+                            padding: 20px;
+                            SettingRow {
+                                title: "Listening history";
+                                subtitle: "Tonearm remembers what you play and open on this computer, and puts it first in search. It stays encrypted on this computer.";
+                                PillButton {
+                                    text: "Clear";
+                                    clicked => { root.clear-history(); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             if root.nav == 3 && root.settings-page == 2: account-flick := Flickable {
                 // Fills the panel. Left alone it takes the cards' cap as
                 // its own width and stops short, scroll bar and all.
@@ -5445,6 +5608,7 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
+                        MixPath { commands: root.mix-fx-path; stroke: #e8e8ec; stroke-width: 2px; }
                         MixPath { commands: root.mix-filter-path; stroke: #c58af9; stroke-width: 2px; }
                         MixPath { commands: root.mix-bass-path; stroke: #f5c542; stroke-width: 2px; }
                         MixPath { commands: root.mix-volume-path; stroke: #4fb3ff; stroke-width: 2px; }
@@ -5554,40 +5718,31 @@ export component AppWindow inherits Window {
                         selected <=> root.mix-filter;
                         changed(i) => { root.mix-filter-picked(i); }
                     }
-                    Rectangle {
-                        height: 52px;
-                        border-radius: 12px;
-                        background: #ffffff0a;
-                            Text {
-                                x: 16px;
-                                text: "Beatmatching";
-                                color: root.mix-can-beatmatch ? Theme.text : Theme.faint;
-                            font-size: 15px;
-                            font-weight: 600;
-                            vertical-alignment: center;
-                        }
-                        Rectangle {
-                            x: parent.width - self.width - 16px;
-                            width: 42px;
-                            height: 24px;
-                            border-radius: 12px;
-                                background: root.mix-beatmatch && root.mix-can-beatmatch ? Theme.accent : #ffffff30;
-                                opacity: root.mix-can-beatmatch ? 1 : 0.4;
-                            animate background { duration: 150ms; }
-                            Rectangle {
-                                    x: root.mix-beatmatch && root.mix-can-beatmatch ? parent.width - self.width - 3px : 3px;
-                                animate x { duration: 150ms; easing: ease-out; }
-                                width: 18px;
-                                height: 18px;
-                                border-radius: 9px;
-                                background: #ffffff;
-                            }
-                                TouchArea {
-                                    enabled: root.mix-can-beatmatch;
-                                    mouse-cursor: pointer;
-                                    clicked => { root.mix-beatmatch-toggled(); }
-                                }
-                        }
+                    MixChoice {
+                        title: "Effects";
+                        accent: #e8e8ec;
+                        options: root.mix-effects;
+                        selected <=> root.mix-effect;
+                        changed(i) => { root.mix-effect-picked(i); }
+                    }
+                    MixChoice {
+                        title: "Looping";
+                        accent: #ff9f43;
+                        options: root.mix-loops;
+                        selected <=> root.mix-loop;
+                        changed(i) => { root.mix-loop-picked(i); }
+                    }
+                    MixToggle {
+                        title: "Beatmatching";
+                        on: root.mix-beatmatch;
+                        enabled: root.mix-can-beatmatch;
+                        toggled => { root.mix-beatmatch-toggled(); }
+                    }
+                    MixToggle {
+                        title: "Key lock";
+                        on: root.mix-key-lock;
+                        enabled: root.mix-can-beatmatch && root.mix-beatmatch;
+                        toggled => { root.mix-key-lock-toggled(); }
                     }
                 }
                 ScrollThumb {
@@ -6127,8 +6282,8 @@ export component AppWindow inherits Window {
         border-radius: Theme.radius;
         background: @linear-gradient(160deg, root.shown-tint.mix(Theme.island, 0.55) 0%, Theme.island 75%);
         clip: true;
-        // The cover, or its Canvas as it plays, blurred to fill the view,
-        // and darkened so the cover and words stand out on it.
+        // The still cover, blurred to fill the view, and darkened so the
+        // cover and words stand out on it. The app waves it slowly.
         Image {
             width: 100%;
             height: 100%;
@@ -6204,6 +6359,14 @@ export component AppWindow inherits Window {
                 source: root.track-motion;
                 image-fit: cover;
                 opacity: root.motion-t * (1 - root.expand-t);
+            }
+            // The expanded view's own, which takes over as the view grows.
+            if root.wide-motion-t > 0: Image {
+                width: 100%;
+                height: 100%;
+                source: root.wide-motion;
+                image-fit: cover;
+                opacity: root.wide-motion-t * root.expand-t;
             }
             // The panel's shading, which the expanded cover does without.
             Rectangle {
@@ -6650,9 +6813,9 @@ export component AppWindow inherits Window {
             y: transport-y;
             width: 32px;
             height: 32px;
-            icon: Icons.prev;
-            fill: true;
-            size: 16px;
+            // Sharp edged, a triangle and a bar.
+            shape: "M 18 4 L 18 20 L 7 12 Z M 4 4 L 6.5 4 L 6.5 20 L 4 20 Z";
+            size: 18px;
             tint: Theme.text;
             clicked => { root.previous(); }
         }
@@ -6676,9 +6839,8 @@ export component AppWindow inherits Window {
             y: transport-y;
             width: 32px;
             height: 32px;
-            icon: Icons.next;
-            fill: true;
-            size: 16px;
+            shape: "M 6 4 L 6 20 L 17 12 Z M 17.5 4 L 20 4 L 20 20 L 17.5 20 Z";
+            size: 18px;
             tint: Theme.text;
             clicked => { root.next(); }
         }
@@ -7200,10 +7362,9 @@ export component AppWindow inherits Window {
             root.np-expanded = false;
             root.search(text);
         }
-        picked(index) => {
-            root.np-expanded = false;
-            root.suggestion-picked(index);
-        }
+        // A song plays where you are. A search or a page closes expanded
+        // Now playing to show it, which the app does as it opens one.
+        picked(index) => { root.suggestion-picked(index); }
         open-link(b) => { root.open-browse(b); }
     }
 

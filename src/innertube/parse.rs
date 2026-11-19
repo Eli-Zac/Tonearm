@@ -509,6 +509,7 @@ impl Walker {
             carousel,
             items: Vec::new(),
             more: shelf_more(v),
+            ..Shelf::default()
         });
         let outer = self.current.replace(self.page.shelves.len() - 1);
         self.loose = None;
@@ -523,6 +524,16 @@ impl Walker {
             }
         }
         self.current = outer;
+    }
+
+    /// Sets the layout of the shelf being read, from whether it is a
+    /// carousel. None leaves it as it is.
+    fn lay_out(&mut self, pick: impl Fn(bool) -> Option<Layout>) {
+        if let Some(shelf) = self.current.and_then(|i| self.page.shelves.get_mut(i)) {
+            if let Some(layout) = pick(shelf.carousel) {
+                shelf.layout = layout;
+            }
+        }
     }
 
     fn header(&mut self, key: &str, h: &Value) {
@@ -549,8 +560,28 @@ impl Walker {
             Value::Object(map) => {
                 for (key, child) in map {
                     match key.as_str() {
-                        "musicResponsiveListItemRenderer" => self.push(list_item(child)),
-                        "musicTwoRowItemRenderer" => self.push(two_row_item(child)),
+                        "musicResponsiveListItemRenderer" => {
+                            // Song rows in a carousel stack four to a column.
+                            self.lay_out(|carousel| carousel.then_some(Layout::Grid));
+                            self.push(list_item(child))
+                        }
+                        "musicTwoRowItemRenderer" => {
+                            let wide = string(child, "aspectRatio").is_some_and(|a| a.ends_with("16_9"));
+                            self.lay_out(|carousel| (carousel && wide).then_some(Layout::Wide));
+                            self.push(two_row_item(child))
+                        }
+                        "chipCloudChipRenderer" => {
+                            let browse = child.get("navigationEndpoint").and_then(|e| e.get("browseEndpoint"));
+                            let title = child.get("text").map(text).unwrap_or_default();
+                            if let (Some(browse), false) = (browse, title.is_empty()) {
+                                self.page.chips.push(Chip {
+                                    title,
+                                    browse_id: string(browse, "browseId").unwrap_or_default(),
+                                    params: string(browse, "params"),
+                                    selected: child.get("isSelected").and_then(Value::as_bool).unwrap_or(false),
+                                });
+                            }
+                        }
                         "playlistPanelVideoRenderer" => self.push(panel_item(child)),
                         "playlistPanelVideoWrapperRenderer" => {
                             if let Some(primary) = child.get("primaryRenderer") {

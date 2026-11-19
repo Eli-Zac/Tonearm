@@ -191,10 +191,12 @@ pub fn downloads_page() -> Page {
                 carousel: false,
                 items,
                 more: None,
+                ..Default::default()
             }]
         },
         continuation: None,
         header: None,
+        ..Default::default()
     }
 }
 

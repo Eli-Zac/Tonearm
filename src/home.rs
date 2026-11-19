@@ -91,6 +91,7 @@ fn shelf(title: &str, items: Vec<Item>) -> Option<Shelf> {
         carousel: true,
         items,
         more: None,
+        ..Default::default()
     })
 }
 

@@ -1,16 +1,20 @@
 //! Transition styles: how one song mixes into the next.
 //!
 //! A transition is set by a few choices, like Spotify's editor: how the
-//! volumes cross, what the EQ does, a filter sweep, and whether the songs
-//! are beat matched. Presets are named sets of those choices. Auto picks a
-//! preset from the two songs' analyses.
+//! volumes cross, what the EQ does, a filter sweep, an effect on the song
+//! going out, a loop of its last beats, and whether the songs are beat
+//! matched. Presets are named sets of those choices. Auto picks a preset
+//! from the two songs' analyses.
 //!
 //! `plan` turns the choices and the two songs into a `mix::Transition`:
 //! when it starts, where the next song starts from, and its lanes. The
 //! mixer only ever plays those.
+//!
+//! Beat matching reads each song's tempo where the mix happens, not over
+//! the whole song, so a song that changes tempo still mixes on the beat.
 
-use crate::analysis::Analysis;
-use crate::mix::{Curve, Lane, Param, Side, Transition};
+use crate::analysis::{Analysis, LocalGrid};
+use crate::mix::{Curve, Effect, EffectKind, Lane, Param, Side, Transition};
 
 /// How the two songs' volumes cross.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,6 +25,21 @@ pub enum Volume {
     /// over the second, so both play full in the middle. Wants a bass swap
     /// under it, or the low end doubles.
     Overlap,
+    /// The new song comes up over the first two thirds, the old one goes
+    /// over the last two.
+    FadeInFadeOut,
+    /// The new song starts at full, and the old one fades under it.
+    CutInFadeOut,
+    /// The new song fades in, and the old one stops at the end.
+    FadeInCutOut,
+    /// A straight swap halfway through.
+    CenterCut,
+    /// Both straight across, in gain rather than power, so it dips a
+    /// little in the middle.
+    Crossfade,
+    /// The new song fades in over the whole mix, and the old one goes over
+    /// the last quarter.
+    FadeInFastOut,
     /// A straight swap on the downbeat.
     Cut,
 }
@@ -32,16 +51,94 @@ pub enum Eq {
     /// The new song's bass stays out until the middle, then takes over
     /// from the old song's in one beat. Two kick drums never play at once.
     BassSwap,
+    /// The same, at the start of the mix.
+    StartBassSwap,
+    /// The same, at the end.
+    EndBassSwap,
+    /// The highs change over first, then the mids, then the bass.
+    ThreeBand,
+    /// Neither song has bass for a bar in the middle, then the new song's
+    /// comes in.
+    QuickBassCut,
+    /// The old song's bass goes at the start, and the new song's comes in
+    /// at the end, so the mix runs without bass.
+    LongBassCut,
+    /// The old song's bass fades out over the first half.
+    StartFadeOut,
+    /// The old song's bass fades out over the whole mix.
+    BassFadeOut,
 }
 
 /// A filter sweep.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Filter {
     None,
-    /// The old song thins out from the bottom up, as a high pass rises.
-    Rise,
+    /// The old song goes muffled, as a low pass falls.
+    LowOut,
     /// The new song opens up from muffled, as a low pass rises.
-    Open,
+    LowIn,
+    LowInLowOut,
+    LowInHighOut,
+    /// The old song thins out from the bottom up, as a high pass rises.
+    HighOut,
+    /// The new song fills in from the top down, as a high pass falls.
+    HighIn,
+    HighInHighOut,
+    HighInLowOut,
+    /// The old song thins out over the second half only.
+    HighHalfOut,
+    /// A rush of noise rises over the end of the old song.
+    NoiseOutEnd,
+}
+
+/// An effect on the song going out. Its tail rings on over the new song.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fx {
+    None,
+    /// Reverb that builds to the middle, then fades.
+    ReverbOutCenter,
+    /// Reverb that builds to the end and rings on.
+    ReverbCutEnd,
+    /// Reverb that builds to the end and fades with it.
+    ReverbOutEnd,
+    /// A delay bouncing between the sides, every half or three quarters
+    /// of a beat.
+    Delay(Fraction, Ending),
+    /// An echo every half, three quarters or one beat.
+    Echo(Fraction, Ending),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fraction {
+    Half,
+    ThreeQuarters,
+    One,
+}
+
+impl Fraction {
+    fn beats(self) -> f64 {
+        match self {
+            Fraction::Half => 0.5,
+            Fraction::ThreeQuarters => 0.75,
+            Fraction::One => 1.0,
+        }
+    }
+}
+
+/// How an effect's tail ends after the old song stops.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ending {
+    /// It rings on by itself.
+    Cut,
+    /// It fades out.
+    Out,
+}
+
+/// The old song's last beats, looped through the mix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Looping {
+    None,
+    Beats(u8),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,38 +193,102 @@ pub struct Settings {
     pub volume: Volume,
     pub eq: Eq,
     pub filter: Filter,
+    pub effect: Fx,
+    pub looping: Looping,
     pub beatmatch: bool,
+    /// The song coming in keeps its key while its speed changes to match,
+    /// rather than going up or down in pitch as on a turntable.
+    pub key_lock: bool,
     /// Seconds the mix moves within the song going out, later when above
-    /// zero, from where it would be. Dragged in the editor. Whole bars when
-    /// the songs beat match.
+    /// zero, from where it would be. Dragged in the editor. Whole beats
+    /// when the songs beat match.
     pub out_shift: f64,
     /// Seconds the song coming in starts later in itself, from its first
     /// downbeat, or from its top when not beat matched.
     pub in_shift: f64,
 }
 
-pub const VOLUME_CHOICES: [(Volume, &str); 3] = [
+/// The choices in the editor's menus, in Spotify's order. The names are
+/// also what is saved, so they stay put.
+pub const VOLUME_CHOICES: [(Volume, &str); 9] = [
     (Volume::Smooth, "Smooth crossfade"),
     (Volume::Overlap, "Overlap"),
+    (Volume::FadeInFadeOut, "Fade in fade out"),
+    (Volume::CutInFadeOut, "Cut in fade out"),
+    (Volume::FadeInCutOut, "Fade in cut out"),
+    (Volume::CenterCut, "Center cut"),
+    (Volume::Crossfade, "Crossfade"),
+    (Volume::FadeInFastOut, "Fade in fast out"),
     (Volume::Cut, "Cut on the beat"),
 ];
-pub const EQ_CHOICES: [(Eq, &str); 2] = [(Eq::None, "None"), (Eq::BassSwap, "Bass swap")];
-pub const FILTER_CHOICES: [(Filter, &str); 3] = [
+pub const EQ_CHOICES: [(Eq, &str); 9] = [
+    (Eq::BassSwap, "Center bass swap"),
+    (Eq::EndBassSwap, "End bass swap"),
+    (Eq::StartBassSwap, "Start bass swap"),
+    (Eq::ThreeBand, "3-band fade"),
+    (Eq::QuickBassCut, "Quick bass cut"),
+    (Eq::LongBassCut, "Long bass cut"),
+    (Eq::StartFadeOut, "Start fade out"),
+    (Eq::BassFadeOut, "Bass fade out"),
+    (Eq::None, "None"),
+];
+pub const FILTER_CHOICES: [(Filter, &str); 11] = [
+    (Filter::LowOut, "Low pass filter out"),
+    (Filter::LowIn, "Low pass filter in"),
+    (Filter::LowInLowOut, "Low pass filter in low pass filter out"),
+    (Filter::LowInHighOut, "Low pass filter in high pass filter out"),
+    (Filter::HighOut, "High pass filter out"),
+    (Filter::HighIn, "High pass filter in"),
+    (Filter::HighInHighOut, "High pass filter in high pass filter out"),
+    (Filter::HighInLowOut, "High pass filter in low pass filter out"),
+    (Filter::HighHalfOut, "High pass filter half out"),
+    (Filter::NoiseOutEnd, "Noise out end"),
     (Filter::None, "None"),
-    (Filter::Rise, "Rise out"),
-    (Filter::Open, "Open in"),
+];
+pub const EFFECT_CHOICES: [(Fx, &str); 12] = [
+    (Fx::ReverbOutCenter, "Reverb out center"),
+    (Fx::ReverbCutEnd, "Reverb cut end"),
+    (Fx::ReverbOutEnd, "Reverb out end"),
+    (Fx::Delay(Fraction::Half, Ending::Cut), "Delay ½ cut end"),
+    (Fx::Delay(Fraction::ThreeQuarters, Ending::Cut), "Delay ¾ cut end"),
+    (Fx::Echo(Fraction::Half, Ending::Cut), "Echo ½ cut end"),
+    (Fx::Echo(Fraction::Half, Ending::Out), "Echo ½ out end"),
+    (Fx::Echo(Fraction::ThreeQuarters, Ending::Cut), "Echo ¾ cut end"),
+    (Fx::Echo(Fraction::ThreeQuarters, Ending::Out), "Echo ¾ out end"),
+    (Fx::Echo(Fraction::One, Ending::Cut), "Echo 1 cut end"),
+    (Fx::Echo(Fraction::One, Ending::Out), "Echo 1 out end"),
+    (Fx::None, "None"),
+];
+pub const LOOP_CHOICES: [(Looping, &str); 6] = [
+    (Looping::Beats(1), "1 beat loop"),
+    (Looping::Beats(2), "2 beat loop"),
+    (Looping::Beats(4), "4 beat loop"),
+    (Looping::Beats(8), "8 beat loop"),
+    (Looping::Beats(16), "16 beat loop"),
+    (Looping::None, "None"),
 ];
 
 impl Settings {
     /// A preset's choices. Auto's are Blend's until the songs say otherwise.
     pub fn preset(preset: Preset) -> Settings {
-        let (volume, eq, filter, beatmatch) = match preset {
-            Preset::Fade => (Volume::Smooth, Eq::None, Filter::None, true),
-            Preset::Rise => (Volume::Overlap, Eq::BassSwap, Filter::Rise, true),
-            Preset::Cut => (Volume::Cut, Eq::None, Filter::None, true),
-            Preset::Auto | Preset::Blend | Preset::Custom => (Volume::Overlap, Eq::BassSwap, Filter::None, true),
+        let (volume, eq, filter) = match preset {
+            Preset::Fade => (Volume::Smooth, Eq::None, Filter::None),
+            Preset::Rise => (Volume::Overlap, Eq::BassSwap, Filter::HighOut),
+            Preset::Cut => (Volume::Cut, Eq::None, Filter::None),
+            Preset::Auto | Preset::Blend | Preset::Custom => (Volume::Overlap, Eq::BassSwap, Filter::None),
         };
-        Settings { preset, volume, eq, filter, beatmatch, out_shift: 0.0, in_shift: 0.0 }
+        Settings {
+            preset,
+            volume,
+            eq,
+            filter,
+            effect: Fx::None,
+            looping: Looping::None,
+            beatmatch: true,
+            key_lock: false,
+            out_shift: 0.0,
+            in_shift: 0.0,
+        }
     }
 
     /// What Auto becomes for these two songs. Songs that beat match get a
@@ -136,7 +297,7 @@ impl Settings {
     pub fn auto(out: Option<&Analysis>, inn: Option<&Analysis>, beat_match: bool) -> Settings {
         let matched = beat_match
             && match (out, inn) {
-                (Some(a), Some(b)) => timing(a, f64::MAX, b, 8.0).is_some(),
+                (Some(a), Some(b)) => timing(a, f64::MAX, b, 8.0).is_ok(),
                 _ => false,
             };
         let mut settings = if matched {
@@ -158,10 +319,13 @@ impl Settings {
     pub fn to_json(&self) -> String {
         serde_json::json!({
             "preset": self.preset.key(),
-            "volume": index_of(&VOLUME_CHOICES, self.volume),
-            "eq": index_of(&EQ_CHOICES, self.eq),
-            "filter": index_of(&FILTER_CHOICES, self.filter),
+            "volume": name_of(&VOLUME_CHOICES, self.volume),
+            "eq": name_of(&EQ_CHOICES, self.eq),
+            "filter": name_of(&FILTER_CHOICES, self.filter),
+            "effect": name_of(&EFFECT_CHOICES, self.effect),
+            "looping": name_of(&LOOP_CHOICES, self.looping),
             "beatmatch": self.beatmatch,
+            "key_lock": self.key_lock,
             "out_shift": self.out_shift,
             "in_shift": self.in_shift,
         })
@@ -170,13 +334,23 @@ impl Settings {
 
     pub fn from_json(text: &str) -> Option<Settings> {
         let v: serde_json::Value = serde_json::from_str(text).ok()?;
-        let pick = |key: &str, len: usize| v[key].as_u64().map(|i| i as usize).filter(|&i| i < len);
+        // Saved by name. Older saves kept the place in shorter menus.
+        fn pick<T: Copy + PartialEq>(v: &serde_json::Value, choices: &[(T, &str)], old: &[T]) -> Option<T> {
+            match v {
+                serde_json::Value::String(name) => choices.iter().find(|(_, n)| n == name).map(|(c, _)| *c),
+                serde_json::Value::Number(n) => old.get(n.as_u64()? as usize).copied(),
+                _ => None,
+            }
+        }
         Some(Settings {
             preset: Preset::from_key(v["preset"].as_str()?)?,
-            volume: VOLUME_CHOICES[pick("volume", VOLUME_CHOICES.len())?].0,
-            eq: EQ_CHOICES[pick("eq", EQ_CHOICES.len())?].0,
-            filter: FILTER_CHOICES[pick("filter", FILTER_CHOICES.len())?].0,
+            volume: pick(&v["volume"], &VOLUME_CHOICES, &[Volume::Smooth, Volume::Overlap, Volume::Cut])?,
+            eq: pick(&v["eq"], &EQ_CHOICES, &[Eq::None, Eq::BassSwap])?,
+            filter: pick(&v["filter"], &FILTER_CHOICES, &[Filter::None, Filter::HighOut, Filter::LowIn])?,
+            effect: pick(&v["effect"], &EFFECT_CHOICES, &[]).unwrap_or(Fx::None),
+            looping: pick(&v["looping"], &LOOP_CHOICES, &[]).unwrap_or(Looping::None),
             beatmatch: v["beatmatch"].as_bool()?,
+            key_lock: v["key_lock"].as_bool().unwrap_or(false),
             // Saved before they could be dragged: none.
             out_shift: v["out_shift"].as_f64().unwrap_or(0.0),
             in_shift: v["in_shift"].as_f64().unwrap_or(0.0),
@@ -186,6 +360,10 @@ impl Settings {
 
 pub fn index_of<T: PartialEq + Copy>(choices: &[(T, &str)], value: T) -> usize {
     choices.iter().position(|(c, _)| *c == value).unwrap_or(0)
+}
+
+fn name_of<T: PartialEq + Copy>(choices: &[(T, &'static str)], value: T) -> &'static str {
+    choices.iter().find(|(c, _)| *c == value).map_or("None", |(_, n)| n)
 }
 
 // ------------------------------------------------------------------ timing
@@ -206,61 +384,168 @@ struct Timing {
     out_at: f64,
     in_from: f64,
     length: f64,
-    /// The speed the new song plays at to match, and the old song's beat.
+    /// The speed the new song plays at to match, and the old song's beat
+    /// where the mix is.
     speed: f64,
     beat: f64,
 }
 
+/// Why two songs cannot be beat matched.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Unmatched {
+    /// Neither end of the old song nor the start of the new one keeps a
+    /// steady beat.
+    NoBeat,
+    /// Their tempos where they meet are this share apart.
+    TempoApart(f64),
+    /// The old song's beat stops well before it ends.
+    BeatEndsEarly,
+    /// The new song's beat starts too late.
+    BeatStartsLate,
+}
+
+/// The speed the new song plays at so its beat, `in_beat` seconds, lands
+/// on the old song's, `out_beat`. Half or double time matches beat for beat.
+fn speed_for(out_beat: f64, in_beat: f64) -> f64 {
+    [0.5, 1.0, 2.0]
+        .into_iter()
+        .map(|m| in_beat / (out_beat * m))
+        .min_by(|a, b| a.ln().abs().total_cmp(&b.ln().abs()))
+        .unwrap_or(1.0)
+}
+
+/// How many beats long a mix about `seconds` long is: a whole number of bars.
+fn mix_beats(beat: f64, seconds: f64) -> f64 {
+    [4.0, 8.0, 16.0, 32.0]
+        .into_iter()
+        .min_by(|a, b| {
+            let off = |n: f64| (n * beat / seconds.max(1.0)).ln().abs();
+            off(*a).total_cmp(&off(*b))
+        })
+        .unwrap_or(16.0)
+}
+
+fn steady_part(a: &Analysis, from: f64, to: f64) -> Option<LocalGrid> {
+    a.local(from, to).filter(LocalGrid::steady)
+}
+
 /// Beat matched timing from `out`, `out_length` seconds long, into `inn`,
-/// about `seconds` long. None when the two cannot be beat matched: a tempo
-/// that wanders, or tempos too far apart.
+/// about `seconds` long.
 ///
 /// The mix starts on a downbeat of the song going out, as late as lets it
-/// finish before that song's beat stops. The song coming in starts from its
-/// first downbeat, at the old song's tempo, so beats and bars land together.
-fn timing(out: &Analysis, out_length: f64, inn: &Analysis, seconds: f64) -> Option<Timing> {
-    if !out.steady() || !inn.steady() {
-        return None;
+/// finish before that song's beat stops, and where its beat is steady. The
+/// song coming in starts from its first downbeat, at the old song's tempo
+/// there, so beats and bars land together.
+fn timing(out: &Analysis, out_length: f64, inn: &Analysis, seconds: f64) -> Result<Timing, Unmatched> {
+    if out.beats.len() < 16 || inn.beats.len() < 16 {
+        return Err(Unmatched::NoBeat);
     }
-    let out_beat = out.beat();
-    // A song at half or twice the tempo matches beat for beat.
-    let speed = [0.5, 1.0, 2.0]
-        .into_iter()
-        .map(|m| out.bpm as f64 / (inn.bpm as f64 * m))
-        .min_by(|a, b| a.ln().abs().total_cmp(&b.ln().abs()))?;
-    if (speed - 1.0).abs() > MOST_STRETCH {
-        return None;
-    }
-    // Mixes run a whole number of bars, about as long as asked.
-    let beats = [4.0, 8.0, 16.0, 32.0].into_iter().min_by(|a, b| {
-        let off = |n: f64| (n * out_beat / seconds.max(1.0)).ln().abs();
-        off(*a).total_cmp(&off(*b))
-    })?;
-    let length = beats * out_beat;
-    // The last downbeat that leaves room for the mix before the beat ends.
-    let beat_ends = (*out.beats.last()? as f64 + out_beat).min(out_length);
-    let bar = 4.0 * out_beat;
-    let grid = out.grid_start as f64;
-    let bars = ((beat_ends - length - grid) / bar).floor();
-    let out_at = grid + bars * bar;
     let room = out_length.min(out.length as f64);
-    if bars < 0.0 || out_at < room * 0.5 {
+    let last = *out.beats.last().unwrap() as f64;
+    let last_beat = steady_part(out, last - 8.0, last).map_or(out.beat(), |g| g.beat);
+    // From the end of the beat back, the last stretch that keeps a steady
+    // beat for the whole mix.
+    let mut end = (last + last_beat).min(out_length);
+    let mut steady_somewhere = false;
+    let mut found = None;
+    while end > room * 0.5 {
+        let Some(rough) = steady_part(out, end - seconds.max(4.0), end) else {
+            end -= 1.0;
+            continue;
+        };
+        steady_somewhere = true;
+        let beats = mix_beats(rough.beat, seconds);
+        let at = rough.downbeat_before(end - beats * rough.beat);
+        if at < room * 0.5 {
+            break;
+        }
+        if let Some(part) = steady_part(out, at, at + beats * rough.beat) {
+            // Measured over the mix itself, which is a little different.
+            let at = part.nearest_downbeat(at);
+            found = Some((at, beats * part.beat, part.beat));
+            break;
+        }
+        end = at;
+    }
+    let Some((out_at, length, beat)) = found else {
+        return Err(if steady_somewhere { Unmatched::BeatEndsEarly } else { Unmatched::NoBeat });
+    };
+    let first = inn.grid_start as f64;
+    if !(0.0..=LATEST_FIRST_BEAT).contains(&first) {
+        return Err(Unmatched::BeatStartsLate);
+    }
+    let start = steady_part(inn, first, first + length).ok_or(Unmatched::NoBeat)?;
+    let mut in_from = start.nearest_downbeat(first);
+    if in_from < 0.0 {
+        in_from += 4.0 * start.beat;
+    }
+    let speed = speed_for(beat, start.beat);
+    if (speed - 1.0).abs() > MOST_STRETCH {
+        return Err(Unmatched::TempoApart(speed));
+    }
+    Ok(Timing { out_at, in_from, length, speed, beat })
+}
+
+/// The timing with the songs moved by hand as `settings` say. Each song's
+/// tempo is measured again where it was moved to, and the move lands on
+/// the nearest beat there.
+fn matched(settings: &Settings, out: &Analysis, out_length: f64, inn: &Analysis, seconds: f64) -> Option<Timing> {
+    if !settings.beatmatch {
         return None;
     }
-    let in_from = inn.grid_start as f64;
-    if !(0.0..=LATEST_FIRST_BEAT).contains(&in_from) {
-        return None;
+    let mut t = timing(out, out_length, inn, seconds).ok()?;
+    let beats = (t.length / t.beat).round();
+    if settings.out_shift != 0.0 {
+        let mut at = t.out_at + settings.out_shift;
+        if let Some(part) = steady_part(out, at, at + t.length) {
+            t.beat = part.beat;
+            t.length = beats * part.beat;
+            at = part.nearest_beat(at);
+        }
+        // The old song must last through the mix. Kept in range by whole
+        // beats, so a mix on the beat stays on it.
+        let latest = (out_length - t.length).max(0.0);
+        while at > latest && at - t.beat >= 0.0 {
+            at -= t.beat;
+        }
+        while at < 0.0 {
+            at += t.beat;
+        }
+        t.out_at = at.clamp(0.0, latest);
     }
-    Some(Timing { out_at, in_from, length, speed, beat: out_beat })
+    // The new song cannot start before its top.
+    let mut from = t.in_from + settings.in_shift;
+    let mut in_beat = t.beat * t.speed;
+    if let Some(part) = steady_part(inn, from.max(0.0), from.max(0.0) + t.length) {
+        let speed = speed_for(t.beat, part.beat);
+        if (speed - 1.0).abs() <= MOST_STRETCH {
+            t.speed = speed;
+            in_beat = t.beat * speed;
+        }
+        from = part.nearest_beat(from);
+    }
+    while from < 0.0 {
+        from += in_beat;
+    }
+    t.in_from = from.max(0.0);
+    Some(t)
 }
 
 /// The beat a drag snaps to, in seconds of the song going out, or of the
-/// song coming in with `inn_side`. Zero when the two do not beat match.
-pub fn drag_step(out: Option<&Analysis>, out_length: f64, inn: Option<&Analysis>, seconds: f64, inn_side: bool) -> f64 {
+/// song coming in with `inn_side`, where the mix is. Zero when the two do
+/// not beat match.
+pub fn drag_step(
+    settings: &Settings,
+    out: Option<&Analysis>,
+    out_length: f64,
+    inn: Option<&Analysis>,
+    seconds: f64,
+    inn_side: bool,
+) -> f64 {
     let (Some(a), Some(b)) = (out, inn) else {
         return 0.0;
     };
-    match timing(a, out_length, b, seconds) {
+    match matched(settings, a, out_length, b, seconds) {
         Some(t) if inn_side => t.beat * t.speed,
         Some(t) => t.beat,
         None => 0.0,
@@ -272,15 +557,27 @@ pub fn snap(shift: f64, step: f64) -> f64 {
     if step > 0.0 { (shift / step).round() * step } else { shift }
 }
 
-/// Whether two songs can be beat matched, in a mix about `seconds` long.
-pub fn beat_matched(out: Option<&Analysis>, out_length: f64, inn: Option<&Analysis>, seconds: f64) -> bool {
-    match (out, inn) {
-        (Some(a), Some(b)) => timing(a, out_length, b, seconds).is_some(),
-        _ => false,
-    }
+/// Why two songs cannot be beat matched, for the warning on their tempos.
+/// None when they can.
+pub fn why_unmatched(out: Option<&Analysis>, out_length: f64, inn: Option<&Analysis>, seconds: f64) -> Option<String> {
+    let (Some(a), Some(b)) = (out, inn) else {
+        return Some("Beat matching waits until both songs are analyzed".into());
+    };
+    let why = match timing(a, out_length, b, seconds).err()? {
+        Unmatched::NoBeat => "neither keeps a steady beat where they meet".to_string(),
+        Unmatched::TempoApart(speed) => {
+            format!("their tempos where they meet are {:.0}% apart", (speed - 1.0).abs() * 100.0)
+        }
+        Unmatched::BeatEndsEarly => "the first song's beat stops well before it ends".to_string(),
+        Unmatched::BeatStartsLate => "the second song's beat starts too late".to_string(),
+    };
+    Some(format!("Beat matching not possible: {why}"))
 }
 
 // -------------------------------------------------------------------- plan
+
+/// How long an effect's tail rings on after the old song stops.
+const TAIL: f64 = 4.0;
 
 /// The transition `settings` make from `out`, `out_length` seconds long,
 /// into `inn`, about `seconds` long.
@@ -295,50 +592,31 @@ pub fn plan(
     inn: Option<&Analysis>,
     seconds: f64,
 ) -> Transition {
-    let matched = match (settings.beatmatch, out, inn) {
-        (true, Some(a), Some(b)) => timing(a, out_length, b, seconds),
+    let matched = match (out, inn) {
+        (Some(a), Some(b)) => matched(&settings, a, out_length, b, seconds),
         _ => None,
     };
     // A cut swaps in an instant: on the downbeat where a blend would have
     // finished, so the new song's first downbeat lands on the old song's.
     let cut = settings.volume == Volume::Cut;
-    let (mut out_at, mut in_from, length, beat) = match matched {
+    let (mut out_at, in_from, length, beat) = match matched {
         Some(t) if cut => (Some(t.out_at + t.length), t.in_from, CUT, t.beat),
         Some(t) => (Some(t.out_at), t.in_from, t.length, t.beat),
-        None if cut => (None, 0.0, CUT, 0.5),
-        None => (None, 0.0, seconds.max(0.5), seconds.max(0.5) / 16.0),
+        None if cut => (None, settings.in_shift.max(0.0), CUT, 0.5),
+        None => (None, settings.in_shift.max(0.0), seconds.max(0.5), seconds.max(0.5) / 16.0),
     };
-    // Moved by hand, by as much as dragged: the editor snaps drags to
-    // beats. The old song must last through the mix, and the new one cannot
-    // start before its top. Kept in range by whole beats, so a mix on the
-    // beat stays on it.
-    let (out_beat, in_beat) = match matched {
-        Some(t) => (t.beat, t.beat * t.speed),
-        None => (0.0, 0.0),
-    };
-    if settings.out_shift != 0.0 {
-        let base = out_at.unwrap_or(out_length - length);
+    // Moved by hand, not beat matched: by as much as dragged, and the old
+    // song must last through the mix.
+    if matched.is_none() && settings.out_shift != 0.0 {
         let latest = (out_length - length).max(0.0);
-        let mut at = base + settings.out_shift;
-        while out_beat > 0.0 && at > latest && at - out_beat >= 0.0 {
-            at -= out_beat;
-        }
-        while out_beat > 0.0 && at < 0.0 {
-            at += out_beat;
-        }
-        out_at = Some(at.clamp(0.0, latest));
+        out_at = Some((latest + settings.out_shift).clamp(0.0, latest));
     }
-    let mut from = in_from + settings.in_shift;
-    while in_beat > 0.0 && from < 0.0 {
-        from += in_beat;
-    }
-    in_from = from.max(0.0);
     let mut lanes = Vec::new();
     lanes.extend(volume_lanes(settings.volume, length));
-    if settings.eq == Eq::BassSwap {
-        lanes.extend(bass_swap(length, beat));
-    }
+    lanes.extend(eq_lanes(settings.eq, length, beat));
     lanes.extend(filter_lanes(settings.filter, length));
+    let effect = effect_lanes(settings.effect, length, beat, &mut lanes);
+    let mut key_lock = false;
     if let Some(t) = matched {
         if (t.speed - 1.0).abs() > 0.001 {
             // Back to its own tempo over two bars once the old song is gone.
@@ -348,72 +626,201 @@ pub fn plan(
                 Param::Speed,
                 &[(0.0, t.speed as f32, Curve::Linear), (length, t.speed as f32, Curve::Linear), (settle, 1.0, Curve::Smooth)],
             ));
+            key_lock = settings.key_lock;
         }
     }
-    Transition { out_at, in_from, length, lanes }
+    let out_loop = match settings.looping {
+        Looping::Beats(n) if !cut => Some(n as f64 * beat),
+        _ => None,
+    };
+    Transition { out_at, in_from, length, lanes, effect, out_loop, key_lock }
+}
+
+/// A lane for one song, from (seconds, value, curve) keys.
+fn lane(side: Side, param: Param, keys: &[(f64, f32, Curve)]) -> Lane {
+    Lane::new(side, param, keys)
 }
 
 fn volume_lanes(style: Volume, length: f64) -> [Lane; 2] {
-    let half = length / 2.0;
-    match style {
-        Volume::Smooth => [
-            Lane::new(Side::Out, Param::Volume, &[(0.0, 1.0, Curve::Linear), (length, 0.0, Curve::EaseIn)]),
-            Lane::new(Side::In, Param::Volume, &[(0.0, 0.0, Curve::Linear), (length, 1.0, Curve::EaseOut)]),
-        ],
-        Volume::Overlap => [
-            Lane::new(Side::Out, Param::Volume, &[(0.0, 1.0, Curve::Linear), (half, 1.0, Curve::Linear), (length, 0.0, Curve::EaseIn)]),
-            Lane::new(Side::In, Param::Volume, &[(0.0, 0.0, Curve::Linear), (half, 1.0, Curve::EaseOut)]),
-        ],
-        Volume::Cut => [
-            Lane::new(Side::Out, Param::Volume, &[(0.0, 1.0, Curve::Linear), (length, 0.0, Curve::Linear)]),
-            Lane::new(Side::In, Param::Volume, &[(0.0, 0.0, Curve::Linear), (length, 1.0, Curve::Linear)]),
-        ],
-    }
+    use Curve::*;
+    let l = length;
+    let half = l / 2.0;
+    // A swap this quick does not click.
+    let snap = CUT.min(l / 4.0);
+    let (out, inn): (Vec<(f64, f32, Curve)>, Vec<(f64, f32, Curve)>) = match style {
+        Volume::Smooth => (vec![(0.0, 1.0, Linear), (l, 0.0, EaseIn)], vec![(0.0, 0.0, Linear), (l, 1.0, EaseOut)]),
+        Volume::Overlap => (
+            vec![(0.0, 1.0, Linear), (half, 1.0, Linear), (l, 0.0, EaseIn)],
+            vec![(0.0, 0.0, Linear), (half, 1.0, EaseOut)],
+        ),
+        Volume::FadeInFadeOut => (
+            vec![(0.0, 1.0, Linear), (l / 3.0, 1.0, Linear), (l, 0.0, EaseIn)],
+            vec![(0.0, 0.0, Linear), (l * 2.0 / 3.0, 1.0, EaseOut)],
+        ),
+        Volume::CutInFadeOut => (vec![(0.0, 1.0, Linear), (l, 0.0, EaseIn)], vec![(0.0, 1.0, Linear)]),
+        Volume::FadeInCutOut => (
+            vec![(0.0, 1.0, Linear), (l - snap, 1.0, Linear), (l, 0.0, Linear)],
+            vec![(0.0, 0.0, Linear), (l, 1.0, EaseOut)],
+        ),
+        Volume::CenterCut => (
+            vec![(0.0, 1.0, Linear), (half, 1.0, Linear), (half + snap, 0.0, Linear)],
+            vec![(0.0, 0.0, Linear), (half, 0.0, Linear), (half + snap, 1.0, Linear)],
+        ),
+        Volume::Crossfade => (vec![(0.0, 1.0, Linear), (l, 0.0, Linear)], vec![(0.0, 0.0, Linear), (l, 1.0, Linear)]),
+        Volume::FadeInFastOut => (
+            vec![(0.0, 1.0, Linear), (l * 0.75, 1.0, Linear), (l, 0.0, EaseIn)],
+            vec![(0.0, 0.0, Linear), (l, 1.0, EaseOut)],
+        ),
+        Volume::Cut => (vec![(0.0, 1.0, Linear), (l, 0.0, Linear)], vec![(0.0, 0.0, Linear), (l, 1.0, Linear)]),
+    };
+    [lane(Side::Out, Param::Volume, &out), lane(Side::In, Param::Volume, &inn)]
+}
+
+/// The bass of the two songs trades places at `at`, over `swap` seconds.
+fn bass_swap_at(at: f64, swap: f64) -> [Lane; 2] {
+    use Curve::*;
+    [
+        lane(Side::Out, Param::Bass, &[(0.0, 1.0, Linear), (at, 1.0, Linear), (at + swap, 0.0, Smooth)]),
+        lane(Side::In, Param::Bass, &[(0.0, 0.0, Linear), (at, 0.0, Linear), (at + swap, 1.0, Smooth)]),
+    ]
 }
 
 /// The bass of the two songs trades places in the middle, over one beat.
 fn bass_swap(length: f64, beat: f64) -> [Lane; 2] {
-    let mid = length / 2.0;
     let swap = beat.min(length / 4.0);
-    [
-        Lane::new(Side::Out, Param::Bass, &[(0.0, 1.0, Curve::Linear), (mid, 1.0, Curve::Linear), (mid + swap, 0.0, Curve::Smooth)]),
-        Lane::new(Side::In, Param::Bass, &[(0.0, 0.0, Curve::Linear), (mid, 0.0, Curve::Linear), (mid + swap, 1.0, Curve::Smooth)]),
-    ]
+    bass_swap_at(length / 2.0 - swap / 2.0, swap)
+}
+
+fn eq_lanes(style: Eq, length: f64, beat: f64) -> Vec<Lane> {
+    use Curve::*;
+    let l = length;
+    let swap = beat.min(l / 4.0);
+    match style {
+        Eq::None => Vec::new(),
+        Eq::BassSwap => bass_swap(l, beat).to_vec(),
+        Eq::StartBassSwap => bass_swap_at(0.0, swap).to_vec(),
+        Eq::EndBassSwap => bass_swap_at(l - swap, swap).to_vec(),
+        Eq::ThreeBand => {
+            // Each band changes over in its own third: highs, mids, bass.
+            let third = l / 3.0;
+            let mut lanes = Vec::new();
+            for (n, param) in [Param::Treble, Param::Mid, Param::Bass].into_iter().enumerate() {
+                let (from, to) = (third * n as f64, third * (n + 1) as f64);
+                lanes.push(lane(Side::Out, param, &[(0.0, 1.0, Linear), (from, 1.0, Linear), (to, 0.0, Smooth)]));
+                lanes.push(lane(Side::In, param, &[(0.0, 0.0, Linear), (from, 0.0, Linear), (to, 1.0, Smooth)]));
+            }
+            lanes
+        }
+        Eq::QuickBassCut => {
+            let bar = (4.0 * beat).min(l / 2.0);
+            let (gone, back) = (l / 2.0 - bar / 2.0, l / 2.0 + bar / 2.0);
+            vec![
+                lane(Side::Out, Param::Bass, &[(0.0, 1.0, Linear), (gone, 1.0, Linear), (gone + CUT, 0.0, Linear)]),
+                lane(Side::In, Param::Bass, &[(0.0, 0.0, Linear), (back, 0.0, Linear), (back + CUT, 1.0, Linear)]),
+            ]
+        }
+        Eq::LongBassCut => vec![
+            lane(Side::Out, Param::Bass, &[(0.0, 1.0, Linear), (swap, 0.0, Smooth)]),
+            lane(Side::In, Param::Bass, &[(0.0, 0.0, Linear), (l - swap, 0.0, Linear), (l, 1.0, Smooth)]),
+        ],
+        Eq::StartFadeOut => vec![lane(Side::Out, Param::Bass, &[(0.0, 1.0, Linear), (l / 2.0, 0.0, Smooth)])],
+        Eq::BassFadeOut => vec![lane(Side::Out, Param::Bass, &[(0.0, 1.0, Linear), (l, 0.0, Smooth)])],
+    }
 }
 
 fn filter_lanes(style: Filter, length: f64) -> Vec<Lane> {
+    use Curve::*;
+    let l = length;
+    // Rising in pitch sounds even, so the cutoffs move by curves: slow at
+    // the low end, quick at the high.
+    let low_out = || lane(Side::Out, Param::LowPass, &[(0.0, 20_000.0, Linear), (l, 300.0, EaseOut)]);
+    let low_in = || lane(Side::In, Param::LowPass, &[(0.0, 300.0, Linear), (l * 0.75, 20_000.0, EaseIn)]);
+    let high_out = || lane(Side::Out, Param::HighPass, &[(0.0, 20.0, Linear), (l, 2000.0, EaseIn)]);
+    let high_in = || lane(Side::In, Param::HighPass, &[(0.0, 2000.0, Linear), (l * 0.75, 20.0, EaseOut)]);
     match style {
         Filter::None => Vec::new(),
-        // Rising in pitch sounds even, so the cutoff rises by a curve.
-        Filter::Rise => vec![Lane::new(
+        Filter::LowOut => vec![low_out()],
+        Filter::LowIn => vec![low_in()],
+        Filter::LowInLowOut => vec![low_in(), low_out()],
+        Filter::LowInHighOut => vec![low_in(), high_out()],
+        Filter::HighOut => vec![high_out()],
+        Filter::HighIn => vec![high_in()],
+        Filter::HighInHighOut => vec![high_in(), high_out()],
+        Filter::HighInLowOut => vec![high_in(), low_out()],
+        Filter::HighHalfOut => vec![lane(
             Side::Out,
             Param::HighPass,
-            &[(0.0, 20.0, Curve::Linear), (length, 2000.0, Curve::EaseIn)],
+            &[(0.0, 20.0, Linear), (l / 2.0, 20.0, Linear), (l, 2000.0, EaseIn)],
         )],
-        Filter::Open => vec![Lane::new(
-            Side::In,
-            Param::LowPass,
-            &[(0.0, 300.0, Curve::Linear), (length * 0.75, 20_000.0, Curve::EaseIn)],
+        Filter::NoiseOutEnd => vec![lane(
+            Side::Out,
+            Param::Noise,
+            &[(0.0, 0.0, Linear), (l / 2.0, 0.0, Linear), (l, 1.0, EaseIn)],
         )],
     }
+}
+
+/// The lanes that feed the old song into an effect and bring the effect
+/// back, and the effect itself.
+fn effect_lanes(style: Fx, length: f64, beat: f64, lanes: &mut Vec<Lane>) -> Option<Effect> {
+    use Curve::*;
+    let l = length;
+    let (kind, ending, center) = match style {
+        Fx::None => return None,
+        Fx::ReverbOutCenter => (EffectKind::Reverb, Ending::Out, true),
+        Fx::ReverbCutEnd => (EffectKind::Reverb, Ending::Cut, false),
+        Fx::ReverbOutEnd => (EffectKind::Reverb, Ending::Out, false),
+        Fx::Delay(f, e) => (EffectKind::PingPong(f.beats() * beat), e, false),
+        Fx::Echo(f, e) => (EffectKind::Echo(f.beats() * beat), e, false),
+    };
+    if center {
+        // Builds to the middle, stops taking the song, and fades by the end.
+        let half = l / 2.0;
+        lanes.push(lane(Side::Out, Param::Send, &[(0.0, 0.0, Linear), (half, 1.0, EaseIn), (half + CUT, 0.0, Linear)]));
+        lanes.push(lane(Side::Out, Param::Wet, &[(0.0, 1.0, Linear), (half, 1.0, Linear), (l, 0.0, Smooth)]));
+        return Some(Effect { kind });
+    }
+    match ending {
+        // Takes the end of the song, and rings on after it.
+        Ending::Cut => {
+            lanes.push(lane(Side::Out, Param::Send, &[(0.0, 0.0, Linear), (l / 2.0, 0.0, Linear), (l, 1.0, EaseIn)]));
+            lanes.push(lane(Side::Out, Param::Wet, &[(0.0, 1.0, Linear), (l + TAIL, 1.0, Linear), (l + TAIL + 0.5, 0.0, Smooth)]));
+        }
+        // Takes more of the song as it goes, and fades soon after it.
+        Ending::Out => {
+            lanes.push(lane(Side::Out, Param::Send, &[(0.0, 0.0, Linear), (l, 1.0, EaseIn)]));
+            lanes.push(lane(Side::Out, Param::Wet, &[(0.0, 1.0, Linear), (l, 1.0, Linear), (l + TAIL / 2.0, 0.0, Smooth)]));
+        }
+    }
+    Some(Effect { kind })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn steady(bpm: f32, grid_start: f32, length: f32) -> Analysis {
-        let beat = 60.0 / bpm;
+    fn song(beats: Vec<f32>, bpm: f32, grid_start: f32, length: f32) -> Analysis {
         Analysis {
             length,
             bpm,
             bpm_confidence: 0.9,
             grid_start,
-            beats: (0..).map(|n| grid_start + n as f32 * beat).take_while(|&t| t < length - 10.0).collect(),
+            beats,
+            downbeats: Vec::new(),
             key: None,
             key_confidence: 0.0,
             waveform: Vec::new(),
         }
+    }
+
+    fn steady(bpm: f32, grid_start: f32, length: f32) -> Analysis {
+        let beat = 60.0 / bpm;
+        let beats = (0..).map(|n| grid_start + n as f32 * beat).take_while(|&t| t < length - 10.0).collect();
+        song(beats, bpm, grid_start, length)
+    }
+
+    fn speed_of(plan: &Transition) -> f64 {
+        plan.lanes.iter().find(|l| l.param == Param::Speed).map_or(1.0, |l| l.value(0.0).unwrap() as f64)
     }
 
     #[test]
@@ -423,13 +830,34 @@ mod tests {
         let beat = 60.0 / 128.0;
         let at = plan.out_at.unwrap();
         let bars = (at - 0.4) / (4.0 * beat);
-        assert!((bars - bars.round()).abs() < 1e-6);
-        assert!(at + plan.length <= *out.beats.last().unwrap() as f64 + beat + 1e-6);
-        assert_eq!(plan.length, 16.0 * beat);
-        assert!((plan.in_from - 1.1).abs() < 1e-6);
+        // Beats are kept to f32, so lined up to a fraction of a millisecond.
+        assert!((bars - bars.round()).abs() < 1e-4);
+        assert!(at + plan.length <= *out.beats.last().unwrap() as f64 + beat + 1e-4);
+        assert!((plan.length - 16.0 * beat).abs() < 1e-4);
+        assert!((plan.in_from - 1.1).abs() < 1e-4);
         let speed = plan.lanes.iter().find(|l| l.param == Param::Speed).unwrap();
         assert!((speed.value(1.0).unwrap() as f64 - 128.0 / 124.0).abs() < 1e-4);
         assert_eq!(speed.value(1000.0), Some(1.0));
+    }
+
+    #[test]
+    fn a_song_that_changes_tempo_mixes_at_its_tempo_where_it_ends() {
+        // 90 BPM for a minute, then 128 to the end. The whole song's grid
+        // fits neither.
+        let mut beats: Vec<f32> = (0..90).map(|n| 0.5 + n as f32 * 60.0 / 90.0).collect();
+        let change = *beats.last().unwrap();
+        beats.extend((1..).map(|n| change + n as f32 * 60.0 / 128.0).take_while(|&t| t < 190.0));
+        let mut out = song(beats, 105.0, 0.5, 200.0);
+        out.bpm_confidence = 0.3;
+        let inn = steady(126.0, 0.8, 180.0);
+        let plan = plan(Settings::preset(Preset::Blend), Some(&out), 200.0, Some(&inn), 8.0);
+        let at = plan.out_at.expect("beat matched");
+        assert!(at > change as f64);
+        assert!((speed_of(&plan) - 128.0 / 126.0).abs() < 1e-3);
+        // On one of the tracked beats, and on a downbeat counted through
+        // the change: every fourth beat from the first.
+        let n = out.beats.iter().position(|&b| (b as f64 - at).abs() < 1e-3).expect("on a beat");
+        assert_eq!(n % 4, 0);
     }
 
     #[test]
@@ -439,9 +867,17 @@ mod tests {
         assert!(plan(fade, Some(&out), 200.0, Some(&steady(100.0, 0.0, 200.0)), 8.0).out_at.is_none());
         // But half time matches.
         assert!(plan(fade, Some(&out), 200.0, Some(&steady(64.5, 0.0, 200.0)), 8.0).out_at.is_some());
-        let mut wobbly = steady(128.0, 0.0, 200.0);
-        wobbly.bpm_confidence = 0.3;
+        // Beats all over the place do not.
+        let mut seed = 7u32;
+        let wobbly: Vec<f32> = (0..300)
+            .map(|n| {
+                seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                n as f32 * 0.47 + (seed >> 16) as f32 / 65_536.0 * 0.2
+            })
+            .collect();
+        let wobbly = song(wobbly, 128.0, 0.0, 200.0);
         assert!(plan(fade, Some(&out), 200.0, Some(&wobbly), 8.0).out_at.is_none());
+        assert!(why_unmatched(Some(&out), 200.0, Some(&wobbly), 8.0).is_some());
         // And without analyses it is a plain fade of the length asked.
         let plain = plan(fade, None, 200.0, None, 6.0);
         assert_eq!((plain.out_at, plain.length), (None, 6.0));
@@ -459,12 +895,62 @@ mod tests {
 
     #[test]
     fn a_bass_swap_never_plays_both_basses_at_full() {
-        let lanes = bass_swap(8.0, 0.5);
-        for step in 0..=80 {
-            let t = step as f64 / 10.0;
-            let (out, inn) = (lanes[0].value(t).unwrap(), lanes[1].value(t).unwrap());
-            assert!(out + inn <= 1.0 + 1e-5, "at {t}: {out} + {inn}");
+        for style in [Eq::BassSwap, Eq::StartBassSwap, Eq::EndBassSwap, Eq::QuickBassCut, Eq::LongBassCut, Eq::ThreeBand] {
+            let lanes = eq_lanes(style, 8.0, 0.5);
+            let value = |side, t| {
+                lanes
+                    .iter()
+                    .find(|l| l.side == side && l.param == Param::Bass)
+                    .map_or(1.0, |l| l.value(t).unwrap())
+            };
+            for step in 0..=80 {
+                let t = step as f64 / 10.0;
+                let (out, inn) = (value(Side::Out, t), value(Side::In, t));
+                assert!(out + inn <= 1.0 + 1e-5, "{style:?} at {t}: {out} + {inn}");
+            }
         }
+    }
+
+    #[test]
+    fn every_volume_style_starts_on_the_old_song_and_ends_on_the_new() {
+        for (style, name) in VOLUME_CHOICES {
+            let [out, inn] = volume_lanes(style, 8.0);
+            assert_eq!(out.value(0.0), Some(1.0), "{name}");
+            assert!(out.value(8.0).unwrap() < 1e-6, "{name}");
+            assert!((inn.value(8.0).unwrap() - 1.0).abs() < 1e-6, "{name}");
+        }
+    }
+
+    #[test]
+    fn effects_ring_on_after_the_old_song() {
+        let mut lanes = Vec::new();
+        let effect = effect_lanes(Fx::Echo(Fraction::ThreeQuarters, Ending::Cut), 8.0, 0.5, &mut lanes);
+        assert_eq!(effect.map(|e| e.kind), Some(EffectKind::Echo(0.375)));
+        let wet = lanes.iter().find(|l| l.param == Param::Wet).unwrap();
+        assert_eq!(wet.value(10.0), Some(1.0));
+        let send = lanes.iter().find(|l| l.param == Param::Send).unwrap();
+        assert_eq!(send.value(0.0), Some(0.0));
+        assert_eq!(send.value(8.0), Some(1.0));
+    }
+
+    #[test]
+    fn a_loop_is_whole_beats_of_the_old_song() {
+        let (out, inn) = (steady(120.0, 0.0, 200.0), steady(120.0, 0.0, 200.0));
+        let mut s = Settings::preset(Preset::Blend);
+        s.looping = Looping::Beats(4);
+        let plan = plan(s, Some(&out), 200.0, Some(&inn), 8.0);
+        assert!((plan.out_loop.unwrap() - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn key_lock_holds_only_when_the_speed_changes() {
+        let out = steady(128.0, 0.0, 200.0);
+        let mut s = Settings::preset(Preset::Blend);
+        s.key_lock = true;
+        assert!(plan(s, Some(&out), 200.0, Some(&steady(124.0, 0.0, 200.0)), 8.0).key_lock);
+        assert!(!plan(s, Some(&out), 200.0, Some(&steady(128.0, 0.0, 200.0)), 8.0).key_lock);
+        s.key_lock = false;
+        assert!(!plan(s, Some(&out), 200.0, Some(&steady(124.0, 0.0, 200.0)), 8.0).key_lock);
     }
 
     #[test]
@@ -484,14 +970,18 @@ mod tests {
         let blend = Settings::preset(Preset::Blend);
         let auto = plan(blend, Some(&out), 200.0, Some(&inn), 8.0);
         // A little over two beats earlier snaps to two.
-        let step = drag_step(Some(&out), 200.0, Some(&inn), 8.0, false);
+        let step = drag_step(&blend, Some(&out), 200.0, Some(&inn), 8.0, false);
         assert!((step - beat).abs() < 1e-6);
         let mut moved = blend;
         moved.out_shift = snap(-2.2 * beat, step);
-        moved.in_shift = snap(0.9 * beat, drag_step(Some(&out), 200.0, Some(&inn), 8.0, true));
+        moved.in_shift = snap(0.9 * beat, drag_step(&blend, Some(&out), 200.0, Some(&inn), 8.0, true));
         let shifted = plan(moved, Some(&out), 200.0, Some(&inn), 8.0);
         assert!((shifted.out_at.unwrap() - (auto.out_at.unwrap() - 2.0 * beat)).abs() < 1e-6);
         assert!((shifted.in_from - (auto.in_from + beat)).abs() < 1e-6);
+        // Off the beat by a little, it lands back on one.
+        moved.out_shift = -2.0 * beat + 0.05;
+        let near = plan(moved, Some(&out), 200.0, Some(&inn), 8.0);
+        assert!((near.out_at.unwrap() - (auto.out_at.unwrap() - 2.0 * beat)).abs() < 1e-6);
         // The new song cannot start before its top, and stays on a beat.
         moved.in_shift = -5.0 * beat;
         let early = plan(moved, Some(&out), 200.0, Some(&inn), 8.0);
@@ -499,7 +989,7 @@ mod tests {
         let beats = (early.in_from - 1.1) / beat;
         assert!((beats - beats.round()).abs() < 1e-5);
         // Not beat matched: nothing to snap to, and it moves by the second.
-        assert_eq!(drag_step(None, 200.0, None, 8.0, false), 0.0);
+        assert_eq!(drag_step(&blend, None, 200.0, None, 8.0, false), 0.0);
         let mut plain = Settings::preset(Preset::Fade);
         plain.beatmatch = false;
         plain.out_shift = -10.25;
@@ -512,9 +1002,16 @@ mod tests {
         let mut s = Settings::preset(Preset::Rise);
         s.preset = Preset::Custom;
         s.beatmatch = false;
+        s.key_lock = true;
+        s.effect = Fx::Echo(Fraction::One, Ending::Out);
+        s.looping = Looping::Beats(8);
+        s.eq = Eq::ThreeBand;
         s.out_shift = -3.75;
         s.in_shift = 1.875;
         assert_eq!(Settings::from_json(&s.to_json()), Some(s));
         assert_eq!(Settings::from_json("{}"), None);
+        // Saved by an older version, by place in the menus.
+        let old = r#"{"preset":"rise","volume":1,"eq":1,"filter":1,"beatmatch":true}"#;
+        assert_eq!(Settings::from_json(old), Some(Settings::preset(Preset::Rise)));
     }
 }
