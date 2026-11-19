@@ -237,6 +237,9 @@ impl App {
                         text: l.text.clone(),
                         background: l.background_text.clone(),
                         translation: l.translation.clone(),
+                        syllables: l.syllables.clone(),
+                        background_syllables: l.background.clone(),
+                        align: l.align,
                     })
                     .collect();
                 session.lyrics(&id, &lines);

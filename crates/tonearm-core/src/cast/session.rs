@@ -16,6 +16,7 @@
 use super::channel::{Channel, Message, CONNECTION, HEARTBEAT, MEDIA, PLATFORM, RECEIVER};
 use super::stream::{Pipe, Server};
 use super::Device;
+use crate::lyrics::Syllable;
 use serde_json::{json, Value};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -110,15 +111,29 @@ pub struct LyricLine {
     pub background: String,
     /// The translation on show under it, if any.
     pub translation: String,
+    /// The line's own timing of each syllable, when the lyrics have it.
+    /// A syllable that ends a word ends with a space.
+    pub syllables: Vec<Syllable>,
+    /// The same for the backing vocals.
+    pub background_syllables: Vec<Syllable>,
+    /// Where the singer's lines sit: 0 left, 1 right, 2 centred.
+    pub align: u8,
 }
 
 /// Cast messages stop at 64 KB. Lyrics larger than this lose their
-/// translations, then their backing vocals, then don't go at all.
+/// syllable timing, then their translations, then their backing vocals,
+/// then don't go at all.
 const LYRICS_MAX: usize = 56 * 1024;
+
+/// Syllables, small: `[start, end, text]` each.
+fn timed(syllables: &[Syllable]) -> Value {
+    Value::Array(syllables.iter().map(|s| json!([s.start, s.end, s.text])).collect())
+}
 
 /// The message that gives the receiver a song's lyrics.
 fn lyrics_message(id: &str, lines: &[LyricLine]) -> Option<Value> {
-    for (translations, backing) in [(true, true), (false, true), (false, false)] {
+    let none = || Value::Array(Vec::new());
+    for (syllables, translations, backing) in [(true, true, true), (false, true, true), (false, false, true), (false, false, false)] {
         let lines: Vec<Value> = lines
             .iter()
             .map(|l| {
@@ -126,7 +141,10 @@ fn lyrics_message(id: &str, lines: &[LyricLine]) -> Option<Value> {
                     "start": l.start,
                     "end": l.end,
                     "text": l.text,
+                    "align": l.align,
+                    "syllables": if syllables { timed(&l.syllables) } else { none() },
                     "background": if backing { l.background.as_str() } else { "" },
+                    "backgroundSyllables": if syllables && backing { timed(&l.background_syllables) } else { none() },
                     "translation": if translations { l.translation.as_str() } else { "" },
                 })
             })
@@ -663,6 +681,33 @@ mod tests {
         assert!(!ignores_its_volume(&device("Google TV Streamer", true)));
         assert!(ignores_its_volume(&device("LG webOS TV", true)));
         assert_eq!(gain_for(0.5), 0.25);
+    }
+
+    #[test]
+    fn lyrics_too_big_lose_their_syllables_first() {
+        let line = |syllables: usize| LyricLine {
+            start: 1000,
+            end: 4000,
+            text: "a line of lyrics about this long, give or take".into(),
+            translation: "una línea".into(),
+            syllables: (0..syllables)
+                .map(|n| Syllable {
+                    start: 1000 + n as u32 * 100,
+                    end: 1100 + n as u32 * 100,
+                    text: "syl ".into(),
+                })
+                .collect(),
+            align: 1,
+            ..LyricLine::default()
+        };
+        let small = lyrics_message("a", &vec![line(8); 40]).unwrap();
+        assert_eq!(small["lines"][0]["syllables"][1], json!([1100, 1200, "syl "]));
+        assert_eq!(small["lines"][0]["align"], 1);
+
+        let big = lyrics_message("a", &vec![line(60); 200]).unwrap();
+        assert!(big.to_string().len() <= LYRICS_MAX);
+        assert_eq!(big["lines"][0]["syllables"], json!([]));
+        assert_eq!(big["lines"][0]["translation"], "una línea");
     }
 
     #[test]
