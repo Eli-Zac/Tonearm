@@ -189,11 +189,8 @@ impl App {
     /// receiver to show. `seconds` is where the playhead shows, which
     /// follows what the device plays.
     pub(crate) fn cast_now_playing(&self, seconds: f32, duration: f32, playing: bool) {
-        if !cast::shows_songs() {
-            return;
-        }
         let casting = self.casting.borrow();
-        let Some(session) = &casting.session else {
+        let Some(session) = casting.session.as_ref().filter(|s| s.shows_songs()) else {
             return;
         };
         let player = self.player.borrow();

@@ -1,9 +1,10 @@
 //! One cast: opens the receiver app on the device, has it play our
 //! stream, and keeps the two in step until it ends.
 //!
-//! The receiver is Google's Default Media Receiver, unless the build names
-//! Tonearm's own (`TONEARM_CAST_APP`, the page in `receiver/`). Ours is
-//! also told the song playing, so the screen can show it.
+//! Devices with a screen get Tonearm's own receiver (the page in
+//! `receiver/`) when the build has its id in `TONEARM_CAST_APP`, and are
+//! told the song playing so the screen can show it. Everything else, and
+//! any device that won't open ours, gets Google's Default Media Receiver.
 //!
 //! Pause and play follow the engine, through the pipe. Volume goes to the
 //! device. When someone pauses or changes the volume on the device itself
@@ -14,15 +15,16 @@ use super::stream::{Pipe, Server};
 use super::Device;
 use serde_json::{json, Value};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Google's Default Media Receiver. It needs no registration.
 const DEFAULT_APP: &str = "CC1AD845";
-/// The receiver app to open: Tonearm's own when the build has its id.
-const APP: &str = match option_env!("TONEARM_CAST_APP") {
-    Some(id) if !id.is_empty() => id,
-    _ => DEFAULT_APP,
+/// Tonearm's own receiver, when the build has its id.
+const TONEARM_APP: Option<&str> = match option_env!("TONEARM_CAST_APP") {
+    Some(id) if !id.is_empty() => Some(id),
+    _ => None,
 };
 /// Where Tonearm's receiver hears about the song playing.
 const TONEARM: &str = "urn:x-cast:app.tonearm";
@@ -68,10 +70,13 @@ pub struct NowPlaying {
     pub paused: bool,
 }
 
-/// Whether the device is told the song playing: only Tonearm's own
-/// receiver has a use for it.
-pub fn shows_songs() -> bool {
-    APP != DEFAULT_APP
+/// The receiver to open on a device: ours where there is a screen to
+/// show the song on. A speaker gains nothing from it.
+fn app_for(device: &Device) -> &'static str {
+    match TONEARM_APP {
+        Some(app) if device.screen && !device.group => app,
+        _ => DEFAULT_APP,
+    }
 }
 
 enum Command {
@@ -86,6 +91,8 @@ pub struct Session {
     /// Closes when the cast thread is done.
     done: Receiver<()>,
     pub device: Device,
+    /// Set once Tonearm's own receiver is up, which shows the song.
+    shows_songs: Arc<AtomicBool>,
 }
 
 impl Session {
@@ -101,11 +108,15 @@ impl Session {
         let (tx, rx) = mpsc::channel();
         let (finished, done) = mpsc::channel::<()>();
         let target = device.clone();
+        let shows_songs = Arc::new(AtomicBool::new(false));
+        let shows = shows_songs.clone();
         std::thread::Builder::new()
             .name("cast".into())
             .spawn(move || {
                 let _finished = finished;
                 let mut cast = Cast {
+                    app: app_for(&target),
+                    shows_songs: shows,
                     device: target,
                     pipe: pipe.clone(),
                     events: Box::new(events),
@@ -116,17 +127,27 @@ impl Session {
                 (cast.events)(Event::Ended(result.err()));
             })
             .expect("cannot start the cast thread");
-        Session { tx, done, device }
+        Session {
+            tx,
+            done,
+            device,
+            shows_songs,
+        }
     }
 
     pub fn volume(&self, level: f32) {
         let _ = self.tx.send(Command::Volume(level));
     }
 
+    /// Whether the device shows the song playing, so wants `now_playing`.
+    pub fn shows_songs(&self) -> bool {
+        self.shows_songs.load(Ordering::Relaxed)
+    }
+
     /// The song playing now. Cheap, so call it as often as the playhead
     /// moves: the device is told only of changes.
     pub fn now_playing(&self, now: NowPlaying) {
-        if shows_songs() {
+        if self.shows_songs() {
             let _ = self.tx.send(Command::Now(now));
         }
     }
@@ -146,6 +167,9 @@ impl Drop for Session {
 }
 
 struct Cast {
+    /// The receiver app opened on the device.
+    app: &'static str,
+    shows_songs: Arc<AtomicBool>,
     device: Device,
     pipe: Arc<Pipe>,
     events: Box<dyn Fn(Event) + Send>,
@@ -164,7 +188,7 @@ impl Cast {
         let server = Server::start(channel.local_ip, self.pipe.clone())?;
         channel.send(PLATFORM, CONNECTION, &json!({"type": "CONNECT"}))?;
         let launch = self.next_request();
-        channel.send(PLATFORM, RECEIVER, &json!({"type": "LAUNCH", "appId": APP, "requestId": launch}))?;
+        channel.send(PLATFORM, RECEIVER, &json!({"type": "LAUNCH", "appId": self.app, "requestId": launch}))?;
 
         // Wait for the receiver app to come up and say where to reach it.
         let started = Instant::now();
@@ -188,9 +212,17 @@ impl Cast {
                         }
                         volume = Some(level as f32);
                     }
-                    if let Some(app) = our_app(p) {
+                    if let Some(app) = our_app(p, self.app) {
                         break app;
                     }
+                }
+                // A device that won't open ours, such as one not yet allowed
+                // to while it is unpublished, gets Google's instead.
+                Some("LAUNCH_ERROR") if self.app != DEFAULT_APP => {
+                    eprintln!("cast: {name} wouldn't open {} ({}), using the default receiver", self.app, p["reason"]);
+                    self.app = DEFAULT_APP;
+                    let launch = self.next_request();
+                    channel.send(PLATFORM, RECEIVER, &json!({"type": "LAUNCH", "appId": self.app, "requestId": launch}))?;
                 }
                 Some("LAUNCH_ERROR") => {
                     return Err(format!("{name} couldn't start the player ({})", p["reason"].as_str().unwrap_or("no reason")))
@@ -199,6 +231,7 @@ impl Cast {
             }
         };
         channel.send(&transport, CONNECTION, &json!({"type": "CONNECT"}))?;
+        self.shows_songs.store(self.app != DEFAULT_APP, Ordering::Relaxed);
         let load = self.next_request();
         channel.send(
             &transport,
@@ -304,7 +337,7 @@ impl Cast {
                     return Err(format!("{name} stopped playing"));
                 }
                 (RECEIVER, Some("RECEIVER_STATUS")) => {
-                    if our_app(p).is_none_or(|(_, s)| s != session) {
+                    if our_app(p, self.app).is_none_or(|(_, s)| s != session) {
                         return Err(format!("{name} is playing something else now"));
                     }
                     if let Some(level) = p["status"]["volume"]["level"].as_f64() {
@@ -427,11 +460,11 @@ impl Screen {
 }
 
 /// Our receiver app's transport id and session id, from a receiver status.
-fn our_app(payload: &Value) -> Option<(String, String)> {
+fn our_app(payload: &Value, app: &str) -> Option<(String, String)> {
     payload["status"]["applications"]
         .as_array()?
         .iter()
-        .find(|a| a["appId"] == APP)
+        .find(|a| a["appId"] == app)
         .and_then(|a| Some((a["transportId"].as_str()?.to_string(), a["sessionId"].as_str()?.to_string())))
 }
 
