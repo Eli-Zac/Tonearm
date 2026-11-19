@@ -51,6 +51,10 @@ pub enum Event {
     Volume(f32),
     /// Paused or played on the device itself.
     Paused(bool),
+    /// Skip forward or back a song, asked for on the device or a phone
+    /// following the cast. Only Tonearm's own receiver passes these on.
+    Next,
+    Previous,
     /// The cast is over. With a reason when it did not end at our asking.
     Ended(Option<String>),
 }
@@ -271,7 +275,11 @@ impl Cast {
         let mut pinged = Instant::now();
         let mut asked = Instant::now();
         let loaded = Instant::now();
-        let mut screen = Screen::default();
+        // Until the device plays, the song isn't moving there.
+        let mut screen = Screen {
+            held: true,
+            ..Screen::default()
+        };
         loop {
             if !self.pipe.reached() && loaded.elapsed() > UNREACHED {
                 return Err(format!(
@@ -378,6 +386,7 @@ impl Cast {
                     match state {
                         "PLAYING" if !playing => {
                             playing = true;
+                            screen.held = false;
                             (self.events)(Event::Playing);
                         }
                         // Idle with no reason before it plays is the player
@@ -407,6 +416,8 @@ impl Cast {
                         }
                     }
                 }
+                (TONEARM, Some("NEXT")) => (self.events)(Event::Next),
+                (TONEARM, Some("PREVIOUS")) => (self.events)(Event::Previous),
                 (MEDIA, Some("LOAD_FAILED" | "LOAD_CANCELLED" | "INVALID_REQUEST")) => {
                     return Err(format!("{name} couldn't play the stream ({})", p["type"].as_str().unwrap_or("")));
                 }
@@ -433,12 +444,15 @@ struct Screen {
     next: Option<(NowPlaying, Instant)>,
     /// A change to the song shown, to send now.
     change: Option<NowPlaying>,
+    /// Shown as paused whatever the app says: the device hasn't started.
+    held: bool,
 }
 
 impl Screen {
     /// `lead` is how far the device trails the engine. A new song waits
     /// that long, so the screen changes with the sound.
-    fn update(&mut self, now: NowPlaying, lead: Duration) {
+    fn update(&mut self, mut now: NowPlaying, lead: Duration) {
+        now.paused |= self.held;
         match (&mut self.next, &self.shown) {
             (Some((next, _)), _) if next.id == now.id => *next = now,
             (_, Some((shown, at))) if shown.id == now.id => {
@@ -748,5 +762,26 @@ mod tests {
             }
         }
         panic!("no answer from the device");
+    }
+
+    /// Prints a real device's receiver status: what it runs and how its
+    /// volume can be set. `cargo test -p tonearm-core device_status -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn device_status() {
+        let addr = std::env::var("TONEARM_CAST_TEST").expect("TONEARM_CAST_TEST=ip:port");
+        let device = Device {
+            id: "test".into(),
+            name: "test device".into(),
+            model: String::new(),
+            addr: addr.parse().expect("an ip:port"),
+            group: false,
+            screen: false,
+        };
+        let status = status(&device).unwrap();
+        println!("volume: {}", status["volume"]);
+        for app in status["applications"].as_array().into_iter().flatten() {
+            println!("app: {} {} {}", app["appId"], app["displayName"], app["statusText"]);
+        }
     }
 }

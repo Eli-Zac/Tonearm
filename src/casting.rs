@@ -135,6 +135,8 @@ impl App {
             cast::Event::Volume(level) => self.ui.set_volume(level.clamp(0.0, 1.0)),
             cast::Event::Paused(true) => self.audio.pause(),
             cast::Event::Paused(false) => self.audio.play(),
+            cast::Event::Next => self.next(),
+            cast::Event::Previous => self.previous(),
             cast::Event::Ended(reason) => {
                 let name = self.ui.get_cast_name().to_string();
                 let message = reason.unwrap_or_else(|| format!("{name} stopped playing"));
