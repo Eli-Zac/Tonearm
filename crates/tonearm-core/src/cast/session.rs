@@ -531,4 +531,214 @@ mod tests {
         screen.update(song("c", 0.0, false), Duration::ZERO);
         assert_eq!(screen.due().map(|n| n.id), Some("c".into()));
     }
+
+    /// Casts silence to a real device and checks that Tonearm's receiver
+    /// opened, heard the song and put it in the media status. Needs a
+    /// build with TONEARM_CAST_APP and TONEARM_CAST_TEST=ip:port, so it
+    /// is ignored by default:
+    /// `cargo test -p tonearm-core cast_to_a_real_device -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn cast_to_a_real_device() {
+        let addr = std::env::var("TONEARM_CAST_TEST").expect("TONEARM_CAST_TEST=ip:port");
+        let device = Device {
+            id: "test".into(),
+            name: "test device".into(),
+            model: String::new(),
+            addr: addr.parse().expect("an ip:port"),
+            group: false,
+            screen: true,
+        };
+        let pipe = Pipe::new();
+        pipe.set_rate(48_000);
+        let (tx, rx) = mpsc::channel();
+        let session = Session::start(device.clone(), pipe, "Tonearm".into(), "cast test".into(), move |event| {
+            let _ = tx.send(event);
+        });
+        let started = Instant::now();
+        loop {
+            match rx.recv_timeout(Duration::from_secs(40)).expect("no word from the device") {
+                Event::Playing => break,
+                Event::Ended(reason) => panic!("the cast ended: {reason:?}"),
+                other => println!("event {other:?}"),
+            }
+        }
+        println!("playing after {:?}", started.elapsed());
+        assert!(session.shows_songs(), "the device fell back to the default receiver");
+
+        let title = "Tonearm receiver test";
+        for position in [0.0f32, 1.0, 2.0] {
+            session.now_playing(NowPlaying {
+                id: "test".into(),
+                title: title.into(),
+                artist: "Claude".into(),
+                album: "Cast check".into(),
+                cover: "https://picsum.photos/seed/tonearm/720/720".into(),
+                duration: 200.0,
+                position,
+                paused: false,
+            });
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        std::thread::sleep(Duration::from_secs(3));
+
+        // A second connection, as the Google Home app would see it.
+        let mut channel = Channel::connect(device.addr).unwrap();
+        channel.send(PLATFORM, CONNECTION, &json!({"type": "CONNECT"})).unwrap();
+        channel.send(PLATFORM, RECEIVER, &json!({"type": "GET_STATUS", "requestId": 1})).unwrap();
+        let mut transport = None;
+        let mut shown = None;
+        let asked = Instant::now();
+        while asked.elapsed() < Duration::from_secs(10) && shown.is_none() {
+            let Some(message) = channel.poll().unwrap() else { continue };
+            let p = &message.payload;
+            match p["type"].as_str() {
+                Some("RECEIVER_STATUS") if transport.is_none() => {
+                    let (id, _) = our_app(p, APP_UNDER_TEST).expect("Tonearm's receiver is not running");
+                    println!("receiver running: {}", p["status"]["applications"][0]["displayName"]);
+                    channel.send(&id, CONNECTION, &json!({"type": "CONNECT"})).unwrap();
+                    channel.send(&id, MEDIA, &json!({"type": "GET_STATUS", "requestId": 2})).unwrap();
+                    transport = Some(id);
+                }
+                Some("MEDIA_STATUS") => {
+                    let meta = &p["status"][0]["media"]["metadata"];
+                    println!("media status metadata: {meta}");
+                    shown = meta["title"].as_str().map(str::to_string);
+                }
+                _ => {}
+            }
+        }
+        session.finish();
+        assert_eq!(shown.as_deref(), Some(title), "the receiver didn't announce the song");
+    }
+
+    const APP_UNDER_TEST: &str = match TONEARM_APP {
+        Some(app) => app,
+        None => DEFAULT_APP,
+    };
+
+    /// Plays a real song to a real device through the engine, the way the
+    /// app casts, and keeps the receiver told of it. For a look at the
+    /// receiver on a TV. `TONEARM_CAST_SONG` is what to search for and
+    /// `TONEARM_CAST_SECONDS` how long to play (default 120):
+    /// `cargo test -p tonearm-core cast_a_song_to_a_real_device -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn cast_a_song_to_a_real_device() {
+        use crate::audio::{Audio, Input, PLAYING};
+        use crate::innertube::model::Kind;
+        let addr = std::env::var("TONEARM_CAST_TEST").expect("TONEARM_CAST_TEST=ip:port");
+        let query = std::env::var("TONEARM_CAST_SONG").unwrap_or_else(|_| "Party with the Boys Don Toliver".into());
+        let seconds: u64 = std::env::var("TONEARM_CAST_SECONDS").ok().and_then(|s| s.parse().ok()).unwrap_or(120);
+
+        let client = crate::innertube::Client::new();
+        let page = client.search(&query).expect("search");
+        let item = page
+            .shelves
+            .iter()
+            .flat_map(|s| s.items.iter())
+            .find(|i| i.kind == Kind::Song && i.video_id.is_some())
+            .expect("no song found")
+            .clone();
+        let video_id = item.video_id.clone().unwrap();
+        println!("song: {} / {} ({video_id})", item.title, item.subtitle);
+        let input = match crate::offline::local_file(&video_id) {
+            Some(path) => Input::File(path),
+            None => {
+                let resolver = crate::resolver::default().expect("no resolver");
+                let stream = resolver.resolve(&video_id).expect("resolve");
+                Input::Http {
+                    url: stream.url,
+                    headers: stream.headers,
+                    cache_as: None,
+                }
+            }
+        };
+
+        let audio = Audio::new();
+        let status = audio.status.clone();
+        audio.load(input, 1);
+        let started = Instant::now();
+        while status.state.load(Ordering::SeqCst) != PLAYING {
+            assert!(started.elapsed() < Duration::from_secs(30), "the song never started");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let device = Device {
+            id: "test".into(),
+            name: "test device".into(),
+            model: String::new(),
+            addr: addr.parse().expect("an ip:port"),
+            group: false,
+            screen: true,
+        };
+        let pipe = Pipe::new();
+        let (tx, rx) = mpsc::channel();
+        let session = Session::start(device, pipe.clone(), "Tonearm".into(), "cast test".into(), move |event| {
+            let _ = tx.send(event);
+        });
+        audio.route(Some(pipe));
+
+        let artist = if item.artists.is_empty() {
+            item.subtitle.split(" • ").next().unwrap_or_default().to_string()
+        } else {
+            item.artists.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ")
+        };
+        let cover = crate::innertube::sized(&item.thumb, 720);
+        let cover = if cover.starts_with("//") { format!("https:{cover}") } else { cover };
+        let until = Instant::now() + Duration::from_secs(seconds);
+        while Instant::now() < until {
+            while let Ok(event) = rx.try_recv() {
+                println!("event {event:?}");
+                if let Event::Ended(reason) = event {
+                    panic!("the cast ended: {reason:?}");
+                }
+            }
+            let shown = status.position_ms.load(Ordering::SeqCst).saturating_sub(status.lag_ms.load(Ordering::SeqCst));
+            session.now_playing(NowPlaying {
+                id: video_id.clone(),
+                title: item.title.clone(),
+                artist: artist.clone(),
+                album: item.album.as_ref().map(|(n, _)| n.clone()).unwrap_or_default(),
+                cover: cover.clone(),
+                duration: status.duration_ms.load(Ordering::SeqCst) as f32 / 1000.0,
+                position: shown as f32 / 1000.0,
+                paused: status.state.load(Ordering::SeqCst) != PLAYING,
+            });
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        println!("shows songs: {}", session.shows_songs());
+        session.finish();
+    }
+
+    /// Asks a real device to open Tonearm's receiver and nothing else: no
+    /// fallback, no sound. Closes it again if it opens. For checking when a
+    /// newly published receiver has reached a device:
+    /// `cargo test -p tonearm-core receiver_opens_on_a_real_device -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn receiver_opens_on_a_real_device() {
+        let addr = std::env::var("TONEARM_CAST_TEST").expect("TONEARM_CAST_TEST=ip:port");
+        let app = TONEARM_APP.expect("a build with TONEARM_CAST_APP");
+        let mut channel = Channel::connect(addr.parse().expect("an ip:port")).unwrap();
+        channel.send(PLATFORM, CONNECTION, &json!({"type": "CONNECT"})).unwrap();
+        channel.send(PLATFORM, RECEIVER, &json!({"type": "LAUNCH", "appId": app, "requestId": 1})).unwrap();
+        let asked = Instant::now();
+        while asked.elapsed() < Duration::from_secs(20) {
+            let Some(message) = channel.poll().unwrap() else { continue };
+            let p = &message.payload;
+            match p["type"].as_str() {
+                Some("LAUNCH_ERROR") => panic!("the device won't open it: {}", p["reason"]),
+                Some("RECEIVER_STATUS") => {
+                    if let Some((_, session)) = our_app(p, app) {
+                        println!("opened: {}", p["status"]["applications"][0]["displayName"]);
+                        let _ = channel.send(PLATFORM, RECEIVER, &json!({"type": "STOP", "sessionId": session, "requestId": 2}));
+                        std::thread::sleep(Duration::from_millis(300));
+                        return;
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("no answer from the device");
+    }
 }
