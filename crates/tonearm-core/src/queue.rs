@@ -75,6 +75,27 @@ impl<T> Queue<T> {
         }
     }
 
+    /// Moves the song at `from` to `to`, the rest closing up behind it. The
+    /// song playing stays the one playing, wherever it ends up.
+    pub fn move_item(&mut self, from: usize, to: usize) {
+        let len = self.items.len();
+        if from >= len || to >= len || from == to {
+            return;
+        }
+        let item = self.items.remove(from);
+        self.items.insert(to, item);
+        let index = self.index;
+        self.index = if from == index {
+            to
+        } else if from < index && to >= index {
+            index - 1
+        } else if from > index && to <= index {
+            index + 1
+        } else {
+            index
+        };
+    }
+
     /// The next button.
     pub fn next(&self) -> Step {
         let next = self.index + 1;
@@ -142,6 +163,27 @@ mod tests {
         assert_eq!(queue(3, 0, Repeat::Off).ended(), Step::Play(1));
         assert_eq!(queue(3, 2, Repeat::Off).ended(), Step::Stop);
         assert_eq!(queue(3, 1, Repeat::One).ended(), Step::Restart);
+    }
+
+    #[test]
+    fn moving_keeps_the_song_playing() {
+        // Playing 2; 4 moves up before it.
+        let mut q = queue(5, 2, Repeat::Off);
+        q.move_item(4, 1);
+        assert_eq!(q.items(), &[0, 4, 1, 2, 3]);
+        assert_eq!(q.current(), Some(&2));
+        // 0 moves down past it.
+        q.move_item(0, 4);
+        assert_eq!(q.items(), &[4, 1, 2, 3, 0]);
+        assert_eq!(q.current(), Some(&2));
+        // The song playing itself moves.
+        q.move_item(2, 3);
+        assert_eq!(q.items(), &[4, 1, 3, 2, 0]);
+        assert_eq!(q.current(), Some(&2));
+        assert_eq!(q.index(), 3);
+        // Out of range is ignored.
+        q.move_item(9, 0);
+        assert_eq!(q.items().len(), 5);
     }
 
     #[test]

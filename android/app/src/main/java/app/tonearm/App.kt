@@ -56,8 +56,8 @@ fun App(core: Core, controller: MediaController?) {
     var tab by remember { mutableStateOf(Tab.Home) }
     val stacks = remember { Tab.entries.associateWith { mutableStateListOf<Route>() } }
     var nowPlayingOpen by remember { mutableStateOf(false) }
-    // Now Playing shows the lyrics in place of the cover, until turned off.
-    var showLyrics by rememberSaveable { mutableStateOf(false) }
+    // What Now Playing shows above the song: the cover, lyrics or queue.
+    var panel by rememberSaveable { mutableStateOf(Panel.Cover) }
     var toast by remember { mutableStateOf<String?>(null) }
     val now = rememberNowPlaying(controller)
     val playingId = now?.let { controller?.currentMediaItem?.mediaId }
@@ -142,8 +142,8 @@ fun App(core: Core, controller: MediaController?) {
             if (now != null && controller != null) {
                 NowPlayingScreen(
                     now, controller, core,
-                    showLyrics = showLyrics,
-                    onLyrics = { showLyrics = !showLyrics },
+                    panel = panel,
+                    onPanel = { panel = it },
                 ) { nowPlayingOpen = false }
             }
         }

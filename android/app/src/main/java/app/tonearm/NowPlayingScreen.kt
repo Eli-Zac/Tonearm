@@ -38,10 +38,12 @@ fun NowPlayingScreen(
     now: NowPlaying,
     controller: MediaController,
     core: Core,
-    showLyrics: Boolean,
-    onLyrics: () -> Unit,
+    panel: Panel,
+    onPanel: (Panel) -> Unit,
     onClose: () -> Unit,
 ) {
+    // A panel's button shows it, and pressed again goes back to the cover.
+    val toggle = { p: Panel -> onPanel(if (panel == p) Panel.Cover else p) }
     val cover = now.meta?.artworkUri?.toString()
     // Each song's lyrics are looked for as it comes on, so they are ready
     // when the button is pressed. The core keeps those found.
@@ -85,8 +87,11 @@ fun NowPlayingScreen(
                 Spacer(Modifier.weight(1f))
                 Spacer(Modifier.size(40.dp))
             }
-            if (showLyrics) {
+            if (panel == Panel.Lyrics) {
                 LyricsPane(lyrics, controller, time, Modifier.weight(1f).fillMaxWidth())
+                Spacer(Modifier.height(16.dp))
+            } else if (panel == Panel.Queue) {
+                QueuePane(core, Modifier.weight(1f).fillMaxWidth().padding(top = 8.dp))
                 Spacer(Modifier.height(16.dp))
             } else {
                 Spacer(Modifier.weight(1f))
@@ -102,7 +107,7 @@ fun NowPlayingScreen(
                 // the desktop. Tap them for the lyrics.
                 (lyrics as? LyricsState.Found)?.let { found ->
                     Spacer(Modifier.height(20.dp))
-                    LyricsPreview(found.lyrics, time, height = 60.dp, onOpen = onLyrics)
+                    LyricsPreview(found.lyrics, time, height = 60.dp, onOpen = { onPanel(Panel.Lyrics) })
                 }
                 Spacer(Modifier.weight(1f))
             }
@@ -117,26 +122,36 @@ fun NowPlayingScreen(
             Spacer(Modifier.height(22.dp))
             SeekBar(now, controller)
             Spacer(Modifier.height(18.dp))
-            Controls(now, controller) {
-                // Lit while shown; dim when the song has none.
-                Box(
-                    Modifier.size(48.dp).clip(CircleShape).clickable(onClick = onLyrics),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        Icons.lyrics,
-                        size = 22.sp,
-                        color = when {
-                            showLyrics -> Tonearm.accent
-                            lyrics == LyricsState.None -> Tonearm.faint
-                            else -> Tonearm.text
-                        },
-                    )
-                }
+            Controls(now, controller) { Spacer(Modifier.size(48.dp)) }
+            Spacer(Modifier.height(10.dp))
+            // The panels: lyrics on the left, the queue on the right. Lit
+            // while shown; lyrics dim when the song has none.
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                PanelButton(
+                    Icons.lyrics,
+                    when {
+                        panel == Panel.Lyrics -> Tonearm.accent
+                        lyrics == LyricsState.None -> Tonearm.faint
+                        else -> Tonearm.dim
+                    },
+                ) { toggle(Panel.Lyrics) }
+                Spacer(Modifier.weight(1f))
+                PanelButton(Icons.queue, if (panel == Panel.Queue) Tonearm.accent else Tonearm.dim) { toggle(Panel.Queue) }
             }
-            Spacer(Modifier.height(36.dp))
+            Spacer(Modifier.height(12.dp))
         }
     }
+}
+
+/** What Now Playing shows above the song's name. */
+enum class Panel { Cover, Lyrics, Queue }
+
+@Composable
+private fun PanelButton(glyph: String, color: Color, onClick: () -> Unit) {
+    Box(
+        Modifier.size(48.dp).clip(CircleShape).clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) { Icon(glyph, size = 22.sp, color = color) }
 }
 
 /** A thin bar to drag or tap, with the times under it. */

@@ -332,6 +332,13 @@ impl Tonearm {
         self.step(step)
     }
 
+    /// Moves the song at `from` in the queue to `to`, as a row dragged in
+    /// the queue view. The song playing carries on.
+    pub fn move_in_queue(&self, from: u32, to: u32) {
+        self.queue.lock().unwrap().move_item(from as usize, to as usize);
+        self.changed();
+    }
+
     pub fn queue(&self) -> Vec<Song> {
         self.queue.lock().unwrap().items().to_vec()
     }
