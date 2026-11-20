@@ -24,7 +24,6 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 /** CSS's ease-in-out, which the desktop's slide uses. */
 private val EaseInOut = CubicBezierEasing(0.42f, 0f, 0.58f, 1f)
@@ -56,15 +55,15 @@ fun Marquee(text: String, style: TextStyle, modifier: Modifier = Modifier) {
         LaunchedEffect(text, travel) {
             x.snapTo(0f)
             if (!long) return@LaunchedEffect
-            // A steady 32dp a second, however long the text; each turn is
-            // the slide plus a 2.5 s rest at the end it reaches.
-            val glide = (travel / density.density / 32f * 1000f).toLong().coerceAtLeast(1)
-            var toEnd = true
+            // A steady 32dp a second, however long the text. It sets off
+            // soon after the song starts, then rests 2.5 s at each end.
+            val glide = (travel / density.density / 32f * 1000f).toInt().coerceAtLeast(1)
+            delay(1500)
             while (true) {
-                delay(glide + 2500)
-                val target = if (toEnd) -travel else 0f
-                launch { x.animateTo(target, tween(glide.toInt(), easing = EaseInOut)) }
-                toEnd = !toEnd
+                x.animateTo(-travel, tween(glide, easing = EaseInOut))
+                delay(2500)
+                x.animateTo(0f, tween(glide, easing = EaseInOut))
+                delay(2500)
             }
         }
         Text(
