@@ -187,6 +187,22 @@ pub struct Tonearm {
     resume_at: Mutex<Option<(String, u64)>>,
     /// When the session was last saved.
     saved: Mutex<resume::Saved>,
+    /// The last mix into a song, for Now Playing's mix animation.
+    mixing: Mutex<Option<MixShown>>,
+}
+
+/// A mix into a song: under which generation, when it started, how long.
+pub(crate) struct MixShown {
+    pub generation: u64,
+    pub started: std::time::Instant,
+    pub length_ms: u64,
+}
+
+/// A mix under way, as `mix_shown` reports it.
+#[derive(uniffi::Record)]
+pub struct MixState {
+    pub length_ms: u64,
+    pub elapsed_ms: u64,
 }
 
 pub(crate) struct PreviewMix {
@@ -247,6 +263,7 @@ impl Tonearm {
             account: Mutex::new(None),
             resume_at: Mutex::new(None),
             saved: Mutex::new(resume::Saved::default()),
+            mixing: Mutex::new(None),
         });
         // Signed in as last time, as the desktop app starts.
         if let Some(cookie) = store::load("session") {
@@ -705,6 +722,24 @@ impl Tonearm {
         }
         self.seek_hold.set((seconds.max(0.0) * 1000.0) as u64);
         self.audio.seek(seconds);
+    }
+
+    /// The mix into the song playing, while it is still going: how long it
+    /// runs and how far in it is, both in milliseconds. Zero length when
+    /// the song didn't come in by a mix, or another has come on since.
+    pub fn mix_shown(&self) -> MixState {
+        let shown = self.mixing.lock().unwrap();
+        match shown.as_ref().filter(|m| m.generation == self.generation.load(Ordering::SeqCst)) {
+            Some(m) => {
+                let elapsed_ms = m.started.elapsed().as_millis() as u64;
+                if elapsed_ms >= m.length_ms {
+                    MixState { length_ms: 0, elapsed_ms: 0 }
+                } else {
+                    MixState { length_ms: m.length_ms, elapsed_ms }
+                }
+            }
+            None => MixState { length_ms: 0, elapsed_ms: 0 },
+        }
     }
 
     pub fn playback(&self) -> Playback {

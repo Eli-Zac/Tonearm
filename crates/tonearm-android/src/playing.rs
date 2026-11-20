@@ -150,8 +150,7 @@ impl Tonearm {
         let settings = transition::Settings::auto(None, None, false);
         let plan = transition::plan(settings, None, duration as f64, None, left.min(seconds) as f64);
         self.fade.lock().unwrap().take();
-        let generation = self.move_on(index);
-        self.audio.crossfade(token, generation, plan);
+        self.mix_into(token, index, plan);
     }
 
     /// Plays the saved or automatic transition for a mixed playlist.
@@ -239,8 +238,7 @@ impl Tonearm {
             }
             if ready && position <= at {
                 self.fade.lock().unwrap().take();
-                let generation = self.move_on(index);
-                self.audio.crossfade(token, generation, plan);
+                self.mix_into(token, index, plan);
                 return;
             }
         }
@@ -271,8 +269,7 @@ impl Tonearm {
             Some(unmatched),
         );
         self.fade.lock().unwrap().take();
-        let generation = self.move_on(index);
-        self.audio.crossfade(token, generation, plan);
+        self.mix_into(token, index, plan);
     }
 
     /// Opens the song at `index` in the engine, ready to fade in.
@@ -319,6 +316,16 @@ impl Tonearm {
         let Some(next) = next.filter(|n| n.token == token) else { return };
         let generation = self.move_on(next.index);
         self.audio.adopt(generation);
+    }
+
+    /// Moves on to the song at `index`, mixing into it with `plan`, and
+    /// notes when the mix started and how long it runs, for Now Playing's
+    /// mix animation.
+    fn mix_into(&self, token: u64, index: usize, plan: tonearm_core::mix::Transition) {
+        let generation = self.move_on(index);
+        let length_ms = (plan.length * 1000.0).max(0.0) as u64;
+        *self.mixing.lock().unwrap() = Some(crate::MixShown { generation, started: std::time::Instant::now(), length_ms });
+        self.audio.crossfade(token, generation, plan);
     }
 
     /// Moves the queue on to `index`, which the engine is starting, under a

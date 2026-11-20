@@ -5,6 +5,12 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -520,7 +526,7 @@ fun PageHeader(
             }
             play?.let {
                 Spacer(Modifier.width(8.dp))
-                RoundButton(Icons.play, accent = true, size = 56.dp, onClick = it)
+                PlayDisc(mixed = mixing == true, size = 56.dp, onClick = it)
             }
         }
         if (header.about.isNotEmpty() && header.banner) {
@@ -685,6 +691,76 @@ fun RoundButton(glyph: String, accent: Boolean = false, size: Dp = 52.dp, onClic
         contentAlignment = Alignment.Center,
     ) {
         Icon(glyph, size = (size.value * 0.42f).sp, filled = true, color = if (accent) Tonearm.text else Tonearm.bg)
+    }
+}
+
+/**
+ * The round play button at the top of a page, as the desktop's `PlayDisc`:
+ * usually a solid disc in the accent colour; in mix mode a brushed metal
+ * disc in a glowing accent ring, parted from it by a thin dark line and a
+ * silver rim. The two fade into each other as mix mode turns on or off.
+ */
+@Composable
+fun PlayDisc(mixed: Boolean, size: Dp = 56.dp, onClick: () -> Unit) {
+    val level by animateFloatAsState(if (mixed) 1f else 0f, tween(300, easing = FastOutSlowInEasing), label = "mix")
+    Box(Modifier.size(size), contentAlignment = Alignment.Center) {
+        if (level < 0.99f) {
+            Box(Modifier.graphicsLayer { alpha = 1f - level }) {
+                RoundButton(Icons.play, accent = true, size = size, onClick = onClick)
+            }
+        }
+        if (level > 0.01f) {
+            Box(
+                Modifier.size(size).graphicsLayer { alpha = level }
+                    .drawBehind {
+                        // The glow round the ring.
+                        drawCircle(
+                            Brush.radialGradient(
+                                0.6f to Tonearm.accent.copy(alpha = 0.6f),
+                                1f to Color.Transparent,
+                                center = center, radius = this.size.minDimension * 0.5f + 11.dp.toPx(),
+                            ),
+                            radius = this.size.minDimension * 0.5f + 11.dp.toPx(),
+                        )
+                    }
+                    .clip(CircleShape)
+                    .clickable(onClick = onClick)
+                    .drawBehind {
+                        val r = this.size.minDimension / 2
+                        drawCircle(Tonearm.accent, r)
+                        drawCircle(Color(0xFF141414), r - 3.dp.toPx())
+                        // Conic gradients start at the top, as the desktop's.
+                        rotate(-90f) {
+                            drawCircle(
+                                Brush.sweepGradient(
+                                    0f to Color(0xFF8E8E94), 45f / 360 to Color(0xFFC9C9CE),
+                                    90f / 360 to Color(0xFF6A6A70), 140f / 360 to Color(0xFFE6E6EA),
+                                    200f / 360 to Color(0xFF8A8A90), 270f / 360 to Color(0xFF5C5C62),
+                                    315f / 360 to Color(0xFFD8D8DC), 1f to Color(0xFF8E8E94),
+                                ),
+                                r - 4.dp.toPx(),
+                            )
+                            // Brushed metal: light bands on the diagonal,
+                            // dark across the middle.
+                            drawCircle(
+                                Brush.sweepGradient(
+                                    0f to Color(0xFF4A464C), 30f / 360 to Color(0xFF5E5A60),
+                                    80f / 360 to Color(0xFF2A272B), 95f / 360 to Color(0xFF1D1B1E),
+                                    125f / 360 to Color(0xFF6A666C), 140f / 360 to Color(0xFFA6A3A8),
+                                    170f / 360 to Color(0xFF5A565C), 220f / 360 to Color(0xFF3E3A40),
+                                    265f / 360 to Color(0xFF2A272B), 275f / 360 to Color(0xFF1D1B1E),
+                                    305f / 360 to Color(0xFF6A666C), 320f / 360 to Color(0xFFA6A3A8),
+                                    345f / 360 to Color(0xFF5A565C), 1f to Color(0xFF4A464C),
+                                ),
+                                r - 6.dp.toPx(),
+                            )
+                        }
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.play, size = (size.value * 0.46f).sp, filled = true, color = Color.White)
+            }
+        }
     }
 }
 

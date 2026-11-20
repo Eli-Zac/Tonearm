@@ -5007,11 +5007,11 @@ export component AppWindow inherits Window {
     // the next slides in from the right, both side by side through the mix,
     // then the old one is pushed off and the new one grows to fill again.
     property <bool> mix-anim: root.xfade-length >= 2s;
-    // Each move runs on a spring, as Apple's do: quick, a touch past the
-    // mark, then settled. The cover coming in trails the one going out a
-    // little, which makes the pair feel fluid rather than locked together.
-    // Unhurried, but shorter when the crossfade is, so both moves fit.
-    property <duration> mix-step: min(1400ms, (root.xfade-length - 2 * root.mix-lag) / 2.4);
+    // Each move eases in from rest and settles to rest, with no overshoot.
+    // The cover coming in trails the one going out a little, which makes
+    // the pair feel fluid rather than locked together. Unhurried, but
+    // shorter when the crossfade is, so both moves fit.
+    property <duration> mix-step: min(1800ms, (root.xfade-length - 2 * root.mix-lag) / 2.4);
     property <duration> mix-lag: 140ms;
     // The way out starts early enough that both have settled by the end.
     property <duration> mix-leave-at: root.xfade-length - root.mix-step - root.mix-lag;
@@ -5021,8 +5021,8 @@ export component AppWindow inherits Window {
     property <float> mix-in-l: root.mix-anim ? root.spring((root.xfade-elapsed - root.mix-leave-at - root.mix-lag) / root.mix-step) : 1;
     // For the canvas giving way, which wants no bounce.
     property <float> mix-enter: clamp(root.xfade-elapsed / 500ms, 0, 1);
-    // A soft spring from 0 to 1: one gentle swing about 4% past the mark,
-    // two thirds of the way through, easing back to land exactly at the end.
+    // An ease from 0 to 1 that starts from rest and lands at rest
+    // (smootherstep), so the mix's moves begin and end softly.
     pure function spring(x: float) -> float {
         if x <= 0 {
             return 0;
@@ -5030,7 +5030,7 @@ export component AppWindow inherits Window {
         if x >= 1 {
             return 1;
         }
-        return 1 - pow(2.718281828, -5 * x) * cos(270deg * x);
+        return x * x * x * (x * (x * 6 - 15) + 10);
     }
     // Canvases rest during the mix, showing the still covers, and the new
     // song's comes back once it is over.
@@ -7411,117 +7411,88 @@ export component AppWindow inherits Window {
                         image-fit: cover;
                         opacity: root.motion-t * (1 - root.mix-hide);
                     }
-                    // The mix animation: the two covers side by side.
+                    // The mix animation: the two covers side by side, as
+                    // Spotify's Now playing has it mid-mix, with light
+                    // sweeping beneath them like stage lights and light
+                    // running round their borders.
                     if root.mix-anim: mixbox := Rectangle {
                         background: root.panel-color;
                         // The small covers' size, the gap between them,
-                        // and where the pair sits: a little above the
-                        // middle, clear of the names at the bottom.
-                        property <length> c: min(self.width, self.height) * 0.42;
-                        property <length> g: 14px;
-                        property <length> cy: (self.height - self.c) * 0.4;
+                        // and where the pair sits: in the middle.
+                        property <length> c: min(self.width, self.height) * 0.45;
+                        property <length> g: min(self.width, self.height) * 0.05;
+                        property <length> cy: (self.height - self.c) / 2;
                         property <length> lx: self.width / 2 - self.c - self.g / 2;
                         property <length> rx: self.width / 2 + self.g / 2;
                         property <float> oe: root.mix-out-e;
                         property <float> ol: root.mix-out-l;
                         property <float> ie: root.mix-in-e;
                         property <float> il: root.mix-in-l;
-                        // The liquid hand-over, while the pair sits side by
-                        // side: light runs across the old cover, through a
-                        // glowing bridge, and on across the new one, over
-                        // and over, rippling out from where they meet.
+                        // How settled the pair is side by side: 0 while
+                        // they move apart or together, 1 in between.
                         property <float> hold: clamp(min(self.oe, self.ie), 0, 1) * (1 - clamp(max(self.ol, self.il), 0, 1));
-                        // One wave, 2.8 s long, timed so that it passes
-                        // through the bridge (0.6 of the way) just as the
-                        // songs change over, halfway through the mix, with
-                        // the ripple.
-                        property <float> w: (root.xfade-elapsed - root.xfade-length / 2) / 2800ms + 0.6;
-                        // Where the wave is: across the old cover first,
-                        // through the bridge, across the new one last.
-                        // Outside 0 to 1 there is no wave.
-                        property <float> f: self.w < 0 || self.w > 1 ? -1 : self.w;
-                        property <float> bump: max(0, 1 - abs(self.f - 0.6) / 0.16);
-                        property <float> bump-e: self.bump * self.bump * (3 - 2 * self.bump);
-                        property <length> mid-y: self.cy + self.c / 2;
-                        // One ring rippling out from the join, once, as the
-                        // songs change over: halfway through the mix.
-                        property <float> rp: (root.xfade-elapsed - root.xfade-length / 2) / 1800ms;
-                        if mixbox.hold > 0.01 && mixbox.rp > 0 && mixbox.rp < 1: Rectangle {
-                            property <length> size: mixbox.c * (0.3 + 1.5 * mixbox.rp);
-                            x: mixbox.width / 2 - self.size / 2;
-                            y: mixbox.mid-y - self.size / 2;
-                            width: self.size;
-                            height: self.size;
-                            border-radius: self.size / 2;
-                            border-width: 1.5px;
-                            border-color: #ffffff.with-alpha(0.45 * (1 - mixbox.rp) * (1 - mixbox.rp) * mixbox.hold);
-                        }
-                        // The bridge: a bead of light at each cover's facing
-                        // edge and a neck between them that swells as a
-                        // wave passes, like a drop pulled between two.
-                        if mixbox.hold > 0.01: Rectangle {
-                            opacity: mixbox.hold;
-                            property <length> blob: mixbox.c * (0.26 + 0.14 * mixbox.bump-e);
-                            property <length> neck: mixbox.c * (0.07 + 0.03 * sin(mixbox.w * 360deg * 1.5) + 0.16 * mixbox.bump-e);
-                            Rectangle {
-                                x: mixbox.lx + mixbox.c - parent.blob / 2;
-                                y: mixbox.mid-y - parent.blob / 2;
-                                width: parent.blob;
-                                height: parent.blob;
-                                border-radius: parent.blob / 2;
-                                background: @radial-gradient(circle, #ffffffa0 0%, #ffffff40 45%, #ffffff00 100%);
+                        // Seconds into the mix, for the light's motion.
+                        property <float> t: root.xfade-elapsed / 1s;
+                        // Where each cover is now, for the light round it.
+                        property <length> ox: self.lx * self.oe + (-self.c - 24px - self.lx) * self.ol;
+                        property <length> oy: self.cy * min(1, self.oe);
+                        property <length> ix: (self.width + 24px) + (self.rx - self.width - 24px) * self.ie - self.rx * self.il;
+                        // Rays of light falling from beneath the covers, as
+                        // stage lights: two from each, one leaning out and
+                        // one more upright, each sweeping slowly from side
+                        // to side at its own pace and shimmering. Two soft
+                        // layers each, the inner narrower, so edges blur.
+                        for ray in [
+                            { side: -1, r: 0, layer: 0 }, { side: -1, r: 0, layer: 1 },
+                            { side: -1, r: 1, layer: 0 }, { side: -1, r: 1, layer: 1 },
+                            { side: 1, r: 0, layer: 0 }, { side: 1, r: 0, layer: 1 },
+                            { side: 1, r: 1, layer: 0 }, { side: 1, r: 1, layer: 1 },
+                        ]: Path {
+                            property <length> x0: ray.side < 0 ? mixbox.lx : mixbox.rx;
+                            property <length> tc: self.x0 + mixbox.c * (0.5 + ray.side * (ray.r == 0 ? 0.2 : -0.18));
+                            property <length> th: mixbox.c * (0.16 - 0.06 * ray.layer);
+                            property <length> top: mixbox.cy + mixbox.c - 2px;
+                            property <length> len: mixbox.c * (1.9 - 0.2 * ray.layer);
+                            property <float> phase: ray.r * 0.37 + (ray.side > 0 ? 0.5 : 0);
+                            property <length> lean: ray.side * mixbox.c * (ray.r == 0 ? 0.55 : 0.05) + mixbox.c * 0.35 * sin((mixbox.t / (ray.r == 0 ? 4.2 : 5.6) + self.phase) * 360deg);
+                            property <length> bh: mixbox.c * (0.42 - 0.12 * ray.layer);
+                            x: 0;
+                            y: 0;
+                            width: mixbox.width;
+                            height: mixbox.height;
+                            viewbox-width: mixbox.width / 1px;
+                            viewbox-height: mixbox.height / 1px;
+                            clip: true;
+                            opacity: mixbox.hold * (0.75 + 0.25 * sin((mixbox.t * 0.9 + ray.r * 0.4 + ray.side * 0.2) * 360deg));
+                            fill: @linear-gradient(180deg, #ffffff1a 0%, #ffffff0a 40%, #ffffff00 100%);
+                            MoveTo {
+                                x: (parent.tc - parent.th) / 1px;
+                                y: parent.top / 1px;
                             }
-                            Rectangle {
-                                x: mixbox.rx - parent.blob / 2;
-                                y: mixbox.mid-y - parent.blob / 2;
-                                width: parent.blob;
-                                height: parent.blob;
-                                border-radius: parent.blob / 2;
-                                background: @radial-gradient(circle, #ffffffa0 0%, #ffffff40 45%, #ffffff00 100%);
+                            LineTo {
+                                x: (parent.tc + parent.th) / 1px;
+                                y: parent.top / 1px;
                             }
-                            // A soft beam across the gap, fading at top and
-                            // bottom, so it reads as light, not a part.
-                            Rectangle {
-                                x: mixbox.lx + mixbox.c;
-                                y: mixbox.mid-y - parent.neck * 1.5;
-                                width: mixbox.g;
-                                height: parent.neck * 3;
-                                background: @linear-gradient(180deg, #ffffff00 0%, #ffffff.with-alpha(0.18 + 0.4 * mixbox.bump-e) 50%, #ffffff00 100%);
+                            LineTo {
+                                x: (parent.tc + parent.lean + parent.bh) / 1px;
+                                y: (parent.top + parent.len) / 1px;
                             }
-                            // Its bright thread, which thickens as a wave
-                            // goes through.
-                            Rectangle {
-                                x: mixbox.lx + mixbox.c;
-                                y: mixbox.mid-y - self.height / 2;
-                                width: mixbox.g;
-                                height: 1px + 3px * mixbox.bump-e;
-                                border-radius: self.height / 2;
-                                background: #ffffff.with-alpha(0.35 + 0.6 * mixbox.bump-e);
+                            LineTo {
+                                x: (parent.tc + parent.lean - parent.bh) / 1px;
+                                y: (parent.top + parent.len) / 1px;
                             }
-                            // A drop of light pulled across with each wave.
-                            if mixbox.f > 0.47 && mixbox.f < 0.73: Rectangle {
-                                property <float> u: (mixbox.f - 0.47) / 0.26;
-                                property <float> ue: self.u * self.u * (3 - 2 * self.u);
-                                // Stretched while it moves, round at rest.
-                                property <length> long: 7px + 9px * sin(self.u * 180deg);
-                                x: mixbox.lx + mixbox.c - 4px + (mixbox.g + 8px) * self.ue - self.long / 2;
-                                y: mixbox.mid-y - 3.5px;
-                                width: self.long;
-                                height: 7px;
-                                border-radius: 3.5px;
-                                background: #ffffff;
-                                opacity: sin(self.u * 180deg);
-                            }
+                            Close { }
                         }
                         // Going out: full size to the left slot, then off.
                         Rectangle {
-                            drop-shadow-blur: 22px + 18px * mixbox.bump-e;
-                            drop-shadow-color: #ffffff.with-alpha(mixbox.hold * (0.10 + 0.22 * mixbox.bump-e));
+                            drop-shadow-blur: 26px * mixbox.hold;
+                            drop-shadow-offset-y: 8px * mixbox.hold;
+                            drop-shadow-color: #000000.with-alpha(0.35 * mixbox.hold);
                             x: parent.lx * parent.oe + (-parent.c - 24px - parent.lx) * parent.ol;
                             y: parent.cy * min(1, parent.oe);
                             width: parent.width + (parent.c - parent.width) * parent.oe;
                             height: parent.height + (parent.c - parent.height) * parent.oe;
-                            border-radius: 10px * min(1, parent.oe);
+                            border-radius: 8px * min(1, parent.oe);
                             clip: true;
                             opacity: 1 - clamp(parent.ol, 0, 1);
                             if root.fade-has-art: Image {
@@ -7538,24 +7509,11 @@ export component AppWindow inherits Window {
                                 image-fit: cover;
                                 opacity: 1 - root.mix-enter;
                             }
-                            // Dims as the song hands over.
+                            // A thin rim of light.
                             Rectangle {
-                                background: #000000.with-alpha(0.35 * root.xfade * mixbox.hold);
-                            }
-                            // The wave crossing it, towards the new one.
-                            if mixbox.hold > 0.01 && mixbox.f >= 0 && mixbox.f < 0.55: Rectangle {
-                                property <float> s: clamp(mixbox.f / 0.55, 0, 1);
-                                width: parent.width * 0.7;
-                                x: -self.width + (parent.width + self.width) * self.s;
-                                opacity: mixbox.hold;
-                                background: @linear-gradient(90deg, #ffffff00 0%, #ffffff48 70%, #ffffff00 100%);
-                            }
-                            // Light gathering at the edge it hands over by.
-                            Rectangle {
-                                property <float> a: 0.45 * mixbox.hold * (0.25 + 0.75 * mixbox.bump-e);
-                                x: parent.width * 0.65;
-                                width: parent.width * 0.35;
-                                background: @linear-gradient(90deg, #ffffff.with-alpha(0) 0%, #ffffff.with-alpha(self.a) 100%);
+                                border-radius: parent.border-radius;
+                                border-width: 1px;
+                                border-color: #ffffff.with-alpha(0.14 * mixbox.hold);
                             }
                         }
                         // Coming in: from the right to the right slot, then
@@ -7567,35 +7525,49 @@ export component AppWindow inherits Window {
                             // of the cover's place.
                             width: parent.c + (parent.width - parent.c) * min(1, parent.il);
                             height: parent.c + (parent.height - parent.c) * min(1, parent.il);
-                            border-radius: 10px * (1 - min(1, parent.il));
+                            border-radius: 8px * (1 - min(1, parent.il));
                             clip: true;
-                            drop-shadow-blur: 22px + 18px * mixbox.bump-e;
-                            drop-shadow-color: #ffffff.with-alpha(mixbox.hold * (0.10 + 0.22 * mixbox.bump-e));
+                            drop-shadow-blur: 26px * mixbox.hold;
+                            drop-shadow-offset-y: 8px * mixbox.hold;
+                            drop-shadow-color: #000000.with-alpha(0.35 * mixbox.hold);
                             if root.track-has-art: Image {
                                 width: 100%;
                                 height: 100%;
                                 source: root.track-art;
                                 image-fit: cover;
                             }
-                            // Brightens as it takes over.
                             Rectangle {
-                                background: #000000.with-alpha(0.35 * (1 - root.xfade) * mixbox.hold);
+                                border-radius: parent.border-radius;
+                                border-width: 1px;
+                                border-color: #ffffff.with-alpha(0.14 * mixbox.hold);
                             }
-                            // The wave arriving from the bridge.
-                            if mixbox.hold > 0.01 && mixbox.f > 0.62: Rectangle {
-                                property <float> s: clamp((mixbox.f - 0.62) / 0.38, 0, 1);
-                                width: parent.width * 0.7;
-                                x: -self.width + (parent.width + self.width) * self.s;
-                                opacity: mixbox.hold;
-                                background: @linear-gradient(90deg, #ffffff00 0%, #ffffff48 30%, #ffffff00 100%);
-                            }
-                            // Light spilling in at the edge it meets the
-                            // other by, brightest as a wave crosses.
-                            Rectangle {
-                                property <float> a: 0.45 * mixbox.hold * (0.25 + 0.75 * mixbox.bump-e);
-                                x: 0;
-                                width: parent.width * 0.35;
-                                background: @linear-gradient(90deg, #ffffff.with-alpha(self.a) 0%, #ffffff.with-alpha(0) 100%);
+                        }
+                        // Light running round each cover's border, a lap
+                        // every 2.6 s, half a lap apart: a bright head with
+                        // a glow and a tail of light fading behind it.
+                        if mixbox.hold > 0.01: Rectangle {
+                            opacity: mixbox.hold;
+                            for i in 80: Rectangle {
+                                property <int> k: i >= 40 ? 1 : 0;
+                                property <int> j: mod(i, 40);
+                                property <float> fade: 1 - self.j / 40;
+                                property <length> x0: self.k == 0 ? mixbox.ox : mixbox.ix;
+                                property <length> y0: self.k == 0 ? mixbox.oy : mixbox.cy;
+                                property <float> u: mod(mixbox.t / 2.6 + self.k * 0.5 - self.j * 0.003 + 10, 1.0);
+                                property <float> d: self.u * 4;
+                                property <float> s: floor(self.d);
+                                property <float> f: self.d - self.s;
+                                property <length> px: self.s == 0 ? self.x0 + mixbox.c * self.f : self.s == 1 ? self.x0 + mixbox.c : self.s == 2 ? self.x0 + mixbox.c * (1 - self.f) : self.x0;
+                                property <length> py: self.s == 0 ? self.y0 : self.s == 1 ? self.y0 + mixbox.c * self.f : self.s == 2 ? self.y0 + mixbox.c : self.y0 + mixbox.c * (1 - self.f);
+                                property <length> size: self.j == 0 ? mixbox.c * 0.16 : 1.5px + 2.5px * self.fade;
+                                width: self.size;
+                                height: self.size;
+                                x: self.px - self.size / 2;
+                                y: self.py - self.size / 2;
+                                border-radius: self.size / 2;
+                                background: self.j == 0
+                                    ? @radial-gradient(circle, #ffffffd0 0%, #ffffff40 30%, #ffffff00 70%)
+                                    : #ffffff.with-alpha(0.9 * self.fade * self.fade);
                             }
                         }
                     }

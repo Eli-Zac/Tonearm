@@ -6,7 +6,21 @@ import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.drawscope.Stroke
+import kotlin.math.PI
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.sin
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -83,6 +97,11 @@ fun CoverCarousel(
     // A swipe's direction, waiting for its song to come on.
     var pending by remember { mutableIntStateOf(0) }
     var giveUp by remember { mutableStateOf<Job?>(null) }
+    // A mix under way: the song going out, how long the mix runs and how
+    // far in it is, in milliseconds. Elapsed is read only while drawing.
+    var mixFrom by remember { mutableStateOf<CoverSong?>(null) }
+    var mixLength by remember { mutableFloatStateOf(0f) }
+    var mixElapsed by remember { mutableFloatStateOf(0f) }
 
     // A new song: the old cover goes, the new one comes in a span beyond
     // it, from wherever the old one was.
@@ -100,6 +119,32 @@ fun CoverCarousel(
         }
         pending = 0
         giveUp?.cancel()
+        // Moved on by a mix long enough to show it: the pair animation, as
+        // the desktop's, instead of the slide.
+        val mix = if (old == null || swiped || width == 0) null
+        else withContext(Dispatchers.IO) { runCatching { core.mixShown() }.getOrNull() }
+            ?.takeIf { it.lengthMs >= 2000uL }
+        if (mix != null && old != null) {
+            slide?.cancel()
+            x = 0f
+            current = song
+            currentIndex = now
+            before = null
+            after = null
+            mixFrom = old
+            mixLength = mix.lengthMs.toFloat()
+            try {
+                val start = withFrameMillis { it } - mix.elapsedMs.toLong()
+                while (mixFrom != null) {
+                    val t = (withFrameMillis { it } - start).toFloat()
+                    mixElapsed = t
+                    if (t >= mixLength) break
+                }
+            } finally {
+                mixFrom = null
+            }
+            return@LaunchedEffect
+        }
         leaving = old
         leavingDir = dir
         current = song
@@ -163,9 +208,11 @@ fun CoverCarousel(
                 detectHorizontalDragGestures(
                     onDragStart = {
                         velocity.resetTracking()
-                        // A drag during a slide takes over from it.
+                        // A drag during a slide takes over from it, and
+                        // ends a mix's animation.
                         slide?.cancel()
                         leaving = null
+                        mixFrom = null
                     },
                     onDragEnd = {
                         val fling = velocity.calculateVelocity().x
@@ -209,6 +256,11 @@ fun CoverCarousel(
                 }
             },
     ) {
+        val from = mixFrom
+        if (from != null && live != null) {
+            MixPair(from, live, core, { mixElapsed }, mixLength, Modifier.matchParentSize())
+            return@Box
+        }
         // The covers on show, each where it sits; one per song.
         val shown = buildList {
             live?.let { add(Triple(it, 0, true)) }
@@ -221,6 +273,186 @@ fun CoverCarousel(
                 CoverFace(
                     s, core, moving,
                     Modifier.matchParentSize().graphicsLayer { translationX = x + place * span },
+                )
+            }
+        }
+    }
+}
+
+/** An ease from 0 to 1, as the desktop's: it starts from rest and settles
+ *  to rest, with no overshoot (smootherstep). */
+private fun spring01(x: Float): Float = when {
+    x <= 0f -> 0f
+    x >= 1f -> 1f
+    else -> x * x * x * (x * (x * 6f - 15f) + 10f)
+}
+
+/**
+ * The mix animation, as the desktop's and Spotify's mid-mix Now Playing:
+ * the cover going out shrinks to the left while the new one comes in from
+ * the right, the two side by side through the mix with rays of light
+ * sweeping beneath them and light running round their borders, then the old one is
+ * pushed off and the new one grows to fill again. `elapsed` is read only
+ * while drawing, so the animation never recomposes.
+ */
+@Composable
+private fun MixPair(
+    from: CoverSong,
+    to: CoverSong,
+    core: Core,
+    elapsed: () -> Float,
+    length: Float,
+    modifier: Modifier,
+) {
+    val lag = 140f
+    val step = minOf(1800f, (length - 2 * lag) / 2.4f)
+    val leaveAt = length - step - lag
+    val pad = with(LocalDensity.current) { 12.dp.toPx() }
+    // Where everything is at `t`, for a box `w` by `h`.
+    class Frame(t: Float, w: Float, h: Float) {
+        val oe = spring01(t / step)
+        val ie = spring01((t - lag) / step)
+        val ol = spring01((t - leaveAt) / step)
+        val il = spring01((t - leaveAt - lag) / step)
+        val hold = min(oe, ie).coerceIn(0f, 1f) * (1f - max(ol, il).coerceIn(0f, 1f))
+        val m = min(w, h)
+        val c = m * 0.45f
+        val g = m * 0.05f
+        val cy = (h - c) / 2
+        val lx = w / 2 - c - g / 2
+        val rx = w / 2 + g / 2
+        val secs = t / 1000f
+    }
+    Box(modifier) {
+        // Rays of light falling from beneath the covers, as stage lights:
+        // two from each, one leaning out and one more upright, each
+        // sweeping slowly from side to side at its own pace and shimmering.
+        // Two soft layers each, the inner narrower, so the edges blur.
+        Canvas(Modifier.matchParentSize()) {
+            val f = Frame(elapsed(), size.width, size.height)
+            if (f.hold <= 0.01f) return@Canvas
+            val turn = 2 * PI.toFloat()
+            val top = f.cy + f.c - 2f
+            for (side in listOf(-1, 1)) {
+                val x0 = if (side < 0) f.lx else f.rx
+                for (r in 0..1) {
+                    val tc = x0 + f.c * (0.5f + side * (if (r == 0) 0.2f else -0.18f))
+                    val phase = r * 0.37f + (if (side > 0) 0.5f else 0f)
+                    val lean = side * f.c * (if (r == 0) 0.55f else 0.05f) +
+                        f.c * 0.35f * sin((f.secs / (if (r == 0) 4.2f else 5.6f) + phase) * turn)
+                    val shimmer = 0.75f + 0.25f * sin((f.secs * 0.9f + r * 0.4f + side * 0.2f) * turn)
+                    for (layer in 0..1) {
+                        val th = f.c * (0.16f - 0.06f * layer)
+                        val len = f.c * (1.9f - 0.2f * layer)
+                        val bh = f.c * (0.42f - 0.12f * layer)
+                        val path = Path().apply {
+                            moveTo(tc - th, top)
+                            lineTo(tc + th, top)
+                            lineTo(tc + lean + bh, top + len)
+                            lineTo(tc + lean - bh, top + len)
+                            close()
+                        }
+                        drawPath(
+                            path,
+                            Brush.verticalGradient(
+                                0f to Color.White.copy(alpha = 0.1f),
+                                0.4f to Color.White.copy(alpha = 0.04f),
+                                1f to Color.Transparent,
+                                startY = top, endY = top + len,
+                            ),
+                            alpha = f.hold * shimmer,
+                        )
+                    }
+                }
+            }
+        }
+        // Going out: full size to the left slot, then off.
+        key(from.id) {
+            CoverFace(
+                from, core, false,
+                Modifier.matchParentSize().graphicsLayer {
+                    val f = Frame(elapsed(), size.width, size.height)
+                    transformOrigin = TransformOrigin(0f, 0f)
+                    translationX = f.lx * f.oe + (-f.c - pad - f.lx) * f.ol
+                    translationY = f.cy * min(1f, f.oe)
+                    scaleX = (size.width + (f.c - size.width) * f.oe) / size.width
+                    scaleY = (size.height + (f.c - size.height) * f.oe) / size.height
+                    alpha = 1f - f.ol.coerceIn(0f, 1f)
+                    shadowElevation = 16f * f.hold
+                    shape = RoundedCornerShape(Tonearm.radius)
+                    clip = true
+                },
+            )
+        }
+        // Coming in: from the right to the right slot, then to the middle
+        // and full size.
+        key(to.id) {
+            CoverFace(
+                to, core, false,
+                Modifier.matchParentSize().graphicsLayer {
+                    val f = Frame(elapsed(), size.width, size.height)
+                    val il = min(1f, f.il)
+                    transformOrigin = TransformOrigin(0f, 0f)
+                    translationX = (size.width + pad) + (f.rx - size.width - pad) * f.ie - f.rx * f.il
+                    translationY = f.cy - f.cy * il
+                    scaleX = (f.c + (size.width - f.c) * il) / size.width
+                    scaleY = (f.c + (size.height - f.c) * il) / size.height
+                    shadowElevation = 16f * f.hold
+                    shape = RoundedCornerShape(Tonearm.radius)
+                    clip = true
+                },
+            )
+        }
+        // A thin rim of light on each, with light running round it.
+        Canvas(Modifier.matchParentSize()) {
+            val f = Frame(elapsed(), size.width, size.height)
+            if (f.hold <= 0.01f) return@Canvas
+            val rim = Color.White.copy(alpha = 0.14f * f.hold)
+            val corner = CornerRadius(Tonearm.radius.toPx() * 0.45f)
+            val stroke = Stroke(1.dp.toPx())
+            val oy = f.cy * min(1f, f.oe)
+            val ox = f.lx * f.oe + (-f.c - pad - f.lx) * f.ol
+            drawRoundRect(rim, Offset(ox, oy), Size(f.c, f.c), corner, stroke)
+            val ix = (size.width + pad) + (f.rx - size.width - pad) * f.ie - f.rx * f.il
+            drawRoundRect(rim, Offset(ix, f.cy), Size(f.c, f.c), corner, stroke)
+            // Light running round each cover's border, a lap every 2.6 s,
+            // half a lap apart: a bright head with a glow, and a tail of
+            // light fading behind it.
+            fun around(x0: Float, y0: Float, u: Float): Offset {
+                val d = (((u % 1f) + 1f) % 1f) * 4f
+                val s = d.toInt()
+                val k = d - s
+                return when (s) {
+                    0 -> Offset(x0 + f.c * k, y0)
+                    1 -> Offset(x0 + f.c, y0 + f.c * k)
+                    2 -> Offset(x0 + f.c * (1 - k), y0 + f.c)
+                    else -> Offset(x0, y0 + f.c * (1 - k))
+                }
+            }
+            val width = 2.5.dp.toPx()
+            val glow = f.c * 0.08f
+            for ((n, at) in listOf(Offset(ox, oy), Offset(ix, f.cy)).withIndex()) {
+                val head = f.secs / 2.6f + n * 0.5f
+                val steps = 40
+                for (i in 0 until steps) {
+                    val fade = 1f - i / steps.toFloat()
+                    drawLine(
+                        Color.White.copy(alpha = 0.9f * fade * fade * f.hold),
+                        around(at.x, at.y, head - i * 0.003f),
+                        around(at.x, at.y, head - (i + 1) * 0.003f),
+                        strokeWidth = width * (0.5f + 0.5f * fade),
+                        cap = StrokeCap.Butt,
+                    )
+                }
+                val p = around(at.x, at.y, head)
+                drawCircle(
+                    Brush.radialGradient(
+                        0f to Color.White.copy(alpha = 0.8f),
+                        0.4f to Color.White.copy(alpha = 0.25f),
+                        1f to Color.Transparent,
+                        center = p, radius = glow,
+                    ),
+                    radius = glow, center = p, alpha = f.hold,
                 )
             }
         }
