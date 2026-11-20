@@ -2,6 +2,7 @@ package app.tonearm
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -65,6 +66,9 @@ fun App(core: Core, controller: MediaController?) {
     var tab by remember { mutableStateOf(Tab.Home) }
     val stacks = remember { Tab.entries.associateWith { mutableStateListOf<Route>() } }
     var nowPlayingOpen by remember { mutableStateOf(false) }
+    // Whether Now Playing last left by being swiped off; reset as it opens.
+    var swipedAway by remember { mutableStateOf(false) }
+    LaunchedEffect(nowPlayingOpen) { if (nowPlayingOpen) swipedAway = false }
     // What Now Playing shows above the song: the cover, lyrics or queue.
     var panel by rememberSaveable { mutableStateOf(Panel.Cover) }
     var toast by remember { mutableStateOf<String?>(null) }
@@ -240,7 +244,9 @@ fun App(core: Core, controller: MediaController?) {
         AnimatedVisibility(
             visible = nowPlayingOpen && now != null && controller != null,
             enter = slideInVertically { it },
-            exit = slideOutVertically { it },
+            // Swiped away, it has slid off already: gone at once, so a tap
+            // on the mini-player straight after opens a fresh one.
+            exit = if (swipedAway) ExitTransition.None else slideOutVertically { it },
         ) {
             if (now != null && controller != null) {
                 NowPlayingScreen(
@@ -251,6 +257,8 @@ fun App(core: Core, controller: MediaController?) {
                     liked = liked,
                     onLike = { flipLike() },
                     onOpenArtist = { id, name -> host.open(id, name) },
+                    onSwipedAway = { swipedAway = true },
+                    open = nowPlayingOpen,
                 ) { nowPlayingOpen = false }
             }
         }

@@ -72,6 +72,11 @@ fun NowPlayingScreen(
     onLike: () -> Unit,
     /** An artist's name tapped: their page. */
     onOpenArtist: (id: String, name: String) -> Unit,
+    /** Swiped off the bottom: already gone, so no closing slide after. */
+    onSwipedAway: () -> Unit = {},
+    /** Whether it is meant to be showing: opened again, it comes back
+     *  from wherever the last swipe left it. */
+    open: Boolean = true,
     onClose: () -> Unit,
 ) {
     // A panel's button shows it, and pressed again goes back to the cover.
@@ -116,6 +121,12 @@ fun NowPlayingScreen(
     // of the screen while the page slides off, and would take the taps
     // meant for the mini-player under it.
     var closing by remember { mutableStateOf(false) }
+    LaunchedEffect(open) {
+        if (open) {
+            closing = false
+            pulled.snapTo(0f)
+        }
+    }
     Box(
         Modifier
             .fillMaxSize()
@@ -131,6 +142,7 @@ fun NowPlayingScreen(
                         if (pulled.value > height / 4f || speed > flick) {
                             closing = true
                             pulled.animateTo(height.toFloat(), tween(220, easing = FastOutSlowInEasing), speed)
+                            onSwipedAway()
                             onClose()
                         } else {
                             pulled.animateTo(0f, spring(stiffness = 600f), speed)
