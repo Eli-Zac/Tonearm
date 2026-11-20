@@ -103,7 +103,6 @@ class TonearmPlayer(private val context: Context, private val core: Tonearm) :
             PlayState.LOADING -> STATE_BUFFERING
             PlayState.PLAYING, PlayState.PAUSED -> STATE_READY
             PlayState.ENDED -> STATE_ENDED
-            // Media3 only allows a player error while idle.
             PlayState.FAILED -> STATE_IDLE
             PlayState.IDLE -> if (queue.isEmpty()) STATE_IDLE else STATE_ENDED
         }
@@ -129,9 +128,8 @@ class TonearmPlayer(private val context: Context, private val core: Tonearm) :
             )
             .setContentPositionMs { core.playback().positionMs.toLong() }
         if (queue.isNotEmpty()) builder.setCurrentMediaItemIndex(p.index.toInt().coerceIn(0, queue.size - 1))
-        if (p.state == PlayState.FAILED && p.error.isNotEmpty()) {
-            builder.setPlayerError(PlaybackException(p.error, null, PlaybackException.ERROR_CODE_IO_UNSPECIFIED))
-        }
+        // A song that fails just stops here. Its error is shown inside the
+        // app from the core: handed to Media3, Android pops it up as well.
         return builder.build()
     }
 

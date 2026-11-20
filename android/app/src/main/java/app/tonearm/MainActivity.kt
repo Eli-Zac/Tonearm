@@ -79,7 +79,7 @@ class NowPlaying(
 )
 
 @Composable
-fun rememberNowPlaying(controller: MediaController?): NowPlaying? {
+fun rememberNowPlaying(controller: MediaController?, core: uniffi.tonearm_android.Tonearm): NowPlaying? {
     var now by remember { mutableStateOf<NowPlaying?>(null) }
     LaunchedEffect(controller) {
         val c = controller ?: run { now = null; return@LaunchedEffect }
@@ -91,7 +91,9 @@ fun rememberNowPlaying(controller: MediaController?): NowPlaying? {
                 loading = c.playbackState == Player.STATE_BUFFERING,
                 position = c.currentPosition,
                 duration = c.duration,
-                error = c.playerError?.message,
+                // From the core: the player keeps errors from Media3.
+                error = core.playback().takeIf { it.state == uniffi.tonearm_android.PlayState.FAILED }
+                    ?.error?.ifEmpty { "Couldn't play this song" },
                 index = c.currentMediaItemIndex,
             )
         }

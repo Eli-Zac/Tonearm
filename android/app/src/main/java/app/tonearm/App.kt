@@ -34,6 +34,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.border
 import androidx.media3.session.MediaController
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -72,7 +73,7 @@ fun App(core: Core, controller: MediaController?) {
     // Bumped when something is saved to the library or an artist followed,
     // so the library's pages load again and show it.
     var libraryEpoch by remember { mutableIntStateOf(0) }
-    val now = rememberNowPlaying(controller)
+    val now = rememberNowPlaying(controller, core)
     val playingId = now?.let { controller?.currentMediaItem?.mediaId }
     // Whether the song playing is liked: null until YouTube Music says.
     var liked by remember { mutableStateOf<Boolean?>(null) }
@@ -95,6 +96,12 @@ fun App(core: Core, controller: MediaController?) {
             }
         }
     }
+
+    // A song that can't play while signed out: YouTube wants a sign in
+    // before it gives out streams on many networks, so offer one.
+    var needsSignIn by remember { mutableStateOf(false) }
+    val failed = now?.error
+    LaunchedEffect(failed) { needsSignIn = failed != null && !core.signedIn() }
 
     LaunchedEffect(toast) {
         if (toast != null) {
@@ -262,6 +269,37 @@ fun App(core: Core, controller: MediaController?) {
             shown?.let { ItemMenu(it, core, host) { menuItem = null } }
         }
         toast?.let { Toast(it, Modifier.align(Alignment.BottomCenter).padding(bottom = 150.dp)) }
+        if (needsSignIn) {
+            SignInDialog(onDismiss = { needsSignIn = false }) {
+                needsSignIn = false
+                nowPlayingOpen = false
+                stacks.getValue(tab).add(Route(SettingsPages.signIn, null, "Sign in"))
+            }
+        }
+    }
+}
+
+/** When a song couldn't play signed out: why, and a way in. Styled as the settings' choice dialogs. */
+@Composable
+fun SignInDialog(onDismiss: () -> Unit, onSignIn: () -> Unit) {
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        Column(
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Tonearm.raised)
+                .border(1.dp, Tonearm.line, RoundedCornerShape(16.dp))
+                .padding(20.dp),
+        ) {
+            Title("Sign in to play songs", size = 18.sp, weight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "YouTube needs you signed in to play songs on this network.",
+                color = Tonearm.dim, fontFamily = Tonearm.font, fontSize = 15.sp,
+            )
+            Spacer(Modifier.height(20.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
+                PillButton("Not now", onClick = onDismiss)
+                PillButton("Sign in", primary = true, onClick = onSignIn)
+            }
+        }
     }
 }
 
