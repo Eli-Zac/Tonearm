@@ -6,11 +6,14 @@ import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
@@ -20,13 +23,15 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.zIndex
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -45,17 +50,24 @@ private val slideEasing = CubicBezierEasing(0.22f, 1f, 0.36f, 1f)
 
 /**
  * The queue in place of the cover: the song playing, then the songs up
- * next. Tap one to play it; drag one by its handle to a new place, and the
- * rows it passes step aside to open the gap it will drop into.
+ * next. Tap one to play it, long press it for its menu. Drag one by its
+ * handle to a new place: a raised copy follows the finger, the rows it
+ * passes step aside to open the gap it will drop into, and near the top or
+ * bottom the list scrolls on.
  */
 @Composable
-fun QueuePane(core: Core, modifier: Modifier = Modifier) {
+fun QueuePane(core: Core, onMenu: (Song) -> Unit, modifier: Modifier = Modifier) {
     val scope = rememberCoroutineScope()
     var songs by remember { mutableStateOf<List<Song>>(emptyList()) }
     var index by remember { mutableIntStateOf(-1) }
-    // The row picked up, among those up next, and how far it has moved.
+    // The row picked up, among those up next; -1 when none.
     var from by remember { mutableIntStateOf(-1) }
-    var offset by remember { mutableFloatStateOf(0f) }
+    // Where the finger is down the list's view, and where on the row it
+    // took hold.
+    var fingerY by remember { mutableFloatStateOf(0f) }
+    var grab by remember { mutableFloatStateOf(0f) }
+    var viewHeight by remember { mutableFloatStateOf(0f) }
+    val list = rememberLazyListState()
 
     // The queue as the core has it, read again whenever it changes. Not
     // while a row is being dragged, which would pull the list from under it.
@@ -82,73 +94,127 @@ fun QueuePane(core: Core, modifier: Modifier = Modifier) {
         return
     }
     val upNext = songs.subList(index + 1, songs.size)
-    val rowPx = with(LocalDensity.current) { ROW.toPx() }
-    // Where the dragged row would drop, among those up next.
-    val to = if (from < 0) -1 else (from + (offset / rowPx).roundToInt()).coerceIn(0, upNext.size - 1)
+    val density = LocalDensity.current
+    val rowPx = with(density) { ROW.toPx() }
+    val handlePx = with(density) { 56.dp.toPx() }
+    val edgePx = with(density) { 72.dp.toPx() }
+
+    // Where the dragged row would drop: the slot nearest the raised copy,
+    // counting what the list has scrolled.
+    fun target(): Int {
+        val scrolled = list.firstVisibleItemIndex * rowPx + list.firstVisibleItemScrollOffset
+        return ((fingerY - grab + scrolled) / rowPx).roundToInt().coerceIn(0, upNext.size - 1)
+    }
+    val to = if (from < 0) -1 else target()
+
+    // Near the list's top or bottom edge, the list scrolls under the row
+    // being dragged, faster the closer it gets.
+    LaunchedEffect(from >= 0) {
+        if (from < 0) return@LaunchedEffect
+        while (true) {
+            withFrameNanos { }
+            val speed = when {
+                fingerY < edgePx -> -(edgePx - fingerY) / edgePx * 22f
+                fingerY > viewHeight - edgePx -> (fingerY - (viewHeight - edgePx)) / edgePx * 22f
+                else -> 0f
+            }
+            if (speed != 0f) list.scrollBy(speed)
+        }
+    }
 
     Column(modifier) {
         SectionLabel("Now playing")
-        QueueRow(songs[index], current = true)
+        QueueRow(songs[index], current = true, onLongClick = { onMenu(songs[index]) })
         if (upNext.isNotEmpty()) {
             Spacer(Modifier.height(12.dp))
             SectionLabel("Next up")
         }
-        LazyColumn(Modifier.weight(1f).fillMaxWidth(), userScrollEnabled = from < 0) {
-            itemsIndexed(upNext) { i, song ->
-                val lifted = i == from
-                // Rows between the dragged one and where it is going step
-                // up or down by a row. When the drag ends they snap back as
-                // the list takes its new order underneath, so nothing jumps.
-                val target = when {
-                    from < 0 || lifted -> 0f
-                    to > from && i in (from + 1)..to -> -rowPx
-                    to < from && i in to until from -> rowPx
-                    else -> 0f
-                }
-                val shift by animateFloatAsState(
-                    target,
-                    if (from < 0) snap() else tween(180, easing = slideEasing),
-                )
-                QueueRow(
-                    song,
-                    current = false,
-                    lifted = lifted,
-                    modifier = Modifier
-                        .zIndex(if (lifted) 1f else 0f)
-                        .graphicsLayer { translationY = if (lifted) offset else shift },
-                    onClick = {
-                        scope.launch(Dispatchers.IO) { runCatching { core.skipTo((index + 1 + i).toUInt()) } }
-                    },
-                    handle = Modifier.pointerInput(i, upNext.size) {
-                        detectDragGestures(
-                            onDragStart = {
-                                from = i
-                                offset = 0f
-                            },
-                            onDragEnd = {
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            LazyColumn(
+                Modifier
+                    .fillMaxSize()
+                    .onSizeChanged { viewHeight = it.height.toFloat() }
+                    // A press on a row's handle picks the row up. Caught here,
+                    // ahead of the list, so the list doesn't scroll instead,
+                    // and so the drag lives on when the row scrolls away.
+                    .pointerInput(index, upNext.size) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                            if (down.position.x < size.width - handlePx) return@awaitEachGesture
+                            val row = list.layoutInfo.visibleItemsInfo.firstOrNull {
+                                down.position.y >= it.offset && down.position.y < it.offset + it.size
+                            } ?: return@awaitEachGesture
+                            down.consume()
+                            grab = down.position.y - row.offset
+                            fingerY = down.position.y
+                            from = row.index
+                            try {
+                                while (true) {
+                                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                                    val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                    change.consume()
+                                    if (!change.pressed) break
+                                    fingerY = change.position.y.coerceIn(0f, viewHeight)
+                                }
                                 val a = from
-                                val b = (a + (offset / rowPx).roundToInt()).coerceIn(0, upNext.size - 1)
+                                val b = target()
                                 if (a >= 0 && a != b) {
                                     // The new order shows at once; the core
                                     // catches up off the main thread.
-                                    val moved = songs.toMutableList()
-                                    moved.add(index + 1 + b, moved.removeAt(index + 1 + a))
-                                    songs = moved
                                     val start = index + 1
+                                    val moved = songs.toMutableList()
+                                    moved.add(start + b, moved.removeAt(start + a))
+                                    songs = moved
                                     scope.launch(Dispatchers.IO) { core.moveInQueue((start + a).toUInt(), (start + b).toUInt()) }
                                 }
+                            } finally {
                                 from = -1
-                                offset = 0f
-                            },
-                            onDragCancel = {
-                                from = -1
-                                offset = 0f
-                            },
-                        ) { change, amount ->
-                            change.consume()
-                            // Kept within the list's rows.
-                            offset = (offset + amount.y).coerceIn(-i * rowPx, (upNext.size - 1 - i) * rowPx)
+                            }
                         }
+                    },
+                state = list,
+                userScrollEnabled = from < 0,
+            ) {
+                itemsIndexed(upNext) { i, song ->
+                    val lifted = i == from
+                    // Rows between the dragged one and where it is going step
+                    // up or down by a row. When the drag ends they snap back
+                    // as the list takes its new order underneath.
+                    val shift by animateFloatAsState(
+                        when {
+                            from < 0 || lifted -> 0f
+                            to > from && i in (from + 1)..to -> -rowPx
+                            to < from && i in to until from -> rowPx
+                            else -> 0f
+                        },
+                        if (from < 0) snap() else tween(180, easing = slideEasing),
+                    )
+                    QueueRow(
+                        song,
+                        current = false,
+                        handle = true,
+                        // The row picked up leaves a gap; its raised copy
+                        // is drawn over the list.
+                        modifier = Modifier.graphicsLayer {
+                            translationY = shift
+                            alpha = if (lifted) 0f else 1f
+                        },
+                        onClick = {
+                            scope.launch(Dispatchers.IO) { runCatching { core.skipTo((index + 1 + i).toUInt()) } }
+                        },
+                        onLongClick = { onMenu(song) },
+                    )
+                }
+            }
+            // The raised copy, riding on the finger, kept within the view.
+            upNext.getOrNull(from)?.let { song ->
+                QueueRow(
+                    song,
+                    current = false,
+                    lifted = true,
+                    handle = true,
+                    modifier = Modifier.offset {
+                        IntOffset(0, (fingerY - grab).coerceIn(0f, (viewHeight - rowPx).coerceAtLeast(0f)).roundToInt())
                     },
                 )
             }
@@ -173,9 +239,10 @@ private fun QueueRow(
     song: Song,
     current: Boolean,
     lifted: Boolean = false,
+    handle: Boolean = false,
     modifier: Modifier = Modifier,
     onClick: (() -> Unit)? = null,
-    handle: Modifier? = null,
+    onLongClick: (() -> Unit)? = null,
 ) {
     val shape = RoundedCornerShape(8.dp)
     Row(
@@ -191,7 +258,11 @@ private fun QueueRow(
             }
             .clip(shape)
             .background(if (lifted) Tonearm.raised else Color.Transparent)
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .then(
+                if (onClick != null || onLongClick != null) {
+                    Modifier.combinedClickable(onClick = { onClick?.invoke() }, onLongClick = onLongClick)
+                } else Modifier,
+            )
             .padding(start = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -203,9 +274,9 @@ private fun QueueRow(
                 Dim(song.artist, 14.sp)
             }
         }
-        if (handle != null) {
+        if (handle) {
             // Six dots: hold and drag to move the song.
-            Box(handle.size(48.dp), contentAlignment = Alignment.Center) {
+            Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
                 Canvas(Modifier.size(width = 12.dp, height = 18.dp)) {
                     val r = 1.6.dp.toPx()
                     for (col in 0 until 2) for (row in 0 until 3) {

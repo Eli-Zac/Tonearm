@@ -49,6 +49,8 @@ interface Actions {
     fun playItem(item: Item)
     /** An artist's shuffle or radio. */
     fun playWatch(item: Item)
+    /** A song's menu, on a long press. */
+    fun menu(item: Item)
     /** The video id playing, to mark its row. */
     val playing: String?
 }
@@ -138,7 +140,13 @@ fun Explicit() {
 fun ItemCard(item: Item, width: Dp, wide: Boolean, actions: Actions) {
     val shape = if (item.round()) CircleShape else RoundedCornerShape(Tonearm.radius)
     val artHeight = if (wide) width * 9f / 16f else width
-    Column(Modifier.width(width).clickable { actions.tap(item) }) {
+    Column(
+        Modifier.width(width).combinedClickable(
+            onClick = { actions.tap(item) },
+            // A song's menu, on a long press.
+            onLongClick = if (item.videoId != null) { { actions.menu(item) } } else null,
+        ),
+    ) {
         Box {
             AsyncImage(
                 model = item.thumb.ifEmpty { null },
@@ -184,7 +192,8 @@ fun LazyListScope.shelf(shelf: Shelf, actions: Actions) {
                 item,
                 playing = item.videoId != null && item.videoId == actions.playing,
                 onClick = { if (item.videoId != null) actions.playList(shelf.items, i) else actions.tap(item) },
-                onPlay = { actions.playItem(item) },
+                // A long press: a song's menu, or plays an album or playlist.
+                onPlay = { if (item.videoId != null) actions.menu(item) else actions.playItem(item) },
             )
         }
         ShelfLayout.CARDS, ShelfLayout.WIDE -> item(contentType = "cards") {
@@ -206,6 +215,7 @@ fun LazyListScope.shelf(shelf: Shelf, actions: Actions) {
                                 item,
                                 playing = item.videoId != null && item.videoId == actions.playing,
                                 onClick = { actions.tap(item) },
+                                onPlay = if (item.videoId != null) { { actions.menu(item) } } else null,
                             )
                         }
                     }
@@ -282,7 +292,7 @@ fun PageHeader(header: Header, songs: List<Item>, actions: Actions) {
 fun playlistItem(playlistId: String, title: String) = Item(
     kind = ItemKind.PLAYLIST, title = title, subtitle = "", thumb = "", duration = "",
     videoId = null, browseId = null, playlistId = playlistId, params = null,
-    artist = "", album = "", explicit = false,
+    artist = "", album = "", explicit = false, artists = emptyList(), albumId = null,
 )
 
 @Composable

@@ -31,6 +31,28 @@ pub struct Item {
     pub artist: String,
     pub album: String,
     pub explicit: bool,
+    /// Each credited artist, with their page where YouTube Music links it,
+    /// for a song's "Go to artist".
+    pub artists: Vec<Link>,
+    /// The album's page, for "Go to album".
+    pub album_id: Option<String>,
+}
+
+/// A name and, where there is one, the page it opens.
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct Link {
+    pub name: String,
+    pub id: Option<String>,
+}
+
+pub fn links(artists: &[(String, Option<String>)]) -> Vec<Link> {
+    artists
+        .iter()
+        .map(|(name, id)| Link {
+            name: name.clone(),
+            id: id.clone(),
+        })
+        .collect()
 }
 
 #[derive(uniffi::Enum, Clone, Copy, PartialEq, Debug)]
@@ -133,6 +155,8 @@ pub fn item(i: &model::Item) -> Item {
         artist,
         album: i.album.as_ref().map(|(name, _)| name.clone()).unwrap_or_default(),
         explicit: i.explicit,
+        artists: links(&i.artists),
+        album_id: i.album.as_ref().map(|(_, id)| id.clone()),
     }
 }
 
@@ -156,6 +180,8 @@ pub fn core_item(i: &Item) -> model::Item {
         playlist_id: i.playlist_id.clone(),
         params: i.params.clone(),
         explicit: i.explicit,
+        artists: i.artists.iter().map(|a| (a.name.clone(), a.id.clone())).collect(),
+        album: i.album_id.clone().map(|id| (i.album.clone(), id)),
         ..model::Item::default()
     }
 }

@@ -26,6 +26,7 @@ import androidx.media3.session.MediaController
 import coil3.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import uniffi.tonearm_android.Item
 import uniffi.tonearm_android.Tonearm as Core
 
 /**
@@ -40,6 +41,8 @@ fun NowPlayingScreen(
     core: Core,
     panel: Panel,
     onPanel: (Panel) -> Unit,
+    /** A song's menu, from a long press in the queue. */
+    onMenu: (Item) -> Unit,
     onClose: () -> Unit,
 ) {
     // A panel's button shows it, and pressed again goes back to the cover.
@@ -91,25 +94,32 @@ fun NowPlayingScreen(
                 LyricsPane(lyrics, controller, time, Modifier.weight(1f).fillMaxWidth())
                 Spacer(Modifier.height(16.dp))
             } else if (panel == Panel.Queue) {
-                QueuePane(core, Modifier.weight(1f).fillMaxWidth().padding(top = 8.dp))
+                QueuePane(core, { onMenu(it.asItem()) }, Modifier.weight(1f).fillMaxWidth().padding(top = 8.dp))
                 Spacer(Modifier.height(16.dp))
             } else {
-                Spacer(Modifier.weight(1f))
-                // The cover gives up height first when the screen is short.
-                AsyncImage(
-                    model = cover,
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.weight(8f, fill = false).aspectRatio(1f)
-                        .clip(RoundedCornerShape(Tonearm.radius)).background(Tonearm.raised),
-                )
-                // A few lines from where the song is, under the cover, as on
-                // the desktop. Tap them for the lyrics.
-                (lyrics as? LyricsState.Found)?.let { found ->
-                    Spacer(Modifier.height(20.dp))
-                    LyricsPreview(found.lyrics, time, height = 60.dp, onOpen = { onPanel(Panel.Lyrics) })
+                // The cover and the lyrics under it, centred in the room
+                // left. The cover is as wide as everything else, and only
+                // gives up size on a screen too short to fit it.
+                Column(
+                    Modifier.weight(1f).fillMaxWidth(),
+                    verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    AsyncImage(
+                        model = cover,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.weight(1f, fill = false).aspectRatio(1f)
+                            .clip(RoundedCornerShape(Tonearm.radius)).background(Tonearm.raised),
+                    )
+                    // A few lines from where the song is, under the cover,
+                    // as on the desktop. Tap them for the lyrics.
+                    (lyrics as? LyricsState.Found)?.let { found ->
+                        Spacer(Modifier.height(20.dp))
+                        LyricsPreview(found.lyrics, time, height = 60.dp, onOpen = { onPanel(Panel.Lyrics) })
+                    }
                 }
-                Spacer(Modifier.weight(1f))
+                Spacer(Modifier.height(16.dp))
             }
             Column(Modifier.fillMaxWidth()) {
                 Title(now.meta?.title?.toString() ?: "", size = 24.sp, weight = FontWeight.Bold, lines = 2)

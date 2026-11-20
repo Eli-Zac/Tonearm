@@ -2,6 +2,10 @@ package app.tonearm
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.ui.graphics.Color
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
@@ -59,6 +63,9 @@ fun App(core: Core, controller: MediaController?) {
     // What Now Playing shows above the song: the cover, lyrics or queue.
     var panel by rememberSaveable { mutableStateOf(Panel.Cover) }
     var toast by remember { mutableStateOf<String?>(null) }
+    // The song whose menu is open, from a long press.
+    var menuItem by remember { mutableStateOf<Item?>(null) }
+    val signedIn = remember(core) { core.signedIn() }
     val now = rememberNowPlaying(controller)
     val playingId = now?.let { controller?.currentMediaItem?.mediaId }
 
@@ -95,12 +102,34 @@ fun App(core: Core, controller: MediaController?) {
         }
         override fun playItem(item: Item) = play { core.playItem(item) }
         override fun playWatch(item: Item) = play { core.playWatch(item) }
+        override fun menu(item: Item) {
+            menuItem = item
+        }
         override val playing: String? get() = playingId
     }
 
+    // What a song's menu does, through the app.
+    val host = object : MenuHost {
+        override fun run(call: () -> String?) {
+            scope.launch {
+                try {
+                    withContext(Dispatchers.IO) { call() }?.takeIf { it.isNotEmpty() }?.let { toast = it }
+                } catch (e: Exception) {
+                    toast = e.message ?: "That didn't work"
+                }
+            }
+        }
+        override fun open(id: String, title: String) {
+            nowPlayingOpen = false
+            stacks.getValue(tab).add(Route(id, null, title))
+        }
+        override val signedIn: Boolean get() = signedIn
+    }
+
     val stack = stacks.getValue(tab)
-    BackHandler(enabled = nowPlayingOpen || stack.isNotEmpty() || tab != Tab.Home) {
+    BackHandler(enabled = menuItem != null || nowPlayingOpen || stack.isNotEmpty() || tab != Tab.Home) {
         when {
+            menuItem != null -> menuItem = null
             nowPlayingOpen -> nowPlayingOpen = false
             stack.isNotEmpty() -> stack.removeAt(stack.lastIndex)
             else -> tab = Tab.Home
@@ -133,7 +162,6 @@ fun App(core: Core, controller: MediaController?) {
                 if (picked == tab) stacks.getValue(picked).clear() else tab = picked
             }
         }
-        toast?.let { Toast(it, Modifier.align(Alignment.BottomCenter).padding(bottom = 150.dp)) }
         AnimatedVisibility(
             visible = nowPlayingOpen && now != null && controller != null,
             enter = slideInVertically { it },
@@ -144,9 +172,32 @@ fun App(core: Core, controller: MediaController?) {
                     now, controller, core,
                     panel = panel,
                     onPanel = { panel = it },
+                    onMenu = { menuItem = it },
                 ) { nowPlayingOpen = false }
             }
         }
+        // A song's menu over everything, Now Playing too: the screen dims
+        // and the menu rises from the bottom. Tap outside to close it.
+        AnimatedVisibility(menuItem != null, enter = fadeIn(), exit = fadeOut()) {
+            Box(
+                Modifier.fillMaxSize().background(Color(0x99000000)).clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                ) { menuItem = null },
+            )
+        }
+        // The last song shown stays while the menu slides away.
+        var shown by remember { mutableStateOf<Item?>(null) }
+        if (menuItem != null) shown = menuItem
+        AnimatedVisibility(
+            menuItem != null,
+            modifier = Modifier.align(Alignment.BottomCenter),
+            enter = slideInVertically { it },
+            exit = slideOutVertically { it },
+        ) {
+            shown?.let { SongMenu(it, core, host) { menuItem = null } }
+        }
+        toast?.let { Toast(it, Modifier.align(Alignment.BottomCenter).padding(bottom = 150.dp)) }
     }
 }
 
@@ -257,7 +308,10 @@ fun SearchScreen(core: Core, actions: Actions) {
     // Anything tapped in the results puts the keyboard away first.
     val tapped = object : Actions by actions {
         override fun open(id: String, params: String?, title: String) { putAway(); actions.open(id, params, title) }
-        override fun playList(items: List<Item>, index: Int) { putAway(); actions.playList(items, index) }
+        // A song in search results plays with the queue YouTube Music makes
+        // for it, its radio, not the rest of the results.
+        override fun playList(items: List<Item>, index: Int) { putAway(); actions.playRadio(items[index]) }
+        override fun menu(item: Item) { putAway(); actions.menu(item) }
         override fun playRadio(item: Item) { putAway(); actions.playRadio(item) }
         override fun playItem(item: Item) { putAway(); actions.playItem(item) }
         override fun playWatch(item: Item) { putAway(); actions.playWatch(item) }

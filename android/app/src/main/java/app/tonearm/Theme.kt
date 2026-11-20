@@ -62,6 +62,10 @@ object Icons {
     const val dots = ""
     const val radio = ""
     const val nowPlaying = ""
+    const val playNext = ""
+    const val addQueue = ""
+    const val artist = ""
+    const val album = ""
 }
 
 @Composable

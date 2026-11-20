@@ -23,6 +23,22 @@ pub enum Step {
     Stop,
 }
 
+/// What came of asking for a song to play next or join the queue, for the
+/// app to say.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Added {
+    /// The queue was empty: the song is the queue now, and should play.
+    Started,
+    /// It is in the queue now (moved, if it was already further on).
+    Added,
+    /// It is the song playing.
+    Playing,
+    /// It already plays next.
+    AlreadyNext,
+    /// It is already somewhere in the queue.
+    AlreadyQueued,
+}
+
 /// Previous goes back a song only this early in one.
 pub const RESTART_AFTER_MS: u64 = 3000;
 
@@ -72,6 +88,44 @@ impl<T> Queue<T> {
     pub fn go(&mut self, index: usize) {
         if index < self.items.len() {
             self.index = index;
+        }
+    }
+
+    /// Puts `item` right after the song playing, as the desktop's Play
+    /// next: a song already in the queue moves up rather than appearing
+    /// twice. `same` tells whether a queued song is this one.
+    pub fn play_next(&mut self, item: T, same: impl Fn(&T) -> bool) -> Added {
+        if self.items.is_empty() {
+            self.set(vec![item], 0);
+            return Added::Started;
+        }
+        if self.items.get(self.index).is_some_and(&same) {
+            return Added::Playing;
+        }
+        if self.items.get(self.index + 1).is_some_and(&same) {
+            return Added::AlreadyNext;
+        }
+        if let Some(at) = self.items.iter().position(&same) {
+            self.items.remove(at);
+            if at < self.index {
+                self.index -= 1;
+            }
+        }
+        let at = (self.index + 1).min(self.items.len());
+        self.items.insert(at, item);
+        Added::Added
+    }
+
+    /// Adds `item` at the end, unless it is already queued.
+    pub fn add(&mut self, item: T, same: impl Fn(&T) -> bool) -> Added {
+        if self.items.is_empty() {
+            self.set(vec![item], 0);
+            Added::Started
+        } else if self.items.iter().any(same) {
+            Added::AlreadyQueued
+        } else {
+            self.items.push(item);
+            Added::Added
         }
     }
 
@@ -184,6 +238,34 @@ mod tests {
         // Out of range is ignored.
         q.move_item(9, 0);
         assert_eq!(q.items().len(), 5);
+    }
+
+    #[test]
+    fn play_next_goes_after_the_song_playing() {
+        let mut q = queue(5, 1, Repeat::Off);
+        assert_eq!(q.play_next(9, |&s| s == 9), Added::Added);
+        assert_eq!(q.items(), &[0, 1, 9, 2, 3, 4]);
+        // Already queued later: moves up instead of doubling.
+        assert_eq!(q.play_next(4, |&s| s == 4), Added::Added);
+        assert_eq!(q.items(), &[0, 1, 4, 9, 2, 3]);
+        assert_eq!(q.current(), Some(&1));
+        // Queued before the song playing: the playing one keeps its place.
+        assert_eq!(q.play_next(0, |&s| s == 0), Added::Added);
+        assert_eq!(q.items(), &[1, 0, 4, 9, 2, 3]);
+        assert_eq!(q.current(), Some(&1));
+        assert_eq!(q.play_next(0, |&s| s == 0), Added::AlreadyNext);
+        assert_eq!(q.play_next(1, |&s| s == 1), Added::Playing);
+        let mut empty = queue(0, 0, Repeat::Off);
+        assert_eq!(empty.play_next(7, |&s| s == 7), Added::Started);
+        assert_eq!(empty.current(), Some(&7));
+    }
+
+    #[test]
+    fn add_skips_songs_already_queued() {
+        let mut q = queue(3, 0, Repeat::Off);
+        assert_eq!(q.add(5, |&s| s == 5), Added::Added);
+        assert_eq!(q.add(2, |&s| s == 2), Added::AlreadyQueued);
+        assert_eq!(q.items(), &[0, 1, 2, 5]);
     }
 
     #[test]

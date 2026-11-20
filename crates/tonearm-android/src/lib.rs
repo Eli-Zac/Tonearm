@@ -14,13 +14,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use tonearm_core::innertube::model::{self, Kind};
-use tonearm_core::queue::{Queue, Repeat, Step};
+use tonearm_core::queue::{Added, Queue, Repeat, Step};
 use tonearm_core::{audio, innertube, resolver, store};
 
 mod lyrics;
 mod pages;
 pub use lyrics::{LyricLine, Lyrics, Syllable};
-pub use pages::{Chip, Header, Item, ItemKind, Page, Shelf, ShelfLayout};
+pub use pages::{Chip, Header, Item, ItemKind, Link, Page, Shelf, ShelfLayout};
 
 uniffi::setup_scaffolding!();
 
@@ -36,6 +36,9 @@ pub struct Song {
     pub cover: String,
     /// As YouTube Music shows it, such as "3:12". Empty when unknown.
     pub duration: String,
+    /// Each credited artist and their page, for its menu.
+    pub artists: Vec<Link>,
+    pub album_id: Option<String>,
 }
 
 #[derive(uniffi::Enum, Clone, Copy, PartialEq, Debug)]
@@ -114,6 +117,10 @@ pub struct Tonearm {
     note: Mutex<String>,
     /// Bumped when the queue or the song playing changes.
     version: AtomicU64,
+    /// The queue's radio is being looked for.
+    topping: AtomicBool,
+    /// The last song whose radio was asked for, so it is asked once.
+    topped_for: Mutex<String>,
     /// Lyrics found, by video id, so going back to a song doesn't ask again.
     lyrics: Mutex<HashMap<String, Lyrics>>,
 }
@@ -136,6 +143,8 @@ impl Tonearm {
             loading: AtomicBool::new(false),
             note: Mutex::new(String::new()),
             version: AtomicU64::new(0),
+            topping: AtomicBool::new(false),
+            topped_for: Mutex::new(String::new()),
             lyrics: Mutex::new(HashMap::new()),
         });
         // Signed in as last time, as the desktop app starts.
@@ -339,6 +348,52 @@ impl Tonearm {
         self.changed();
     }
 
+    // ------------------------------------------------------ a song's menu
+
+    /// Play next: right after the song playing, as on desktop. Gives what
+    /// to tell the user, empty when the song simply starts.
+    pub fn play_next(&self, item: Item) -> Result<String, TonearmError> {
+        let song = song(&pages::core_item(&item)).ok_or_else(|| "Nothing to play".to_string())?;
+        let (id, title) = (song.video_id.clone(), song.title.clone());
+        let added = self.queue.lock().unwrap().play_next(song, |s| s.video_id == id);
+        self.after_adding(added, format!("{title} plays next"), format!("{title} already plays next"))
+    }
+
+    /// Add to queue: at the end, unless it is queued already.
+    pub fn add_to_queue(&self, item: Item) -> Result<String, TonearmError> {
+        let song = song(&pages::core_item(&item)).ok_or_else(|| "Nothing to add".to_string())?;
+        let (id, title) = (song.video_id.clone(), song.title.clone());
+        let added = self.queue.lock().unwrap().add(song, |s| s.video_id == id);
+        self.after_adding(added, format!("Added {title} to the queue"), String::new())
+    }
+
+    /// Likes a song on YouTube Music.
+    pub fn like(&self, video_id: String) -> Result<(), TonearmError> {
+        Ok(self.client.rate(&video_id, true)?)
+    }
+
+    /// The user's playlists songs can be added to: each title, and its
+    /// playlist id.
+    pub fn my_playlists(&self) -> Result<Vec<Link>, TonearmError> {
+        Ok(self
+            .client
+            .my_playlists()?
+            .into_iter()
+            .map(|(name, id)| Link { name, id: Some(id) })
+            .collect())
+    }
+
+    pub fn add_to_playlist(&self, playlist_id: String, video_id: String) -> Result<(), TonearmError> {
+        Ok(self.client.add_to_playlist(&playlist_id, &video_id)?)
+    }
+
+    /// An artist's radio, from their page, as the desktop's "Artist radio".
+    pub fn artist_radio(&self, artist_id: String) -> Result<(), TonearmError> {
+        let page = pages::page(&self.client.browse(&artist_id, None)?);
+        let radio = page.header.and_then(|h| h.radio.or(h.shuffle));
+        self.play_watch(radio.ok_or_else(|| "This artist has no radio".to_string())?)
+    }
+
     pub fn queue(&self) -> Vec<Song> {
         self.queue.lock().unwrap().items().to_vec()
     }
@@ -423,6 +478,76 @@ impl Tonearm {
         self.version.fetch_add(1, Ordering::SeqCst);
     }
 
+    /// Says what came of adding a song to the queue, and starts it when the
+    /// queue was empty.
+    fn after_adding(&self, added: Added, done: String, next: String) -> Result<String, TonearmError> {
+        self.changed();
+        Ok(match added {
+            Added::Started => {
+                self.play_current()?;
+                String::new()
+            }
+            Added::Added => done,
+            Added::Playing => "That is playing now".into(),
+            Added::AlreadyNext => next,
+            Added::AlreadyQueued => "That is already in the queue".into(),
+        })
+    }
+
+    /// Whether `top_up` has something to do: few songs left, repeat off,
+    /// and the last song's radio not asked for yet. Cheap, for the queue
+    /// thread to check often.
+    fn wants_top_up(&self) -> bool {
+        let queue = self.queue.lock().unwrap();
+        queue.repeat == Repeat::Off
+            && queue.index() + 2 >= queue.items().len()
+            && queue
+                .items()
+                .last()
+                .is_some_and(|last| *self.topped_for.lock().unwrap() != last.video_id)
+    }
+
+    /// With two songs or fewer left and repeat off, adds the last song's
+    /// radio, so the music keeps going, as the desktop does. Each last song
+    /// is asked about once.
+    fn top_up(&self) {
+        let last = {
+            let queue = self.queue.lock().unwrap();
+            if queue.repeat != Repeat::Off || queue.index() + 2 < queue.items().len() {
+                return;
+            }
+            let Some(last) = queue.items().last().cloned() else { return };
+            last
+        };
+        {
+            let mut asked = self.topped_for.lock().unwrap();
+            if *asked == last.video_id {
+                return;
+            }
+            *asked = last.video_id.clone();
+        }
+        // A video's radio is videos: seed it with the song instead.
+        let seed = model::Item {
+            video_id: Some(last.video_id.clone()),
+            title: last.title.clone(),
+            ..model::Item::default()
+        };
+        let seed = self.client.song_for(&seed).and_then(|s| s.video_id).unwrap_or(last.video_id.clone());
+        let Ok((items, _)) = self.client.queue(Some(&seed), None) else { return };
+        let mut queue = self.queue.lock().unwrap();
+        // Only onto the same queue, still ending with that song.
+        if queue.items().last().map(|s| &s.video_id) != Some(&last.video_id) {
+            return;
+        }
+        let known: std::collections::HashSet<String> = queue.items().iter().map(|s| s.video_id.clone()).collect();
+        let more: Vec<Song> = items.iter().filter_map(song).filter(|s| !known.contains(&s.video_id)).collect();
+        if !more.is_empty() {
+            queue.extend(more);
+            drop(queue);
+            self.changed();
+        }
+    }
+
     fn step(&self, step: Step) -> Result<(), TonearmError> {
         match step {
             Step::Play(index) => {
@@ -503,7 +628,18 @@ fn watch(tonearm: Weak<Tonearm>) {
                 let status = &tonearm.audio.status;
                 let generation = status.generation.load(Ordering::SeqCst);
                 match status.state.load(Ordering::SeqCst) {
-                    audio::PLAYING | audio::PAUSED => played = generation,
+                    audio::PLAYING | audio::PAUSED => {
+                        played = generation;
+                        // Near the end of the queue: its radio joins it,
+                        // asked for on a thread of its own.
+                        if tonearm.wants_top_up() && !tonearm.topping.swap(true, Ordering::SeqCst) {
+                            let worker = tonearm.clone();
+                            std::thread::spawn(move || {
+                                worker.top_up();
+                                worker.topping.store(false, Ordering::SeqCst);
+                            });
+                        }
+                    }
                     audio::ENDED if generation == played && generation != handled => {
                         handled = generation;
                         tonearm.song_ended();
@@ -571,6 +707,8 @@ fn song(item: &innertube::model::Item) -> Option<Song> {
         album: item.album.as_ref().map(|(name, _)| name.clone()).unwrap_or_default(),
         cover: if cover.starts_with("//") { format!("https:{cover}") } else { cover },
         duration: item.duration.clone(),
+        artists: pages::links(&item.artists),
+        album_id: item.album.as_ref().map(|(_, id)| id.clone()),
     })
 }
 

@@ -311,6 +311,8 @@ class TonearmPlayer(private val context: Context, private val core: Tonearm) :
                 album = meta.albumTitle?.toString() ?: "",
                 cover = meta.artworkUri?.toString() ?: "",
                 duration = "",
+                artists = emptyList(),
+                albumId = null,
             )
         }
     }
