@@ -49,7 +49,7 @@ interface Actions {
     fun playItem(item: Item)
     /** An artist's shuffle or radio. */
     fun playWatch(item: Item)
-    /** A song's menu, on a long press. */
+    /** An item's menu, on a long press. */
     fun menu(item: Item)
     /** The video id playing, to mark its row. */
     val playing: String?
@@ -143,8 +143,8 @@ fun ItemCard(item: Item, width: Dp, wide: Boolean, actions: Actions) {
     Column(
         Modifier.width(width).combinedClickable(
             onClick = { actions.tap(item) },
-            // A song's menu, on a long press.
-            onLongClick = if (item.videoId != null) { { actions.menu(item) } } else null,
+            // Its menu, on a long press, as the desktop's right click.
+            onLongClick = { actions.menu(item) },
         ),
     ) {
         Box {
@@ -192,8 +192,8 @@ fun LazyListScope.shelf(shelf: Shelf, actions: Actions) {
                 item,
                 playing = item.videoId != null && item.videoId == actions.playing,
                 onClick = { if (item.videoId != null) actions.playList(shelf.items, i) else actions.tap(item) },
-                // A long press: a song's menu, or plays an album or playlist.
-                onPlay = { if (item.videoId != null) actions.menu(item) else actions.playItem(item) },
+                // A long press: its menu.
+                onPlay = { actions.menu(item) },
             )
         }
         ShelfLayout.CARDS, ShelfLayout.WIDE -> item(contentType = "cards") {
@@ -215,7 +215,7 @@ fun LazyListScope.shelf(shelf: Shelf, actions: Actions) {
                                 item,
                                 playing = item.videoId != null && item.videoId == actions.playing,
                                 onClick = { actions.tap(item) },
-                                onPlay = if (item.videoId != null) { { actions.menu(item) } } else null,
+                                onPlay = { actions.menu(item) },
                             )
                         }
                     }
@@ -293,6 +293,7 @@ fun playlistItem(playlistId: String, title: String) = Item(
     kind = ItemKind.PLAYLIST, title = title, subtitle = "", thumb = "", duration = "",
     videoId = null, browseId = null, playlistId = playlistId, params = null,
     artist = "", album = "", explicit = false, artists = emptyList(), albumId = null,
+    libraryPlaylist = null, saved = false,
 )
 
 @Composable

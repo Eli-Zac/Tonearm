@@ -2,11 +2,12 @@
 //!
 //! The window asks for a menu with a source and an id. We look the item
 //! up, offer only what makes sense for it, and keep what each line does
-//! until one is picked.
+//! until one is picked. An item's own lines come from the core's `menu`,
+//! which the phone shares.
 
 use crate::innertube::model::{Header, Item, Kind, PageKind};
-use crate::innertube::Client;
-use crate::{offline, quick_access, on_ui, shuffled, App, Icons, MenuEntry, Target};
+use crate::{quick_access, on_ui, shuffled, App, Icons, MenuEntry, Target};
+use tonearm_core::menu::{self as core_menu, artist_songs, collection_songs, is_collection};
 use slint::{ComponentHandle, ModelRc, VecModel};
 use std::rc::Rc;
 
@@ -106,66 +107,24 @@ impl Lines<'_> {
         self.actions.push(action);
     }
 
-    /// "Go to artist", or one line per artist when there are several.
-    fn artists(&mut self, item: &Item) {
-        let linked: Vec<(String, String)> = item
-            .artists
-            .iter()
-            .filter_map(|(name, id)| Some((name.clone(), id.clone()?)))
-            .collect();
-        let several = linked.len() > 1;
-        for (name, id) in linked {
-            let label = if several {
-                format!("Go to {name}")
-            } else {
-                "Go to artist".into()
-            };
-            let icon = self.icons.get_artist();
-            self.glyph(label, icon, Action::Browse(id));
+    /// The window's glyph for one of the core's line icons.
+    fn icon(&self, icon: core_menu::Icon) -> slint::SharedString {
+        use core_menu::Icon as I;
+        let icons = &self.icons;
+        match icon {
+            I::Play => icons.get_play(),
+            I::Shuffle => icons.get_shuffle(),
+            I::PlayNext => icons.get_play_next(),
+            I::AddQueue => icons.get_add_queue(),
+            I::Artist => icons.get_artist(),
+            I::Album => icons.get_album(),
+            I::Radio => icons.get_radio(),
+            I::Download => icons.get_download(),
+            I::Trash => icons.get_trash(),
+            I::Heart => icons.get_heart(),
+            I::Open => icons.get_open(),
+            I::Library => icons.get_library(),
         }
-    }
-}
-
-/// An album or playlist that can be fetched for its songs from YouTube
-/// Music. A Spotify playlist cannot: its songs are matched as its page
-/// opens, so its menu offers Open instead.
-fn is_collection(item: &Item) -> bool {
-    let spotify = item.browse_id.as_deref().is_some_and(|id| id.starts_with(crate::spotify::PREFIX));
-    item.video_id.is_none()
-        && !spotify
-        && (matches!(item.kind, Kind::Album | Kind::Playlist)
-            || item.browse_id.as_deref().is_some_and(|id| {
-                id.starts_with("MPREb_") || id.starts_with("VL") || id.starts_with("OLAK")
-            }))
-}
-
-/// The songs of an album or playlist, every page of them. Blocks.
-fn collection_songs(client: &Client, item: &Item) -> Result<Vec<Item>, String> {
-    let songs_of = |page: &crate::innertube::model::Page| -> Vec<Item> {
-        page.shelves
-            .iter()
-            .filter(|s| !s.carousel)
-            .flat_map(|s| s.items.iter())
-            .filter(|i| i.video_id.is_some())
-            .cloned()
-            .collect()
-    };
-    if let Some(id) = &item.browse_id {
-        let page = client.browse(id, item.params.as_deref())?;
-        let mut songs = songs_of(&page);
-        // A long playlist comes in pages. Fetch them all, within reason.
-        let mut token = page.continuation;
-        for _ in 0..40 {
-            let Some(t) = token.take() else { break };
-            let more = client.more(&t)?;
-            songs.extend(songs_of(&more));
-            token = more.continuation;
-        }
-        Ok(songs)
-    } else if let Some(list) = &item.playlist_id {
-        Ok(client.queue(None, Some(list))?.0)
-    } else {
-        Err("Nothing to play".into())
     }
 }
 
@@ -225,86 +184,38 @@ impl App {
     }
 
     fn item_lines(self: &Rc<Self>, lines: &mut Lines, item: &Item, playing: bool) {
-        let icons = &lines.icons;
-        let (play, shuffle, heart) = (icons.get_play(), icons.get_shuffle(), icons.get_heart());
-        let (play_next, add_queue, album, radio, download, trash, open) = (
-            icons.get_play_next(),
-            icons.get_add_queue(),
-            icons.get_album(),
-            icons.get_radio(),
-            icons.get_download(),
-            icons.get_trash(),
-            icons.get_open(),
-        );
-        if let Some(video_id) = item.video_id.clone() {
-            if !playing {
-                lines.glyph("Play next", play_next, Action::PlayNext(item.clone()));
-                lines.glyph("Add to queue", add_queue, Action::AddToQueue(item.clone()));
-            }
-            lines.artists(item);
-            if let Some((_, id)) = &item.album {
-                lines.glyph("Go to album", album, Action::Browse(id.clone()));
-            }
-            lines.glyph("Song radio", radio.clone(), Action::Radio(item.clone()));
-            // Each linked artist's own radio, as Spotify offers.
-            let linked: Vec<(String, String)> = item
-                .artists
-                .iter()
-                .filter_map(|(name, id)| Some((name.clone(), id.clone()?)))
-                .collect();
-            let several = linked.len() > 1;
-            for (name, id) in linked {
-                let label = if several { format!("{name} radio") } else { "Artist radio".into() };
-                lines.glyph(label, radio.clone(), Action::Artist(id, false));
-            }
-            if offline::is_downloaded(&video_id) {
-                lines.glyph("Remove download", trash, Action::ToggleDownload(item.clone()));
-            } else if !offline::is_downloading(&video_id) {
-                lines.glyph("Download", download, Action::ToggleDownload(item.clone()));
-            }
-            if self.client.signed_in() {
-                if playing {
-                    let label = if self.player.borrow().liked { "Unlike" } else { "Like" };
-                    lines.glyph(label, heart, Action::LikePlaying);
-                } else {
-                    lines.glyph("Like", heart, Action::Like(item.clone()));
-                }
-                let add = lines.icons.get_add_queue();
-                lines.glyph("Add to playlist", add, Action::AddToPlaylist(item.clone()));
-            }
-        } else if item.kind == Kind::Artist {
-            if let Some(id) = &item.browse_id {
-                lines.glyph("Open", open, Action::Browse(id.clone()));
-                lines.glyph("Shuffle", shuffle, Action::Artist(id.clone(), true));
-                lines.glyph("Start radio", radio, Action::Artist(id.clone(), false));
-                // An artist's page id is their channel. The menu does not
-                // say whether they are followed, but the library only lists
-                // artists that are.
-                if self.client.signed_in() && id.starts_with("UC") {
-                    let follow = !self.on_library_page();
-                    let label = if follow { "Follow" } else { "Unfollow" };
-                    let icon = lines.icons.get_artist();
-                    lines.glyph(label, icon, Action::Follow(id.clone(), follow, item.title.clone()));
-                }
-            }
-        } else if is_collection(item) {
-            lines.glyph("Play", play, Action::Collection(item.clone(), Then::Play));
-            lines.glyph("Shuffle", shuffle, Action::Collection(item.clone(), Then::Shuffle));
-            lines.glyph("Download all", download, Action::Collection(item.clone(), Then::Download));
-            lines.artists(item);
-            if let Some(id) = &item.browse_id {
-                lines.glyph("Open", open, Action::Browse(id.clone()));
-            }
-            if let Some((playlist, saved)) = item.library.clone().filter(|_| self.client.signed_in()) {
-                let (label, icon) = if saved {
-                    ("Remove from library", lines.icons.get_trash())
-                } else {
-                    ("Save to library", lines.icons.get_library())
-                };
-                lines.glyph(label, icon, Action::Library(playlist, !saved, item.title.clone()));
-            }
-        } else if let Some(id) = &item.browse_id {
-            lines.glyph("Open", open, Action::Browse(id.clone()));
+        // The lines both apps offer, from the core, then the desktop's own.
+        let context = core_menu::Context {
+            signed_in: self.client.signed_in(),
+            playing,
+            liked: self.player.borrow().liked,
+            in_library: self.on_library_page(),
+            downloads: true,
+        };
+        for line in core_menu::lines(item, &context) {
+            let icon = lines.icon(line.icon);
+            let action = match line.action {
+                core_menu::Action::PlayNext => Action::PlayNext(item.clone()),
+                core_menu::Action::AddToQueue => Action::AddToQueue(item.clone()),
+                core_menu::Action::Browse(id) => Action::Browse(id),
+                core_menu::Action::SongRadio => Action::Radio(item.clone()),
+                core_menu::Action::ArtistRadio(id) => Action::Artist(id, false),
+                core_menu::Action::ArtistShuffle(id) => Action::Artist(id, true),
+                core_menu::Action::ToggleDownload => Action::ToggleDownload(item.clone()),
+                core_menu::Action::Like => Action::Like(item.clone()),
+                core_menu::Action::LikePlaying => Action::LikePlaying,
+                core_menu::Action::AddToPlaylist => Action::AddToPlaylist(item.clone()),
+                core_menu::Action::Play => Action::Collection(item.clone(), Then::Play),
+                core_menu::Action::Shuffle => Action::Collection(item.clone(), Then::Shuffle),
+                core_menu::Action::DownloadAll => Action::Collection(item.clone(), Then::Download),
+                core_menu::Action::Library { playlist, save } => Action::Library(playlist, save, item.title.clone()),
+                core_menu::Action::Follow { channel, follow } => Action::Follow(channel, follow, item.title.clone()),
+            };
+            lines.glyph(line.label, icon, action);
+        }
+        // Anything else with a page: a Spotify playlist can be copied.
+        let other = item.video_id.is_none() && item.kind != Kind::Artist && !is_collection(item);
+        if let Some(id) = item.browse_id.as_ref().filter(|_| other) {
             self.copy_line(lines, id, &item.title);
         }
         if let Some(id) = &item.browse_id {
@@ -469,9 +380,7 @@ impl App {
     fn on_library_page(&self) -> bool {
         match self.history.borrow().last() {
             Some(crate::Route::Library) => true,
-            Some(crate::Route::Browse { id, .. }) => {
-                id.starts_with("FEmusic_library") || id.starts_with("FEmusic_liked")
-            }
+            Some(crate::Route::Browse { id, .. }) => core_menu::is_library_page(id),
             _ => false,
         }
     }
@@ -753,22 +662,7 @@ impl App {
     fn artist_mix(self: &Rc<Self>, id: String, shuffle: bool) {
         let client = self.client.clone();
         self.api.run(move || {
-            let result = client.browse(&id, None).and_then(|page| {
-                let header = page.header.clone().unwrap_or_default();
-                let endpoint = if shuffle { header.shuffle } else { header.radio };
-                match endpoint {
-                    Some(e) => client
-                        .queue_with(e.video_id.as_deref(), e.playlist_id.as_deref(), e.params.as_deref())
-                        .map(|(items, _)| items),
-                    None => Ok(page
-                        .shelves
-                        .into_iter()
-                        .filter(|s| !s.carousel)
-                        .flat_map(|s| s.items)
-                        .filter(|i| i.video_id.is_some())
-                        .collect()),
-                }
-            });
+            let result = artist_songs(&client, &id, shuffle);
             on_ui(move |app| match result {
                 Ok(items) if !items.is_empty() => app.set_queue(items, 0),
                 Ok(_) => app.toast("Nothing to play"),

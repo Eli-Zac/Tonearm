@@ -5,6 +5,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -14,23 +15,35 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uniffi.tonearm_android.Item
 import uniffi.tonearm_android.ItemKind
 import uniffi.tonearm_android.Link
+import uniffi.tonearm_android.MenuAction
+import uniffi.tonearm_android.MenuIcon
+import uniffi.tonearm_android.MenuLine
 import uniffi.tonearm_android.Song
 import uniffi.tonearm_android.Tonearm as Core
 
-/** What a song's menu needs from the app. */
+/** What an item's menu needs from the app. */
 interface MenuHost {
     /** Runs a call to the core off the main thread. What it returns, if
      *  anything, is shown to the user, as is any failure. */
     fun run(call: () -> String?)
+    /** Starts something playing, and opens Now Playing over it. */
+    fun play(call: () -> Unit)
     /** Opens a page, leaving Now Playing if it is open. */
     fun open(id: String, title: String)
-    val signedIn: Boolean
+    /** Likes or unlikes the song playing, as Now Playing's heart. */
+    fun toggleLike()
+    /** Something was saved to or taken out of the library, or an artist
+     *  followed: the library shows it again. */
+    fun libraryChanged()
 }
+
+/** A long press: the item, and whether it was on the library, where the
+ *  artists listed are followed. */
+data class MenuRequest(val item: Item, val inLibrary: Boolean = false)
 
 /** A song in the queue, as the item its menu works on. */
 fun Song.asItem() = Item(
@@ -48,18 +61,24 @@ fun Song.asItem() = Item(
     explicit = false,
     artists = artists,
     albumId = albumId,
+    libraryPlaylist = null,
+    saved = false,
 )
 
 /**
- * A song's menu, as the desktop's right click menu offers it for a song:
- * play next, add to queue, go to its artists and album, its radio and its
- * artists', and, signed in, like and add to playlist. Opens from the
- * bottom of the screen on a long press.
+ * An item's menu, with the lines the desktop's right click menu offers,
+ * which come from the core: a song's play next, queue, artists, album,
+ * radios, like and add to playlist; an album's or playlist's play,
+ * shuffle, artists, open and library; an artist's open, shuffle, radio
+ * and follow. Opens from the bottom of the screen on a long press.
  */
 @Composable
-fun SongMenu(item: Item, core: Core, host: MenuHost, onClose: () -> Unit) {
+fun ItemMenu(request: MenuRequest, core: Core, host: MenuHost, onClose: () -> Unit) {
+    val item = request.item
     // Add to playlist turns the menu into the list of the user's playlists.
-    var picking by remember(item) { mutableStateOf(false) }
+    var picking by remember(request) { mutableStateOf(false) }
+    // Only locks inside the core, so cheap enough to read as it opens.
+    val lines = remember(request) { core.menu(item, request.inLibrary) }
     Column(
         Modifier
             .fillMaxWidth()
@@ -74,53 +93,77 @@ fun SongMenu(item: Item, core: Core, host: MenuHost, onClose: () -> Unit) {
                 .clip(RoundedCornerShape(2.dp)).background(Tonearm.line),
         )
         Row(Modifier.padding(horizontal = 20.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Art(item.thumb, 48.dp, RoundedCornerShape(6.dp))
+            Art(item.thumb, 48.dp, if (item.round()) CircleShape else RoundedCornerShape(6.dp))
             Column(Modifier.weight(1f).padding(start = 14.dp)) {
                 Title(item.title, size = 16.sp)
-                Dim(item.artist.ifEmpty { item.subtitle }, 14.sp)
+                val under = item.artist.ifEmpty { item.subtitle }
+                if (under.isNotEmpty()) Dim(under, 14.sp)
             }
         }
         Box(Modifier.fillMaxWidth().height(1.dp).background(Tonearm.line))
         if (picking) {
             PlaylistPicker(item, core, host, onClose)
         } else {
-            Entries(item, core, host, onClose) { picking = true }
+            Entries(item, lines, core, host, onClose) { picking = true }
         }
     }
 }
 
+private fun glyph(icon: MenuIcon) = when (icon) {
+    MenuIcon.PLAY -> Icons.play
+    MenuIcon.SHUFFLE -> Icons.shuffle
+    MenuIcon.PLAY_NEXT -> Icons.playNext
+    MenuIcon.ADD_QUEUE -> Icons.addQueue
+    MenuIcon.ARTIST -> Icons.artist
+    MenuIcon.ALBUM -> Icons.album
+    MenuIcon.RADIO -> Icons.radio
+    MenuIcon.DOWNLOAD -> Icons.download
+    MenuIcon.TRASH -> Icons.trash
+    MenuIcon.HEART -> Icons.heart
+    MenuIcon.OPEN -> Icons.open
+    MenuIcon.LIBRARY -> Icons.library
+}
+
 @Composable
-private fun Entries(item: Item, core: Core, host: MenuHost, onClose: () -> Unit, onPick: () -> Unit) {
-    fun pick(action: () -> Unit) {
-        onClose()
-        action()
+private fun Entries(
+    item: Item,
+    lines: List<MenuLine>,
+    core: Core,
+    host: MenuHost,
+    onClose: () -> Unit,
+    onPick: () -> Unit,
+) {
+    // A page's title until it loads: the artist's or album's name.
+    fun titleOf(id: String) = item.artists.firstOrNull { it.id == id }?.name
+        ?: if (id == item.albumId) item.album else item.title
+    fun pick(line: MenuLine) {
+        when (val action = line.action) {
+            is MenuAction.AddToPlaylist -> return onPick()
+            else -> onClose()
+        }
+        when (val action = line.action) {
+            is MenuAction.PlayNext -> host.run { core.playNext(item) }
+            is MenuAction.AddToQueue -> host.run { core.addToQueue(item) }
+            is MenuAction.Browse -> host.open(action.id, titleOf(action.id))
+            is MenuAction.SongRadio -> host.play { core.playRadio(item) }
+            is MenuAction.ArtistRadio -> host.play { core.playArtist(action.id, false) }
+            is MenuAction.ArtistShuffle -> host.play { core.playArtist(action.id, true) }
+            is MenuAction.Like -> item.videoId?.let { id -> host.run { core.like(id); "Liked ${item.title}" } }
+            is MenuAction.LikePlaying -> host.toggleLike()
+            is MenuAction.Play -> host.play { core.playCollection(item, false) }
+            is MenuAction.Shuffle -> host.play { core.playCollection(item, true) }
+            is MenuAction.Library -> host.run {
+                core.setSaved(action.playlist, action.save, item.title).also { host.libraryChanged() }
+            }
+            is MenuAction.Follow -> host.run {
+                core.follow(action.channel, action.follow, item.title).also { host.libraryChanged() }
+            }
+            // Not offered until the phone has downloads.
+            is MenuAction.ToggleDownload, is MenuAction.DownloadAll, is MenuAction.AddToPlaylist -> {}
+        }
     }
-    val linked = item.artists.filter { it.id != null }
-    val several = linked.size > 1
     Column(Modifier.padding(vertical = 6.dp)) {
-        Entry(Icons.playNext, "Play next") { pick { host.run { core.playNext(item) } } }
-        Entry(Icons.addQueue, "Add to queue") { pick { host.run { core.addToQueue(item) } } }
-        for (artist in linked) {
-            Entry(Icons.artist, if (several) "Go to ${artist.name}" else "Go to artist") {
-                pick { host.open(artist.id!!, artist.name) }
-            }
-        }
-        item.albumId?.let { album ->
-            Entry(Icons.album, "Go to album") { pick { host.open(album, item.album) } }
-        }
-        Entry(Icons.radio, "Song radio") { pick { host.run { core.playRadio(item); null } } }
-        for (artist in linked) {
-            Entry(Icons.radio, if (several) "${artist.name} radio" else "Artist radio") {
-                pick { host.run { core.artistRadio(artist.id!!); null } }
-            }
-        }
-        if (host.signedIn) {
-            val id = item.videoId
-            if (id != null) {
-                Entry(Icons.heart, "Like") { pick { host.run { core.like(id); "Liked ${item.title}" } } }
-                Entry(Icons.addQueue, "Add to playlist", onClick = onPick)
-            }
-        }
+        lines.forEach { line -> Entry(glyph(line.icon), line.label) { pick(line) } }
     }
 }
 

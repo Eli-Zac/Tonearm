@@ -677,6 +677,15 @@ pub fn page(v: &Value) -> Page {
     page
 }
 
+/// Whether the song of a `next` response is liked, from the player's like
+/// button: "LIKE" is liked, "INDIFFERENT" or "DISLIKE" is not. Only the
+/// player's own button counts, not those in the queue's rows.
+pub fn like_status(v: &Value) -> Option<bool> {
+    let overlay = find(v, "playerOverlays")?;
+    let status = find(overlay, "likeButtonRenderer")?.get("likeStatus")?.as_str()?;
+    Some(status == "LIKE")
+}
+
 /// Browse id of the lyrics tab inside a `next` response.
 pub fn lyrics_browse_id(v: &Value) -> Option<String> {
     let tabs = find(v, "watchNextTabbedResultsRenderer")?
@@ -788,6 +797,21 @@ mod tests {
         json!({"text": name, "navigationEndpoint": {"browseEndpoint": {"browseId": id,
             "browseEndpointContextSupportedConfigs": {"browseEndpointContextMusicConfig":
                 {"pageType": "MUSIC_PAGE_TYPE_ARTIST"}}}}})
+    }
+
+    #[test]
+    fn reads_the_players_like_status() {
+        let next = |status: &str| {
+            json!({
+                "contents": {"queue": [{"likeButtonRenderer": {"likeStatus": "LIKE"}}]},
+                "playerOverlays": {"playerOverlayRenderer": {"actions": [
+                    {"likeButtonRenderer": {"likeStatus": status}}]}}
+            })
+        };
+        assert_eq!(like_status(&next("LIKE")), Some(true));
+        assert_eq!(like_status(&next("INDIFFERENT")), Some(false));
+        // A queue row's button is not the player's.
+        assert_eq!(like_status(&json!({"contents": {"likeButtonRenderer": {"likeStatus": "LIKE"}}})), None);
     }
 
     #[test]

@@ -1,5 +1,13 @@
 package app.tonearm
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
@@ -13,6 +21,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
@@ -43,6 +53,9 @@ fun NowPlayingScreen(
     onPanel: (Panel) -> Unit,
     /** A song's menu, from a long press in the queue. */
     onMenu: (Item) -> Unit,
+    /** Whether the song is liked; null while unknown or signed out. */
+    liked: Boolean?,
+    onLike: () -> Unit,
     onClose: () -> Unit,
 ) {
     // A panel's button shows it, and pressed again goes back to the cover.
@@ -114,25 +127,37 @@ fun NowPlayingScreen(
                     )
                     // A few lines from where the song is, under the cover,
                     // as on the desktop. Tap them for the lyrics.
-                    (lyrics as? LyricsState.Found)?.let { found ->
-                        Spacer(Modifier.height(20.dp))
-                        LyricsPreview(found.lyrics, time, height = 60.dp, onOpen = { onPanel(Panel.Lyrics) })
+                    // The room is kept from the start, with bars standing
+                    // in while they load, so the cover never shifts.
+                    Spacer(Modifier.height(20.dp))
+                    when (val state = lyrics) {
+                        is LyricsState.Found ->
+                            LyricsPreview(state.lyrics, time, height = 60.dp, onOpen = { onPanel(Panel.Lyrics) })
+                        LyricsState.Loading -> LyricsSkeleton(60.dp)
+                        else -> Spacer(Modifier.height(60.dp))
                     }
                 }
                 Spacer(Modifier.height(16.dp))
             }
-            Column(Modifier.fillMaxWidth()) {
-                Title(now.meta?.title?.toString() ?: "", size = 24.sp, weight = FontWeight.Bold, lines = 2)
-                Spacer(Modifier.height(4.dp))
-                Title(
-                    if (now.loading) "Loading…" else now.meta?.artist?.toString() ?: "",
-                    size = 17.sp, weight = FontWeight.Medium, color = Tonearm.dim,
-                )
+            // The name, with the heart beside it as on the desktop: filled
+            // in the accent once liked.
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Title(now.meta?.title?.toString() ?: "", size = 24.sp, weight = FontWeight.Bold, lines = 2)
+                    Spacer(Modifier.height(4.dp))
+                    Title(
+                        if (now.loading) "Loading…" else now.meta?.artist?.toString() ?: "",
+                        size = 17.sp, weight = FontWeight.Medium, color = Tonearm.dim,
+                    )
+                }
+                if (liked != null) {
+                    LikeButton(liked, onLike)
+                }
             }
             Spacer(Modifier.height(22.dp))
             SeekBar(now, controller)
             Spacer(Modifier.height(18.dp))
-            Controls(now, controller) { Spacer(Modifier.size(48.dp)) }
+            Controls(now, controller, core)
             Spacer(Modifier.height(10.dp))
             // The panels: lyrics on the left, the queue on the right. Lit
             // while shown; lyrics dim when the song has none.
@@ -150,6 +175,55 @@ fun NowPlayingScreen(
             }
             Spacer(Modifier.height(12.dp))
         }
+    }
+}
+
+/** Two faint lines, gently pulsing, where the lyrics preview will be. The
+ *  pulse runs in the draw phase only, so it costs no recomposition. */
+@Composable
+private fun LyricsSkeleton(height: androidx.compose.ui.unit.Dp) {
+    val pulse = rememberInfiniteTransition(label = "skeleton")
+    val alpha by pulse.animateFloat(
+        initialValue = 0.06f,
+        targetValue = 0.14f,
+        animationSpec = infiniteRepeatable(tween(900, easing = FastOutSlowInEasing), RepeatMode.Reverse),
+        label = "alpha",
+    )
+    Column(Modifier.fillMaxWidth().height(height), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        listOf(0.72f, 0.46f).forEach { width ->
+            Box(
+                Modifier.fillMaxWidth(width).height(18.dp).clip(RoundedCornerShape(6.dp))
+                    .drawBehind { drawRect(Color.White.copy(alpha = alpha)) },
+            )
+        }
+    }
+}
+
+/** The heart. A like gives a small pop, as the press lands. */
+@Composable
+private fun LikeButton(liked: Boolean, onClick: () -> Unit) {
+    val scale = remember { Animatable(1f) }
+    var pressed by remember { mutableIntStateOf(0) }
+    LaunchedEffect(pressed) {
+        if (pressed > 0 && liked) {
+            scale.snapTo(0.8f)
+            scale.animateTo(1f, spring(dampingRatio = 0.4f, stiffness = 600f))
+        }
+    }
+    Box(
+        Modifier.padding(start = 12.dp).size(48.dp).clip(CircleShape).clickable {
+            pressed++
+            onClick()
+        },
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            Icons.heart,
+            modifier = Modifier.graphicsLayer { scaleX = scale.value; scaleY = scale.value },
+            size = 26.sp,
+            filled = liked,
+            color = if (liked) Tonearm.accent else Tonearm.text,
+        )
     }
 }
 
@@ -208,24 +282,15 @@ fun SeekBar(now: NowPlaying, controller: MediaController) {
 }
 
 @Composable
-fun Controls(now: NowPlaying, controller: MediaController, end: @Composable () -> Unit) {
+fun Controls(now: NowPlaying, controller: MediaController, core: Core) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        val repeat = controller.repeatMode
-        Box(
-            Modifier.size(48.dp).clip(CircleShape).clickable {
-                controller.repeatMode = when (repeat) {
-                    Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
-                    Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
-                    else -> Player.REPEAT_MODE_OFF
-                }
-            },
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                if (repeat == Player.REPEAT_MODE_ONE) Icons.repeatOne else Icons.repeat,
-                size = 22.sp,
-                color = if (repeat == Player.REPEAT_MODE_OFF) Tonearm.dim else Tonearm.accent,
-            )
+        // Shuffle on the left and repeat on the right, as on the desktop,
+        // each with a dot under it while on. The core mixes the queue
+        // itself, so shuffle goes to it rather than through Media3.
+        var shuffle by remember(core) { mutableStateOf(core.playback().shuffle) }
+        ModeButton(Icons.shuffle, shuffle) {
+            shuffle = !shuffle
+            core.setShuffle(shuffle)
         }
         Spacer(Modifier.weight(1f))
         IconButton(Icons.prev, size = 30) { controller.seekToPrevious() }
@@ -236,7 +301,28 @@ fun Controls(now: NowPlaying, controller: MediaController, end: @Composable () -
         Spacer(Modifier.width(18.dp))
         IconButton(Icons.next, size = 30) { controller.seekToNext() }
         Spacer(Modifier.weight(1f))
-        end()
+        val repeat = controller.repeatMode
+        ModeButton(if (repeat == Player.REPEAT_MODE_ONE) Icons.repeatOne else Icons.repeat, repeat != Player.REPEAT_MODE_OFF) {
+            controller.repeatMode = when (repeat) {
+                Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
+                Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
+                else -> Player.REPEAT_MODE_OFF
+            }
+        }
+    }
+}
+
+/** Shuffle or repeat: the accent and a dot under it while on. */
+@Composable
+private fun ModeButton(glyph: String, on: Boolean, onClick: () -> Unit) {
+    Box(Modifier.size(48.dp).clip(CircleShape).clickable(onClick = onClick), contentAlignment = Alignment.Center) {
+        Icon(glyph, size = 22.sp, color = if (on) Tonearm.accent else Tonearm.dim)
+        if (on) {
+            Box(
+                Modifier.align(Alignment.BottomCenter).padding(bottom = 4.dp).size(5.dp)
+                    .clip(CircleShape).background(Tonearm.accent),
+            )
+        }
     }
 }
 

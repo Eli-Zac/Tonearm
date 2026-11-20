@@ -3038,6 +3038,22 @@ impl App {
         ui.set_queue_index(index as i32);
         self.sync_up_next();
         ui.set_liked(false);
+        // Whether the song is liked comes after. It only ever fills the
+        // heart, so a press made meanwhile isn't undone.
+        if let Some(video_id) = item.video_id.clone().filter(|_| self.client.signed_in()) {
+            let client = self.client.clone();
+            self.api.run(move || {
+                let liked = client.liked(&video_id).ok().flatten() == Some(true);
+                on_ui(move |app| {
+                    let mut player = app.player.borrow_mut();
+                    if liked && player.generation == generation && !player.liked {
+                        player.liked = true;
+                        drop(player);
+                        app.ui.set_liked(true);
+                    }
+                });
+            });
+        }
         ui.set_progress(0.0);
         ui.set_position_text(clock_text(0.0));
         ui.set_duration_text(clock_text(seconds));
@@ -5444,19 +5460,8 @@ fn random_below(n: usize) -> usize {
     (seed % n.max(1) as u64) as usize
 }
 
-fn shuffled(mut songs: Vec<Item>) -> Vec<Item> {
-    let mut seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(1)
-        | 1;
-    for i in (1..songs.len()).rev() {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        songs.swap(i, (seed % (i as u64 + 1)) as usize);
-    }
-    songs
+fn shuffled(songs: Vec<Item>) -> Vec<Item> {
+    tonearm_core::queue::shuffled(songs)
 }
 
 /// Whether a character is drawn about twice as wide as a Latin letter, as

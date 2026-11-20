@@ -38,6 +38,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uniffi.tonearm_android.Item
+import uniffi.tonearm_android.isLibraryPage
 import uniffi.tonearm_android.Tonearm as Core
 
 enum class Tab(val label: String, val glyph: String) {
@@ -63,11 +64,34 @@ fun App(core: Core, controller: MediaController?) {
     // What Now Playing shows above the song: the cover, lyrics or queue.
     var panel by rememberSaveable { mutableStateOf(Panel.Cover) }
     var toast by remember { mutableStateOf<String?>(null) }
-    // The song whose menu is open, from a long press.
-    var menuItem by remember { mutableStateOf<Item?>(null) }
-    val signedIn = remember(core) { core.signedIn() }
+    // The item whose menu is open, from a long press.
+    var menuItem by remember { mutableStateOf<MenuRequest?>(null) }
+    // Bumped when something is saved to the library or an artist followed,
+    // so the library's pages load again and show it.
+    var libraryEpoch by remember { mutableIntStateOf(0) }
     val now = rememberNowPlaying(controller)
     val playingId = now?.let { controller?.currentMediaItem?.mediaId }
+    // Whether the song playing is liked: null until YouTube Music says.
+    var liked by remember { mutableStateOf<Boolean?>(null) }
+    LaunchedEffect(playingId) {
+        liked = null
+        val id = playingId ?: return@LaunchedEffect
+        liked = withContext(Dispatchers.IO) { runCatching { core.isLiked(id) }.getOrNull() }
+    }
+    // The heart: fills at once, and goes back if YouTube Music says no.
+    fun flipLike() {
+        val id = playingId ?: return
+        val want = liked != true
+        liked = want
+        scope.launch {
+            try {
+                withContext(Dispatchers.IO) { core.setLiked(id, want) }
+            } catch (e: Exception) {
+                if (playingId == id) liked = !want
+                toast = e.message ?: "Couldn't change the like"
+            }
+        }
+    }
 
     LaunchedEffect(toast) {
         if (toast != null) {
@@ -77,7 +101,7 @@ fun App(core: Core, controller: MediaController?) {
     }
 
     // Every play runs the core off the main thread, and says why if it fails.
-    fun play(call: () -> Unit) {
+    fun runPlay(call: () -> Unit) {
         scope.launch {
             try {
                 withContext(Dispatchers.IO) { call() }
@@ -94,16 +118,26 @@ fun App(core: Core, controller: MediaController?) {
         // A song tapped opens Now Playing; it fills in as the song loads.
         override fun playList(items: List<Item>, index: Int) {
             nowPlayingOpen = true
-            play { core.playList(items, index.toUInt()) }
+            runPlay { core.playList(items, index.toUInt()) }
         }
         override fun playRadio(item: Item) {
             nowPlayingOpen = true
-            play { core.playRadio(item) }
+            runPlay { core.playRadio(item) }
         }
-        override fun playItem(item: Item) = play { core.playItem(item) }
-        override fun playWatch(item: Item) = play { core.playWatch(item) }
+        // Anything starting to play opens Now Playing too.
+        override fun playItem(item: Item) {
+            nowPlayingOpen = true
+            runPlay { core.playItem(item) }
+        }
+        override fun playWatch(item: Item) {
+            nowPlayingOpen = true
+            runPlay { core.playWatch(item) }
+        }
         override fun menu(item: Item) {
-            menuItem = item
+            // On the library or one of its lists, artists are followed.
+            val top = stacks.getValue(tab).lastOrNull()
+            val inLibrary = if (top != null) isLibraryPage(top.id) else tab == Tab.Library
+            menuItem = MenuRequest(item, inLibrary)
         }
         override val playing: String? get() = playingId
     }
@@ -119,11 +153,18 @@ fun App(core: Core, controller: MediaController?) {
                 }
             }
         }
+        override fun play(call: () -> Unit) {
+            nowPlayingOpen = true
+            runPlay(call)
+        }
         override fun open(id: String, title: String) {
             nowPlayingOpen = false
             stacks.getValue(tab).add(Route(id, null, title))
         }
-        override val signedIn: Boolean get() = signedIn
+        override fun toggleLike() = flipLike()
+        override fun libraryChanged() {
+            scope.launch { libraryEpoch++ }
+        }
     }
 
     val stack = stacks.getValue(tab)
@@ -143,13 +184,13 @@ fun App(core: Core, controller: MediaController?) {
                 if (top != null) {
                     // Pages run up under the status bar, so an artist's
                     // banner reaches the top edge.
-                    PageScreen(top, core, actions) { stack.removeAt(stack.lastIndex) }
+                    PageScreen(top, core, actions, libraryEpoch) { stack.removeAt(stack.lastIndex) }
                 } else {
                     Box(Modifier.statusBarsPadding()) {
                         when (tab) {
                             Tab.Home -> HomeScreen(core, actions)
                             Tab.Search -> SearchScreen(core, actions)
-                            Tab.Library -> LibraryScreen(core, actions)
+                            Tab.Library -> LibraryScreen(core, actions, libraryEpoch)
                         }
                     }
                 }
@@ -172,7 +213,9 @@ fun App(core: Core, controller: MediaController?) {
                     now, controller, core,
                     panel = panel,
                     onPanel = { panel = it },
-                    onMenu = { menuItem = it },
+                    onMenu = { menuItem = MenuRequest(it) },
+                    liked = liked,
+                    onLike = { flipLike() },
                 ) { nowPlayingOpen = false }
             }
         }
@@ -187,7 +230,7 @@ fun App(core: Core, controller: MediaController?) {
             )
         }
         // The last song shown stays while the menu slides away.
-        var shown by remember { mutableStateOf<Item?>(null) }
+        var shown by remember { mutableStateOf<MenuRequest?>(null) }
         if (menuItem != null) shown = menuItem
         AnimatedVisibility(
             menuItem != null,
@@ -195,7 +238,7 @@ fun App(core: Core, controller: MediaController?) {
             enter = slideInVertically { it },
             exit = slideOutVertically { it },
         ) {
-            shown?.let { SongMenu(it, core, host) { menuItem = null } }
+            shown?.let { ItemMenu(it, core, host) { menuItem = null } }
         }
         toast?.let { Toast(it, Modifier.align(Alignment.BottomCenter).padding(bottom = 150.dp)) }
     }
@@ -281,9 +324,9 @@ fun HomeScreen(core: Core, actions: Actions) {
 }
 
 @Composable
-fun LibraryScreen(core: Core, actions: Actions) {
+fun LibraryScreen(core: Core, actions: Actions, epoch: Int) {
     PageView(
-        key = "library",
+        key = "library$epoch",
         load = { withContext(Dispatchers.IO) { core.library() } },
         more = { token -> withContext(Dispatchers.IO) { core.more(token) } },
         actions = actions,
@@ -371,10 +414,11 @@ fun SearchBox(query: String, onChange: (String) -> Unit, onSearch: () -> Unit) {
 
 /** An album, artist or playlist, with a back arrow over it. */
 @Composable
-fun PageScreen(route: Route, core: Core, actions: Actions, onBack: () -> Unit) {
+fun PageScreen(route: Route, core: Core, actions: Actions, libraryEpoch: Int, onBack: () -> Unit) {
     Box(Modifier.fillMaxSize()) {
         PageView(
-            key = route,
+            // A library page loads again when something is saved or followed.
+            key = if (isLibraryPage(route.id)) route to libraryEpoch else route,
             load = { withContext(Dispatchers.IO) { core.browse(route.id, route.params) } },
             more = { token -> withContext(Dispatchers.IO) { core.more(token) } },
             actions = actions,

@@ -66,6 +66,9 @@ object Icons {
     const val addQueue = ""
     const val artist = ""
     const val album = ""
+    const val open = ""
+    const val trash = ""
+    const val download = ""
 }
 
 @Composable

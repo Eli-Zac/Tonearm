@@ -18,8 +18,10 @@ use tonearm_core::queue::{Added, Queue, Repeat, Step};
 use tonearm_core::{audio, innertube, resolver, store};
 
 mod lyrics;
+mod menu;
 mod pages;
 pub use lyrics::{LyricLine, Lyrics, Syllable};
+pub use menu::{MenuAction, MenuIcon, MenuLine};
 pub use pages::{Chip, Header, Item, ItemKind, Link, Page, Shelf, ShelfLayout};
 
 uniffi::setup_scaffolding!();
@@ -75,6 +77,7 @@ pub struct Playback {
     /// knows to read them again.
     pub version: u64,
     pub repeat: RepeatMode,
+    pub shuffle: bool,
 }
 
 /// In Kotlin, a `TonearmException` whose message says what went wrong.
@@ -123,6 +126,8 @@ pub struct Tonearm {
     topped_for: Mutex<String>,
     /// Lyrics found, by video id, so going back to a song doesn't ask again.
     lyrics: Mutex<HashMap<String, Lyrics>>,
+    /// Whether songs are liked, by video id, as last read or set.
+    liked: Mutex<HashMap<String, bool>>,
 }
 
 #[uniffi::export]
@@ -146,6 +151,7 @@ impl Tonearm {
             topping: AtomicBool::new(false),
             topped_for: Mutex::new(String::new()),
             lyrics: Mutex::new(HashMap::new()),
+            liked: Mutex::new(HashMap::new()),
         });
         // Signed in as last time, as the desktop app starts.
         if let Some(cookie) = store::load("session") {
@@ -223,12 +229,21 @@ impl Tonearm {
         if let Some(found) = self.lyrics.lock().unwrap().get(&video_id) {
             return Some(found.clone());
         }
+        // The queue's own name for the song wins: the app's can still be
+        // the last song's for a moment as the next one comes on, which
+        // would find the wrong song's lyrics.
+        let queued = {
+            let queue = self.queue.lock().unwrap();
+            queue.items().iter().find(|s| s.video_id == video_id).cloned()
+        };
+        let (title, artist) = match &queued {
+            Some(song) => (song.title.clone(), song.artist.clone()),
+            None => (title, artist),
+        };
         let seconds = if seconds > 0.0 {
             seconds
         } else {
-            let queue = self.queue.lock().unwrap();
-            let song = queue.items().iter().find(|s| s.video_id == video_id);
-            song.map(|s| lyrics::seconds_of(&s.duration)).unwrap_or(0.0)
+            queued.map(|s| lyrics::seconds_of(&s.duration)).unwrap_or(0.0)
         };
         let query = tonearm_core::lyrics::Query {
             video_id: &video_id,
@@ -320,7 +335,7 @@ impl Tonearm {
 
     /// Plays `songs` from `index`, in place of the queue.
     pub fn set_queue(&self, songs: Vec<Song>, index: u32) -> Result<(), TonearmError> {
-        self.queue.lock().unwrap().set(songs, index as usize);
+        self.queue.lock().unwrap().start(songs, index as usize);
         self.changed();
         self.play_current()
     }
@@ -367,9 +382,90 @@ impl Tonearm {
         self.after_adding(added, format!("Added {title} to the queue"), String::new())
     }
 
+    /// What an item's long press offers, as the desktop's right click does.
+    /// `in_library` is true on the library and its lists, whose artists
+    /// are followed.
+    pub fn menu(&self, item: Item, in_library: bool) -> Vec<MenuLine> {
+        let playing = item.video_id.is_some()
+            && self.queue.lock().unwrap().current().map(|s| &s.video_id) == item.video_id.as_ref();
+        let liked = playing && item.video_id.as_ref().is_some_and(|id| self.liked.lock().unwrap().get(id) == Some(&true));
+        let context = tonearm_core::menu::Context {
+            signed_in: self.client.signed_in(),
+            playing,
+            liked,
+            in_library,
+            downloads: false,
+        };
+        menu::lines(&item, &context)
+    }
+
+    /// Whether the user has liked a song, for Now Playing's heart. Asks
+    /// YouTube Music once per song. None signed out, or when it can't say.
+    pub fn is_liked(&self, video_id: String) -> Option<bool> {
+        if let Some(known) = self.liked.lock().unwrap().get(&video_id) {
+            return Some(*known);
+        }
+        let liked = self.client.liked(&video_id).ok().flatten()?;
+        let mut cache = self.liked.lock().unwrap();
+        if cache.len() >= 200 {
+            cache.clear();
+        }
+        // A like set meanwhile wins over what was read.
+        Some(*cache.entry(video_id).or_insert(liked))
+    }
+
+    /// Likes a song, or takes the like back.
+    pub fn set_liked(&self, video_id: String, like: bool) -> Result<(), TonearmError> {
+        self.liked.lock().unwrap().insert(video_id.clone(), like);
+        let result = self.client.rate(&video_id, like);
+        if result.is_err() {
+            self.liked.lock().unwrap().remove(&video_id);
+        }
+        Ok(result?)
+    }
+
     /// Likes a song on YouTube Music.
     pub fn like(&self, video_id: String) -> Result<(), TonearmError> {
-        Ok(self.client.rate(&video_id, true)?)
+        self.set_liked(video_id, true)
+    }
+
+    /// An album's or playlist's menu Play or Shuffle: all its songs.
+    pub fn play_collection(&self, item: Item, shuffle: bool) -> Result<(), TonearmError> {
+        let items = tonearm_core::menu::collection_songs(&self.client, &pages::core_item(&item))?;
+        let songs: Vec<Song> = items.iter().filter_map(song).collect();
+        if songs.is_empty() {
+            return Err("There are no songs in it".to_string().into());
+        }
+        let songs = if shuffle { tonearm_core::queue::shuffled(songs) } else { songs };
+        self.set_queue(songs, 0)
+    }
+
+    /// An artist's shuffle or radio from their menu, as the desktop plays
+    /// them: their page's own, or their top songs.
+    pub fn play_artist(&self, artist_id: String, shuffle: bool) -> Result<(), TonearmError> {
+        let items = tonearm_core::menu::artist_songs(&self.client, &artist_id, shuffle)?;
+        let songs: Vec<Song> = items.iter().filter_map(song).collect();
+        if songs.is_empty() {
+            return Err("Nothing to play".to_string().into());
+        }
+        self.set_queue(songs, 0)
+    }
+
+    /// Saves an album or playlist to the library, or takes it out. Gives
+    /// what to tell the user.
+    pub fn set_saved(&self, playlist_id: String, save: bool, title: String) -> Result<String, TonearmError> {
+        self.client.rate_playlist(&playlist_id, save)?;
+        Ok(if save {
+            format!("Saved {title} to your library")
+        } else {
+            format!("Removed {title} from your library")
+        })
+    }
+
+    /// Follows an artist, or stops. Gives what to tell the user.
+    pub fn follow(&self, channel_id: String, follow: bool, name: String) -> Result<String, TonearmError> {
+        self.client.subscribe(&channel_id, follow)?;
+        Ok(if follow { format!("Following {name}") } else { format!("Stopped following {name}") })
     }
 
     /// The user's playlists songs can be added to: each title, and its
@@ -387,13 +483,6 @@ impl Tonearm {
         Ok(self.client.add_to_playlist(&playlist_id, &video_id)?)
     }
 
-    /// An artist's radio, from their page, as the desktop's "Artist radio".
-    pub fn artist_radio(&self, artist_id: String) -> Result<(), TonearmError> {
-        let page = pages::page(&self.client.browse(&artist_id, None)?);
-        let radio = page.header.and_then(|h| h.radio.or(h.shuffle));
-        self.play_watch(radio.ok_or_else(|| "This artist has no radio".to_string())?)
-    }
-
     pub fn queue(&self) -> Vec<Song> {
         self.queue.lock().unwrap().items().to_vec()
     }
@@ -401,6 +490,13 @@ impl Tonearm {
     /// The song playing, or the one the queue is on.
     pub fn now_playing(&self) -> Option<Song> {
         self.queue.lock().unwrap().current().cloned()
+    }
+
+    /// Shuffle on mixes the songs after the one playing; off puts the
+    /// queue back in its order.
+    pub fn set_shuffle(&self, on: bool) {
+        self.queue.lock().unwrap().set_shuffle(on, |a, b| a.video_id == b.video_id);
+        self.changed();
     }
 
     pub fn set_repeat(&self, mode: RepeatMode) {
@@ -459,6 +555,7 @@ impl Tonearm {
                 Repeat::All => RepeatMode::All,
                 Repeat::One => RepeatMode::One,
             },
+            shuffle: queue.shuffle(),
         }
     }
 }
@@ -666,17 +763,13 @@ pub fn backdrop_wave(base: Vec<u8>, t: f32) -> Vec<u8> {
     tonearm_core::backdrop::wave(&base, n, n, t)
 }
 
-/// The songs listed down a page, not those in its carousels: an album's
-/// tracks, an artist's top songs. As the desktop's `songs_of`.
-fn songs_of(page: &model::Page) -> Vec<model::Item> {
-    page.shelves
-        .iter()
-        .filter(|shelf| !shelf.carousel)
-        .flat_map(|shelf| &shelf.items)
-        .filter(|item| item.video_id.is_some())
-        .cloned()
-        .collect()
+/// A page of the library, whose artists are followed, by its browse id.
+#[uniffi::export]
+pub fn is_library_page(id: String) -> bool {
+    tonearm_core::menu::is_library_page(&id)
 }
+
+use tonearm_core::menu::songs_of;
 
 /// The artist in a subtitle such as "Song • The Weeknd • Starboy • 3:50":
 /// the first part that isn't the kind, a length or a count. As the

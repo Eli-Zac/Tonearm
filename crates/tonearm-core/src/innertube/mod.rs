@@ -482,6 +482,16 @@ impl Client {
             .collect())
     }
 
+    /// Whether the signed-in user has liked a song, as the player's heart
+    /// shows it. None signed out, or when YouTube Music doesn't say.
+    pub fn liked(&self, video_id: &str) -> Result<Option<bool>, String> {
+        if !self.signed_in() {
+            return Ok(None);
+        }
+        let response = self.post("next", json!({"videoId": video_id, "isAudioOnly": true}))?;
+        Ok(parse::like_status(&response))
+    }
+
     pub fn rate(&self, video_id: &str, like: bool) -> Result<(), String> {
         let endpoint = if like { "like/like" } else { "like/removelike" };
         self.post(endpoint, json!({"target": {"videoId": video_id}}))

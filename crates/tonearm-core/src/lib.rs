@@ -17,6 +17,7 @@ pub mod hook;
 pub mod innertube;
 pub mod library;
 pub mod lyrics;
+pub mod menu;
 pub mod mix;
 pub mod offline;
 pub mod pool;

@@ -47,6 +47,9 @@ pub struct Queue<T> {
     items: Vec<T>,
     index: usize,
     pub repeat: Repeat,
+    shuffle: bool,
+    /// The queue as it was before shuffle, to put back when it ends.
+    unshuffled: Option<Vec<T>>,
 }
 
 impl<T> Default for Queue<T> {
@@ -55,6 +58,59 @@ impl<T> Default for Queue<T> {
             items: Vec::new(),
             index: 0,
             repeat: Repeat::Off,
+            shuffle: false,
+            unshuffled: None,
+        }
+    }
+}
+
+/// Shuffle, as the desktop's button does it: the song playing stays, the
+/// songs after it are mixed, and turning it off puts the order back.
+impl<T: Clone> Queue<T> {
+    pub fn shuffle(&self) -> bool {
+        self.shuffle
+    }
+
+    /// Starts a new queue at `index`. With shuffle on, that song plays
+    /// first and the rest follow mixed, as the desktop starts a list.
+    pub fn start(&mut self, items: Vec<T>, index: usize) {
+        if self.shuffle && index < items.len() {
+            self.unshuffled = Some(items.clone());
+            let mut rest = items;
+            let first = rest.remove(index);
+            let mut out = vec![first];
+            out.extend(shuffled(rest));
+            self.set(out, 0);
+        } else {
+            self.unshuffled = None;
+            self.set(items, index);
+        }
+    }
+
+    /// Turns shuffle on or off. `same` tells two entries are one song.
+    pub fn set_shuffle(&mut self, on: bool, same: impl Fn(&T, &T) -> bool) {
+        if on == self.shuffle {
+            return;
+        }
+        self.shuffle = on;
+        if on {
+            self.unshuffled = Some(self.items.clone());
+            if self.index + 1 < self.items.len() {
+                let rest = self.items.split_off(self.index + 1);
+                self.items.extend(shuffled(rest));
+            }
+        } else if let Some(mut out) = self.unshuffled.take() {
+            let Some(current) = self.current().cloned() else { return };
+            // Songs added while shuffled go at the end; songs taken out
+            // stay out.
+            for item in &self.items {
+                if !out.iter().any(|o| same(o, item)) {
+                    out.push(item.clone());
+                }
+            }
+            out.retain(|o| self.items.iter().any(|q| same(q, o)));
+            let index = out.iter().position(|o| same(o, &current)).unwrap_or(0);
+            self.set(out, index);
         }
     }
 }
@@ -184,9 +240,55 @@ impl<T> Queue<T> {
     }
 }
 
+/// `items` in a random order, for shuffle. A small xorshift seeded from the
+/// clock: good enough to mix a queue, with no crate for it.
+pub fn shuffled<T>(mut items: Vec<T>) -> Vec<T> {
+    let mut seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(1)
+        | 1;
+    for i in (1..items.len()).rev() {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        items.swap(i, (seed % (i as u64 + 1)) as usize);
+    }
+    items
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shuffle_keeps_the_song_playing_and_comes_back() {
+        let mut q = queue(20, 3, Repeat::Off);
+        q.set_shuffle(true, |a, b| a == b);
+        assert_eq!(&q.items()[..4], &[0, 1, 2, 3]);
+        assert_eq!(q.current(), Some(&3));
+        // A song added while shuffled stays, at the end.
+        q.add(99, |&s| s == 99);
+        q.go(10);
+        let playing = *q.current().unwrap();
+        q.set_shuffle(false, |a, b| a == b);
+        let mut expected: Vec<usize> = (0..20).collect();
+        expected.push(99);
+        assert_eq!(q.items(), &expected[..]);
+        assert_eq!(q.current(), Some(&playing));
+        // A new list with shuffle on starts at the song picked.
+        q.set_shuffle(true, |a, b| a == b);
+        q.start((0..10).collect(), 6);
+        assert_eq!(q.current(), Some(&6));
+        assert_eq!(q.index(), 0);
+    }
+
+    #[test]
+    fn shuffled_keeps_every_item() {
+        let mut out = shuffled((0..50).collect::<Vec<_>>());
+        out.sort();
+        assert_eq!(out, (0..50).collect::<Vec<_>>());
+    }
 
     fn queue(len: usize, index: usize, repeat: Repeat) -> Queue<usize> {
         let mut queue = Queue::default();

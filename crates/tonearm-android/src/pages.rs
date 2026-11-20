@@ -36,6 +36,10 @@ pub struct Item {
     pub artists: Vec<Link>,
     /// The album's page, for "Go to album".
     pub album_id: Option<String>,
+    /// An album or playlist that can be saved to the library: the playlist
+    /// behind it, and whether it is saved already.
+    pub library_playlist: Option<String>,
+    pub saved: bool,
 }
 
 /// A name and, where there is one, the page it opens.
@@ -157,6 +161,8 @@ pub fn item(i: &model::Item) -> Item {
         explicit: i.explicit,
         artists: links(&i.artists),
         album_id: i.album.as_ref().map(|(_, id)| id.clone()),
+        library_playlist: i.library.as_ref().map(|(playlist, _)| playlist.clone()),
+        saved: i.library.as_ref().is_some_and(|(_, saved)| *saved),
     }
 }
 
@@ -182,6 +188,7 @@ pub fn core_item(i: &Item) -> model::Item {
         explicit: i.explicit,
         artists: i.artists.iter().map(|a| (a.name.clone(), a.id.clone())).collect(),
         album: i.album_id.clone().map(|id| (i.album.clone(), id)),
+        library: i.library_playlist.clone().map(|playlist| (playlist, i.saved)),
         ..model::Item::default()
     }
 }
