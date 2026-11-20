@@ -84,8 +84,15 @@ fun App(core: Core, controller: MediaController?) {
         override fun open(id: String, params: String?, title: String) {
             stacks.getValue(tab).add(Route(id, params, title))
         }
-        override fun playList(items: List<Item>, index: Int) = play { core.playList(items, index.toUInt()) }
-        override fun playRadio(item: Item) = play { core.playRadio(item) }
+        // A song tapped opens Now Playing; it fills in as the song loads.
+        override fun playList(items: List<Item>, index: Int) {
+            nowPlayingOpen = true
+            play { core.playList(items, index.toUInt()) }
+        }
+        override fun playRadio(item: Item) {
+            nowPlayingOpen = true
+            play { core.playRadio(item) }
+        }
         override fun playItem(item: Item) = play { core.playItem(item) }
         override fun playWatch(item: Item) = play { core.playWatch(item) }
         override val playing: String? get() = playingId
