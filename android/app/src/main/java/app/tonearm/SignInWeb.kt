@@ -46,6 +46,14 @@ fun YouTubeSignIn(core: Core, onBack: () -> Unit, onToast: (String) -> Unit) {
         // Signed in only once on music.youtube.com itself: Google's pages
         // set SAPISID a step before YouTube Music has its own.
         ready = { url, cookies -> url.startsWith(YOUTUBE_MUSIC) && core.isSignInCookie(cookies) },
+        // Google can stop on one of its own pages after signing in (such as
+        // the account's security tips): once it has, go on to YouTube Music.
+        onward = { url ->
+            val google = CookieManager.getInstance().getCookie("https://www.google.com") ?: ""
+            val signedIn = google.split(';').any { it.trim().startsWith("SAPISID=") }
+            val host = runCatching { android.net.Uri.parse(url).host }.getOrNull() ?: ""
+            if (signedIn && host != "accounts.google.com" && !url.startsWith(YOUTUBE_MUSIC)) YOUTUBE_MUSIC else null
+        },
         accept = { cookies ->
             if (core.signIn(cookies)) {
                 Prefs.accountNote = ""
@@ -90,6 +98,8 @@ private fun SignInWeb(
     start: String,
     cookiesOf: String,
     ready: (url: String, cookies: String) -> Boolean,
+    /** Where to go when the sign in is done but the page has wandered off. */
+    onward: (url: String) -> String? = { null },
     /** Signs in with the cookies, off the main thread: what to say, or
      *  null when it didn't take. */
     accept: (String) -> String?,
@@ -99,11 +109,22 @@ private fun SignInWeb(
     var url by remember { mutableStateOf("") }
     var checking by remember { mutableStateOf(false) }
     var done by remember { mutableStateOf(false) }
+    var web by remember { mutableStateOf<WebView?>(null) }
     // The page is watched as it goes, and every second, since sign ins
     // finish through scripts as much as through page loads.
     LaunchedEffect(Unit) {
+        // Seconds the page has sat somewhere it should move on from: two,
+        // so a redirect already on its way isn't cut short.
+        var stuck = 0
         while (!done) {
             delay(1000)
+            val next = onward(url)
+            stuck = if (next != null) stuck + 1 else 0
+            if (next != null && stuck >= 2) {
+                stuck = 0
+                web?.loadUrl(next)
+                continue
+            }
             val cookies = CookieManager.getInstance().getCookie(cookiesOf) ?: continue
             if (checking || !ready(url, cookies)) continue
             checking = true
@@ -161,9 +182,10 @@ private fun SignInWeb(
                         }
                     }
                     loadUrl(start)
+                    web = this
                 }
             },
-            onRelease = { it.destroy() },
+            onRelease = { web = null; it.destroy() },
         )
     }
 }
