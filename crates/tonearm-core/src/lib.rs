@@ -11,6 +11,7 @@ pub mod audio;
 pub mod backdrop;
 pub mod cast;
 pub mod decode;
+pub mod explore;
 pub mod history;
 pub mod home;
 pub mod hook;

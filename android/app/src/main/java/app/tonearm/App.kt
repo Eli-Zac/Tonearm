@@ -50,8 +50,9 @@ import uniffi.tonearm_android.Tonearm as Core
 
 enum class Tab(val label: String, val glyph: String) {
     Home("Home", Icons.home),
-    Search("Search", Icons.search),
+    Explore("Explore", Icons.explore),
     Library("Library", Icons.library),
+    Search("Search", Icons.search),
 }
 
 /** A page opened from a tab, over it: an album, artist or playlist. */
@@ -239,6 +240,7 @@ fun App(core: Core, controller: MediaController?) {
                             )
                             StatusFade()
                         }
+                        Tab.Explore -> Box(Modifier.statusBarsPadding()) { ExploreScreen(core, actions) }
                         Tab.Search -> Box(Modifier.statusBarsPadding()) { SearchScreen(core, actions) }
                         Tab.Library -> Box(Modifier.statusBarsPadding()) { LibraryScreen(core, actions, libraryEpoch) }
                     }
@@ -453,6 +455,21 @@ fun HomeScreen(core: Core, actions: Actions, onSettings: () -> Unit, onAccount: 
                     }
                 }
             }
+        },
+    )
+}
+
+@Composable
+fun ExploreScreen(core: Core, actions: Actions) {
+    PageView(
+        key = "explore",
+        load = { withContext(Dispatchers.IO) { core.explore() } },
+        more = { token -> withContext(Dispatchers.IO) { core.more(token) } },
+        actions = actions,
+        topWhileLoading = true,
+        top = {
+            Title("Explore", size = 28.sp, weight = FontWeight.ExtraBold,
+                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 4.dp))
         },
     )
 }

@@ -42,6 +42,18 @@ pub struct Item {
     pub saved: bool,
     /// A mood or genre's colour (0xAARRGGBB); None for everything else.
     pub color: Option<u32>,
+    /// On a chart, how the song's place moved since the last one.
+    pub trend: Trend,
+}
+
+/// A chart song's move, marked beside its rank.
+#[derive(uniffi::Enum, Clone, Copy, PartialEq, Debug)]
+pub enum Trend {
+    /// Not on a chart.
+    None,
+    Up,
+    Down,
+    Same,
 }
 
 /// A name and, where there is one, the page it opens.
@@ -81,6 +93,9 @@ pub struct Shelf {
     /// The page behind "Show all", if any.
     pub more_id: Option<String>,
     pub more_params: Option<String>,
+    /// Its rows carry their rank before the art: Explore's top songs, or a
+    /// chart's songs.
+    pub ranked: bool,
 }
 
 /// The top of an album, artist or playlist page.
@@ -166,6 +181,12 @@ pub fn item(i: &model::Item) -> Item {
         library_playlist: i.library.as_ref().map(|(playlist, _)| playlist.clone()),
         saved: i.library.as_ref().is_some_and(|(_, saved)| *saved),
         color: i.color,
+        trend: match i.trend {
+            model::Trend::None => Trend::None,
+            model::Trend::Up => Trend::Up,
+            model::Trend::Down => Trend::Down,
+            model::Trend::Same => Trend::Same,
+        },
     }
 }
 
@@ -211,6 +232,9 @@ fn shelf(s: &model::Shelf) -> Shelf {
         items: s.items.iter().map(item).collect(),
         more_id: s.more.as_ref().map(|(id, _)| id.clone()),
         more_params: s.more.as_ref().and_then(|(_, params)| params.clone()),
+        ranked: !s.carousel
+            && (tonearm_core::explore::is_chart(s)
+                || s.items.iter().any(|i| i.trend != model::Trend::None)),
     }
 }
 

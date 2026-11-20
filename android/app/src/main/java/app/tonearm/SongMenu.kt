@@ -23,6 +23,7 @@ import uniffi.tonearm_android.MenuAction
 import uniffi.tonearm_android.MenuIcon
 import uniffi.tonearm_android.MenuLine
 import uniffi.tonearm_android.Song
+import uniffi.tonearm_android.Trend
 import uniffi.tonearm_android.Tonearm as Core
 
 /** What an item's menu needs from the app. */
@@ -64,6 +65,7 @@ fun Song.asItem() = Item(
     libraryPlaylist = null,
     saved = false,
     color = null,
+    trend = Trend.NONE,
 )
 
 /**

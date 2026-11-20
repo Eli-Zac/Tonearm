@@ -273,6 +273,12 @@ impl Tonearm {
         self.browse("FEmusic_home".into(), None)
     }
 
+    /// Explore: new releases, the region's top songs as a numbered list,
+    /// and YouTube Music's other shelves. Moods and genres are on Search.
+    pub fn explore(&self) -> Result<Page, TonearmError> {
+        Ok(pages::page(&tonearm_core::explore::fetch(&self.client)?))
+    }
+
     /// The signed-in user's library: playlists, albums, artists.
     pub fn library(&self) -> Result<Page, TonearmError> {
         self.browse("FEmusic_library_landing".into(), None)

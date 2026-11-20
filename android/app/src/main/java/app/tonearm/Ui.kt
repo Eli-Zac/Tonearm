@@ -1,5 +1,6 @@
 package app.tonearm
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -21,9 +22,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
@@ -36,6 +39,7 @@ import uniffi.tonearm_android.ItemKind
 import uniffi.tonearm_android.Page
 import uniffi.tonearm_android.Shelf
 import uniffi.tonearm_android.ShelfLayout
+import uniffi.tonearm_android.Trend
 
 /** What a tap on an item does, decided as the desktop does. */
 interface Actions {
@@ -120,7 +124,7 @@ fun Item.round(): Boolean = kind == ItemKind.ARTIST
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun ItemRow(item: Item, playing: Boolean, onClick: () -> Unit, onPlay: (() -> Unit)? = null) {
+fun ItemRow(item: Item, playing: Boolean, onClick: () -> Unit, onPlay: (() -> Unit)? = null, rank: Int = 0) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -128,6 +132,7 @@ fun ItemRow(item: Item, playing: Boolean, onClick: () -> Unit, onPlay: (() -> Un
             .padding(horizontal = 16.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (rank > 0) Rank(rank, item.trend, playing)
         Art(item.thumb, 50.dp, if (item.round()) CircleShape else RoundedCornerShape(8.dp))
         Column(Modifier.weight(1f).padding(start = 14.dp)) {
             Title(item.title, color = if (playing) Tonearm.accent else Tonearm.text)
@@ -138,6 +143,43 @@ fun ItemRow(item: Item, playing: Boolean, onClick: () -> Unit, onPlay: (() -> Un
         }
         if (item.duration.isNotEmpty()) Dim(item.duration, 13.sp, modifier = Modifier.padding(start = 8.dp))
     }
+}
+
+/**
+ * A chart row's place before its art, as the desktop's numbered rows: the
+ * number, and where the chart marks it, a green rise, a red fall or a grey
+ * dot for no change, left of it.
+ */
+@Composable
+fun Rank(rank: Int, trend: Trend, playing: Boolean) {
+    val charted = trend != Trend.NONE
+    Row(
+        Modifier.width(if (charted) 46.dp else 28.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (charted) {
+            Box(Modifier.width(14.dp), contentAlignment = Alignment.CenterStart) {
+                when (trend) {
+                    Trend.UP -> Canvas(Modifier.size(12.dp, 8.dp)) {
+                        drawPath(Path().apply {
+                            moveTo(size.width / 2, 0f); lineTo(size.width, size.height); lineTo(0f, size.height); close()
+                        }, Color(0xFF3EC46D))
+                    }
+                    Trend.DOWN -> Canvas(Modifier.size(12.dp, 8.dp)) {
+                        drawPath(Path().apply {
+                            moveTo(0f, 0f); lineTo(size.width, 0f); lineTo(size.width / 2, size.height); close()
+                        }, Color(0xFFFF4F5E))
+                    }
+                    else -> Box(Modifier.padding(start = 3.5.dp).size(5.dp).clip(CircleShape).background(Tonearm.faint))
+                }
+            }
+        }
+        Text(
+            rank.toString(), modifier = Modifier.weight(1f), color = if (playing) Tonearm.accent else Tonearm.dim,
+            fontFamily = Tonearm.font, fontSize = 16.sp, textAlign = TextAlign.Center, maxLines = 1,
+        )
+    }
+    Spacer(Modifier.width(12.dp))
 }
 
 /** The small "E" before an explicit song's artist. */
@@ -202,8 +244,23 @@ fun ItemCard(item: Item, width: Dp, wide: Boolean, actions: Actions) {
 fun LazyListScope.shelf(shelf: Shelf, actions: Actions) {
     if (shelf.title.isNotEmpty()) {
         item(contentType = "title") {
-            Title(shelf.title, size = 20.sp, weight = FontWeight.Bold,
-                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 22.dp, bottom = 10.dp))
+            Row(
+                Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 22.dp, bottom = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Title(shelf.title, size = 20.sp, weight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                // A quiet "Show all" on the right, as the desktop's shelf titles.
+                shelf.moreId?.let { id ->
+                    Box(
+                        Modifier.height(28.dp).clip(RoundedCornerShape(14.dp))
+                            .clickable { actions.open(id, shelf.moreParams, shelf.title) }
+                            .padding(horizontal = 8.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Title("Show all", size = 14.sp, color = Tonearm.dim)
+                    }
+                }
+            }
         }
     }
     when (shelf.layout) {
@@ -214,7 +271,27 @@ fun LazyListScope.shelf(shelf: Shelf, actions: Actions) {
                 onClick = { if (item.videoId != null) actions.playList(shelf.items, i) else actions.tap(item) },
                 // A long press: its menu.
                 onPlay = { actions.menu(item) },
+                rank = if (shelf.ranked) i + 1 else 0,
             )
+        }
+        // Pages to open and nothing to show for them, such as Explore's
+        // "New releases", "Charts" and "Moods & genres": buttons, not
+        // empty cards.
+        ShelfLayout.CARDS if shelf.items.all { it.thumb.isEmpty() && it.videoId == null } -> item(contentType = "buttons") {
+            LazyRow(
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                items(shelf.items) { item ->
+                    Box(
+                        Modifier.height(44.dp).clip(RoundedCornerShape(Tonearm.radius)).background(Tonearm.raised)
+                            .clickable { actions.tap(item) }.padding(horizontal = 16.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Title(item.title, size = 15.sp)
+                    }
+                }
+            }
         }
         ShelfLayout.CARDS, ShelfLayout.WIDE -> item(contentType = "cards") {
             val wide = shelf.layout == ShelfLayout.WIDE
@@ -313,7 +390,7 @@ fun playlistItem(playlistId: String, title: String) = Item(
     kind = ItemKind.PLAYLIST, title = title, subtitle = "", thumb = "", duration = "",
     videoId = null, browseId = null, playlistId = playlistId, params = null,
     artist = "", album = "", explicit = false, artists = emptyList(), albumId = null,
-    libraryPlaylist = null, saved = false, color = null,
+    libraryPlaylist = null, saved = false, color = null, trend = Trend.NONE,
 )
 
 @Composable
