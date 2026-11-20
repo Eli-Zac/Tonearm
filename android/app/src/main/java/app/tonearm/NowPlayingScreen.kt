@@ -24,15 +24,39 @@ import androidx.compose.ui.unit.sp
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import coil3.compose.AsyncImage
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import uniffi.tonearm_android.Tonearm as Core
 
 /**
  * The song playing, full screen: its cover large over the same cover blown
- * up and blurred, as the desktop's player. Swipe down or press back to
- * leave it.
+ * up and blurred, as the desktop's player. The lyrics button swaps the
+ * cover for the song's lyrics. Swipe down or press back to leave it.
  */
 @Composable
-fun NowPlayingScreen(now: NowPlaying, controller: MediaController, actions: Actions, onClose: () -> Unit) {
+fun NowPlayingScreen(
+    now: NowPlaying,
+    controller: MediaController,
+    core: Core,
+    showLyrics: Boolean,
+    onLyrics: () -> Unit,
+    onClose: () -> Unit,
+) {
     val cover = now.meta?.artworkUri?.toString()
+    // Each song's lyrics are looked for as it comes on, so they are ready
+    // when the button is pressed. The core keeps those found.
+    val title = now.meta?.title?.toString() ?: ""
+    val artist = now.meta?.artist?.toString() ?: ""
+    val lyrics by produceState<LyricsState>(LyricsState.Loading, now.id) {
+        value = LyricsState.Loading
+        val id = now.id
+        val found = if (id == null) null else withContext(Dispatchers.IO) {
+            runCatching { core.lyrics(id, title, artist, 0f) }.getOrNull()
+        }
+        value = found?.let { LyricsState.Found(it) } ?: LyricsState.None
+    }
+    // The time into the song, every frame, for the lyrics.
+    val time = rememberSongTime(controller, now.playing)
     var dragged by remember { mutableFloatStateOf(0f) }
     Box(
         Modifier
@@ -45,19 +69,8 @@ fun NowPlayingScreen(now: NowPlaying, controller: MediaController, actions: Acti
                 ) { _, amount -> dragged = (dragged + amount).coerceAtLeast(0f) }
             },
     ) {
-        // The backdrop: the cover, blurred and darkened.
-        AsyncImage(
-            model = cover,
-            contentDescription = null,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier.fillMaxSize().blur(80.dp),
-            alpha = 0.55f,
-        )
-        Box(
-            Modifier.fillMaxSize().background(
-                Brush.verticalGradient(0f to Color(0x6608080A), 0.6f to Color(0xB308080A), 1f to Tonearm.bg),
-            ),
-        )
+        // The desktop's expanded Now playing background, flowing.
+        FlowingBackdrop(cover, Modifier.fillMaxSize())
         Column(
             Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -72,15 +85,27 @@ fun NowPlayingScreen(now: NowPlaying, controller: MediaController, actions: Acti
                 Spacer(Modifier.weight(1f))
                 Spacer(Modifier.size(40.dp))
             }
-            Spacer(Modifier.weight(1f))
-            AsyncImage(
-                model = cover,
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxWidth().aspectRatio(1f)
-                    .clip(RoundedCornerShape(Tonearm.radius)).background(Tonearm.raised),
-            )
-            Spacer(Modifier.weight(1f))
+            if (showLyrics) {
+                LyricsPane(lyrics, controller, time, Modifier.weight(1f).fillMaxWidth())
+                Spacer(Modifier.height(16.dp))
+            } else {
+                Spacer(Modifier.weight(1f))
+                // The cover gives up height first when the screen is short.
+                AsyncImage(
+                    model = cover,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.weight(8f, fill = false).aspectRatio(1f)
+                        .clip(RoundedCornerShape(Tonearm.radius)).background(Tonearm.raised),
+                )
+                // A few lines from where the song is, under the cover, as on
+                // the desktop. Tap them for the lyrics.
+                (lyrics as? LyricsState.Found)?.let { found ->
+                    Spacer(Modifier.height(20.dp))
+                    LyricsPreview(found.lyrics, time, height = 60.dp, onOpen = onLyrics)
+                }
+                Spacer(Modifier.weight(1f))
+            }
             Column(Modifier.fillMaxWidth()) {
                 Title(now.meta?.title?.toString() ?: "", size = 24.sp, weight = FontWeight.Bold, lines = 2)
                 Spacer(Modifier.height(4.dp))
@@ -92,7 +117,23 @@ fun NowPlayingScreen(now: NowPlaying, controller: MediaController, actions: Acti
             Spacer(Modifier.height(22.dp))
             SeekBar(now, controller)
             Spacer(Modifier.height(18.dp))
-            Controls(now, controller)
+            Controls(now, controller) {
+                // Lit while shown; dim when the song has none.
+                Box(
+                    Modifier.size(48.dp).clip(CircleShape).clickable(onClick = onLyrics),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.lyrics,
+                        size = 22.sp,
+                        color = when {
+                            showLyrics -> Tonearm.accent
+                            lyrics == LyricsState.None -> Tonearm.faint
+                            else -> Tonearm.text
+                        },
+                    )
+                }
+            }
             Spacer(Modifier.height(36.dp))
         }
     }
@@ -142,7 +183,7 @@ fun SeekBar(now: NowPlaying, controller: MediaController) {
 }
 
 @Composable
-fun Controls(now: NowPlaying, controller: MediaController) {
+fun Controls(now: NowPlaying, controller: MediaController, end: @Composable () -> Unit) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         val repeat = controller.repeatMode
         Box(
@@ -170,8 +211,7 @@ fun Controls(now: NowPlaying, controller: MediaController) {
         Spacer(Modifier.width(18.dp))
         IconButton(Icons.next, size = 30) { controller.seekToNext() }
         Spacer(Modifier.weight(1f))
-        // Room for the queue and lyrics buttons to come.
-        Spacer(Modifier.size(48.dp))
+        end()
     }
 }
 

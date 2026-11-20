@@ -9,6 +9,7 @@
 //! The queue moves on by itself when a song ends. The app reads where
 //! things stand with `playback`, a few times a second.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -16,7 +17,9 @@ use tonearm_core::innertube::model::{self, Kind};
 use tonearm_core::queue::{Queue, Repeat, Step};
 use tonearm_core::{audio, innertube, resolver, store};
 
+mod lyrics;
 mod pages;
+pub use lyrics::{LyricLine, Lyrics, Syllable};
 pub use pages::{Chip, Header, Item, ItemKind, Page, Shelf, ShelfLayout};
 
 uniffi::setup_scaffolding!();
@@ -111,6 +114,8 @@ pub struct Tonearm {
     note: Mutex<String>,
     /// Bumped when the queue or the song playing changes.
     version: AtomicU64,
+    /// Lyrics found, by video id, so going back to a song doesn't ask again.
+    lyrics: Mutex<HashMap<String, Lyrics>>,
 }
 
 #[uniffi::export]
@@ -131,6 +136,7 @@ impl Tonearm {
             loading: AtomicBool::new(false),
             note: Mutex::new(String::new()),
             version: AtomicU64::new(0),
+            lyrics: Mutex::new(HashMap::new()),
         });
         // Signed in as last time, as the desktop app starts.
         if let Some(cookie) = store::load("session") {
@@ -197,6 +203,41 @@ impl Tonearm {
     /// playlists, in YouTube Music's shelves.
     pub fn search_page(&self, query: String) -> Result<Page, TonearmError> {
         Ok(pages::page(&self.client.search(&query)?))
+    }
+
+    // --------------------------------------------------------------- lyrics
+
+    /// The song's lyrics, synced where any service has them timed. None
+    /// when nobody has them. `seconds` is the song's length, which matches
+    /// the right recording; zero takes it from the queue.
+    pub fn lyrics(&self, video_id: String, title: String, artist: String, seconds: f32) -> Option<Lyrics> {
+        if let Some(found) = self.lyrics.lock().unwrap().get(&video_id) {
+            return Some(found.clone());
+        }
+        let seconds = if seconds > 0.0 {
+            seconds
+        } else {
+            let queue = self.queue.lock().unwrap();
+            let song = queue.items().iter().find(|s| s.video_id == video_id);
+            song.map(|s| lyrics::seconds_of(&s.duration)).unwrap_or(0.0)
+        };
+        let query = tonearm_core::lyrics::Query {
+            video_id: &video_id,
+            title: &title,
+            artist: &artist,
+            seconds,
+        };
+        let found = Lyrics::from(&tonearm_core::lyrics::fetch(&self.client, &query)?);
+        if found.lines.is_empty() {
+            return None;
+        }
+        let mut cache = self.lyrics.lock().unwrap();
+        // A few dozen songs is plenty to go back through.
+        if cache.len() >= 40 {
+            cache.clear();
+        }
+        cache.insert(video_id, found.clone());
+        Some(found)
     }
 
     // ------------------------------------------------- playing, as on desktop
@@ -467,6 +508,21 @@ fn watch(tonearm: Weak<Tonearm>) {
         .expect("cannot start the queue thread");
 }
 
+/// Now Playing's background from the cover's RGBA pixels: a soft wash of
+/// its colours, `BASE` pixels a side, as on the desktop.
+#[uniffi::export]
+pub fn backdrop(rgba: Vec<u8>, width: u32, height: u32) -> Vec<u8> {
+    tonearm_core::backdrop::backdrop(&rgba, width as usize, height as usize)
+}
+
+/// One frame of the background flowing, `t` seconds in: `FRAME` pixels a
+/// side, from what `backdrop` gave.
+#[uniffi::export]
+pub fn backdrop_wave(base: Vec<u8>, t: f32) -> Vec<u8> {
+    let n = tonearm_core::backdrop::BASE;
+    tonearm_core::backdrop::wave(&base, n, n, t)
+}
+
 /// The songs listed down a page, not those in its carousels: an album's
 /// tracks, an artist's top songs. As the desktop's `songs_of`.
 fn songs_of(page: &model::Page) -> Vec<model::Item> {
@@ -479,9 +535,24 @@ fn songs_of(page: &model::Page) -> Vec<model::Item> {
         .collect()
 }
 
+/// The artist in a subtitle such as "Song • The Weeknd • Starboy • 3:50":
+/// the first part that isn't the kind, a length or a count. As the
+/// desktop's `credits_with_album`.
+fn credit(subtitle: &str) -> String {
+    let labels = ["Song", "Video", "Single", "Album", "EP", "Episode"];
+    let is_count = |p: &str| [" views", " plays", " likes"].iter().any(|w| p.ends_with(w));
+    let is_duration = |p: &str| p.contains(':') && p.chars().all(|c| c.is_ascii_digit() || c == ':');
+    subtitle
+        .split(" • ")
+        .map(str::trim)
+        .find(|p| !p.is_empty() && !labels.contains(p) && !is_duration(p) && !is_count(p))
+        .unwrap_or_default()
+        .to_string()
+}
+
 fn song(item: &innertube::model::Item) -> Option<Song> {
     let artist = if item.artists.is_empty() {
-        item.subtitle.split(" • ").next().unwrap_or_default().to_string()
+        credit(&item.subtitle)
     } else {
         item.artists.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(", ")
     };

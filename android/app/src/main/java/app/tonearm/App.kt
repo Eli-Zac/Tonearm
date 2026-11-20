@@ -22,6 +22,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -55,6 +56,8 @@ fun App(core: Core, controller: MediaController?) {
     var tab by remember { mutableStateOf(Tab.Home) }
     val stacks = remember { Tab.entries.associateWith { mutableStateListOf<Route>() } }
     var nowPlayingOpen by remember { mutableStateOf(false) }
+    // Now Playing shows the lyrics in place of the cover, until turned off.
+    var showLyrics by rememberSaveable { mutableStateOf(false) }
     var toast by remember { mutableStateOf<String?>(null) }
     val now = rememberNowPlaying(controller)
     val playingId = now?.let { controller?.currentMediaItem?.mediaId }
@@ -130,7 +133,11 @@ fun App(core: Core, controller: MediaController?) {
             exit = slideOutVertically { it },
         ) {
             if (now != null && controller != null) {
-                NowPlayingScreen(now, controller, actions) { nowPlayingOpen = false }
+                NowPlayingScreen(
+                    now, controller, core,
+                    showLyrics = showLyrics,
+                    onLyrics = { showLyrics = !showLyrics },
+                ) { nowPlayingOpen = false }
             }
         }
     }
@@ -232,11 +239,25 @@ fun LibraryScreen(core: Core, actions: Actions) {
 @Composable
 fun SearchScreen(core: Core, actions: Actions) {
     val focus = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    // Clearing focus alone can leave the keyboard up.
+    fun putAway() {
+        keyboard?.hide()
+        focus.clearFocus()
+    }
     var query by rememberSaveable { mutableStateOf("") }
     var searched by rememberSaveable { mutableStateOf<String?>(null) }
+    // Anything tapped in the results puts the keyboard away first.
+    val tapped = object : Actions by actions {
+        override fun open(id: String, params: String?, title: String) { putAway(); actions.open(id, params, title) }
+        override fun playList(items: List<Item>, index: Int) { putAway(); actions.playList(items, index) }
+        override fun playRadio(item: Item) { putAway(); actions.playRadio(item) }
+        override fun playItem(item: Item) { putAway(); actions.playItem(item) }
+        override fun playWatch(item: Item) { putAway(); actions.playWatch(item) }
+    }
     Column(Modifier.fillMaxSize()) {
         SearchBox(query, { query = it }) {
-            focus.clearFocus()
+            putAway()
             searched = query.trim().ifEmpty { null }
         }
         val words = searched
@@ -247,7 +268,7 @@ fun SearchScreen(core: Core, actions: Actions) {
                 key = "search:$words",
                 load = { withContext(Dispatchers.IO) { core.searchPage(words) } },
                 more = { token -> withContext(Dispatchers.IO) { core.more(token) } },
-                actions = actions,
+                actions = tapped,
             )
         }
     }

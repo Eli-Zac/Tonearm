@@ -66,6 +66,8 @@ class MainActivity : ComponentActivity() {
 
 /** What the screen shows of the player, kept up to date from the session. */
 class NowPlaying(
+    /** The song's video id. */
+    val id: String?,
     val meta: MediaMetadata?,
     val playing: Boolean,
     val loading: Boolean,
@@ -82,6 +84,7 @@ fun rememberNowPlaying(controller: MediaController?): NowPlaying? {
         val c = controller ?: run { now = null; return@LaunchedEffect }
         fun read() {
             now = if (c.mediaItemCount == 0) null else NowPlaying(
+                id = c.currentMediaItem?.mediaId,
                 meta = c.mediaMetadata,
                 playing = c.playWhenReady && c.playbackState != Player.STATE_ENDED,
                 loading = c.playbackState == Player.STATE_BUFFERING,

@@ -8,6 +8,7 @@
 pub mod analysis;
 pub mod animated_art;
 pub mod audio;
+pub mod backdrop;
 pub mod cast;
 pub mod decode;
 pub mod history;
