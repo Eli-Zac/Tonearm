@@ -23,6 +23,20 @@ android {
         compose = true
     }
 
+    buildTypes {
+        // As fast as a release (not debuggable, so ART compiles Compose
+        // fully), but signed with the debug key so it installs over the
+        // debug build and keeps its data. For judging smoothness on a
+        // phone: `gradlew installProfile`. Not shrunk: JNA and UniFFI's
+        // bindings are found by reflection.
+        create("profile") {
+            initWith(getByName("debug"))
+            isDebuggable = false
+            isJniDebuggable = false
+            matchingFallbacks += listOf("release")
+        }
+    }
+
     // The core is built by `build-rust.ps1` into src/main/jniLibs, and its
     // Kotlin side written by UniFFI into src/main/java/uniffi.
 

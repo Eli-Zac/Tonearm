@@ -1,7 +1,8 @@
 package app.tonearm
 
-import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.AnimationSpec
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
@@ -56,7 +57,22 @@ fun CoverCarousel(
     // How far one cover sits from the next: off the screen's edge.
     val span = width + gap
     // Where the current cover is, sideways. The others sit a span away.
-    val offset = remember { Animatable(0f) }
+    // A plain value the finger writes straight into, so the cover keeps up
+    // with it frame for frame; slides animate it through `glide`.
+    var x by remember { mutableFloatStateOf(0f) }
+    // Its speed as the last slide left it, so a swipe's momentum carries on
+    // into the next song's slide.
+    var speed by remember { mutableFloatStateOf(0f) }
+    var slide by remember { mutableStateOf<Job?>(null) }
+    fun glide(to: Float, from: Float, spec: AnimationSpec<Float>): Job {
+        slide?.cancel()
+        return scope.launch {
+            animate(x, to, from, spec) { value, v -> x = value; speed = v }
+            speed = 0f
+        }.also { slide = it }
+    }
+    // A swipe's slide: a spring, so the finger's speed carries through.
+    val swipeSpring = spring<Float>(dampingRatio = 1f, stiffness = 700f)
     var current by remember { mutableStateOf(song) }
     var currentIndex by remember { mutableIntStateOf(index) }
     var leaving by remember { mutableStateOf<CoverSong?>(null) }
@@ -76,8 +92,9 @@ fun CoverCarousel(
         // Where the song is in the queue, read from the core now: the index
         // passed in can lag the song by a moment.
         val now = placeOf(core, song?.id)
+        val swiped = pending != 0
         val dir = when {
-            pending != 0 -> pending
+            swiped -> pending
             now in 0 until currentIndex -> -1
             else -> 1
         }
@@ -91,10 +108,16 @@ fun CoverCarousel(
         after = null
         try {
             if (old == null || width == 0) {
-                offset.snapTo(0f)
+                slide?.cancel()
+                x = 0f
             } else {
-                offset.snapTo(offset.value + dir * span)
-                offset.animateTo(0f, tween(420, easing = FastOutSlowInEasing))
+                val v = speed
+                slide?.cancel()
+                x += dir * span
+                // A swipe carries on at the finger's speed; a skip from the
+                // buttons slides in from rest.
+                (if (swiped) glide(0f, v, swipeSpring)
+                else glide(0f, 0f, tween(420, easing = FastOutSlowInEasing))).join()
             }
         } finally {
             // Also when a drag cuts the slide short: the old cover must go,
@@ -105,14 +128,34 @@ fun CoverCarousel(
     // The same song's cover can arrive a moment after the song does.
     val live = if (song != null && song.id == current?.id) song else current
 
-    fun settle() {
-        scope.launch { offset.animateTo(0f, spring(dampingRatio = 0.8f, stiffness = Spring.StiffnessMediumLow)) }
+    // The songs either side, looked up off the main thread once each song
+    // has settled in, so their covers are loaded (off the screen's edges)
+    // before a swipe ever starts. Looked up again as the queue moves on.
+    LaunchedEffect(current?.id, index, leaving == null, pending) {
+        if (leaving != null || pending != 0) return@LaunchedEffect
+        val id = current?.id ?: return@LaunchedEffect
+        val found = withContext(Dispatchers.IO) {
+            runCatching {
+                val queue = core.queue()
+                val i = placeOf(core, id, queue)
+                Triple(
+                    i,
+                    if (i > 0) queue.getOrNull(i - 1)?.let { CoverSong(it.videoId, it.cover) } else null,
+                    if (i >= 0) queue.getOrNull(i + 1)?.let { CoverSong(it.videoId, it.cover) } else null,
+                )
+            }.getOrNull()
+        } ?: return@LaunchedEffect
+        if (current?.id != id || pending != 0) return@LaunchedEffect
+        currentIndex = found.first
+        before = found.second
+        after = found.third
+    }
+
+    fun settle(from: Float = 0f) {
+        glide(0f, from, spring(dampingRatio = 0.85f, stiffness = Spring.StiffnessMediumLow))
     }
 
     val velocity = remember { VelocityTracker() }
-    // The finger's position, kept apart from the animation so quick moves
-    // add up even before each lands.
-    var dragX by remember { mutableFloatStateOf(0f) }
     Box(
         modifier
             .onSizeChanged { width = it.width }
@@ -120,37 +163,30 @@ fun CoverCarousel(
                 detectHorizontalDragGestures(
                     onDragStart = {
                         velocity.resetTracking()
-                        dragX = offset.value
                         // A drag during a slide takes over from it.
+                        slide?.cancel()
                         leaving = null
-                        if (pending == 0) {
-                            val queue = runCatching { core.queue() }.getOrDefault(emptyList())
-                            val i = placeOf(core, current?.id, queue)
-                            currentIndex = i
-                            before = if (i > 0) queue.getOrNull(i - 1)?.let { CoverSong(it.videoId, it.cover) } else null
-                            after = if (i >= 0) queue.getOrNull(i + 1)?.let { CoverSong(it.videoId, it.cover) } else null
-                        }
                     },
                     onDragEnd = {
-                        val speed = velocity.calculateVelocity().x
+                        val fling = velocity.calculateVelocity().x
                         val far = width * 0.3f
-                        val x = offset.value
                         when {
-                            pending != 0 -> settle()
-                            after != null && (x < -far || (speed < -900f && x < 0f)) -> {
+                            pending != 0 -> settle(fling)
+                            after != null && (x < -far || (fling < -900f && x < 0f)) -> {
                                 pending = 1
-                                controller.seekToNext()
-                                scope.launch { offset.animateTo(-(width + gap), tween(260, easing = FastOutSlowInEasing)) }
+                                val target = currentIndex + 1
+                                scope.launch(Dispatchers.IO) { runCatching { core.skipTo(target.toUInt()) } }
+                                glide(-span, fling, swipeSpring)
                             }
-                            before != null && (x > far || (speed > 900f && x > 0f)) -> {
+                            before != null && (x > far || (fling > 900f && x > 0f)) -> {
                                 pending = -1
                                 val target = currentIndex - 1
                                 // The song before, even well into this one,
                                 // where the previous button would restart it.
                                 scope.launch(Dispatchers.IO) { runCatching { core.skipTo(target.toUInt()) } }
-                                scope.launch { offset.animateTo(width + gap, tween(260, easing = FastOutSlowInEasing)) }
+                                glide(span, fling, swipeSpring)
                             }
-                            else -> settle()
+                            else -> settle(fling)
                         }
                         if (pending != 0) {
                             // Should the song not change, the cover comes back.
@@ -167,12 +203,9 @@ fun CoverCarousel(
                 ) { change, amount ->
                     change.consume()
                     velocity.addPosition(change.uptimeMillis, change.position)
-                    val x = dragX
                     // Against the end of the queue it gives, but only a little.
                     val stiff = (x + amount > 0 && before == null) || (x + amount < 0 && after == null)
-                    dragX = x + if (stiff) amount * 0.25f else amount
-                    val to = dragX
-                    scope.launch { offset.snapTo(to) }
+                    x += if (stiff) amount * 0.25f else amount
                 }
             },
     ) {
@@ -187,7 +220,7 @@ fun CoverCarousel(
             key(s.id) {
                 CoverFace(
                     s, core, moving,
-                    Modifier.matchParentSize().graphicsLayer { translationX = offset.value + place * span },
+                    Modifier.matchParentSize().graphicsLayer { translationX = x + place * span },
                 )
             }
         }
