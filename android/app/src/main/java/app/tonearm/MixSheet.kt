@@ -1,5 +1,10 @@
 package app.tonearm
 
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -16,6 +21,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -41,6 +47,11 @@ import uniffi.tonearm_android.MixEditorData
 import uniffi.tonearm_android.MixSettings
 import uniffi.tonearm_android.Tonearm as Core
 
+/** Counts saved transitions, so a mixed playlist's rows load again after one. */
+object MixSaves {
+    var count by androidx.compose.runtime.mutableIntStateOf(0)
+}
+
 /**
  * The desktop's transition editor, as a bottom sheet on a phone. Its
  * picture and choices are plain data from tonearm-core.
@@ -59,6 +70,8 @@ fun MixSheet(
     var settings by remember(from.videoId, to.videoId) { mutableStateOf<MixSettings?>(null) }
     var previewing by remember(from.videoId, to.videoId) { mutableStateOf(false) }
     var previewAt by remember(from.videoId, to.videoId) { mutableFloatStateOf(-1f) }
+    // Asked to preview, the songs still opening.
+    var starting by remember(from.videoId, to.videoId) { mutableStateOf(false) }
 
     LaunchedEffect(from.videoId, to.videoId) {
         try {
@@ -84,6 +97,9 @@ fun MixSheet(
     }
 
     LaunchedEffect(previewing) {
+        // The songs take a moment to open: not playing yet is not the end,
+        // until it has started once, or 20 s have gone by.
+        var waited = 0
         while (previewing) {
             val state = try {
                 withContext(Dispatchers.IO) { core.mixPreviewActive() to core.mixPreviewPosition() }
@@ -91,15 +107,24 @@ fun MixSheet(
                 onError(e.message ?: "Couldn't check the preview")
                 null
             }
-            if (state?.first != true) {
+            if (state?.first == true) {
+                starting = false
+                previewAt = state.second ?: -1f
+            } else if (!starting || waited > 20_000) {
+                starting = false
                 previewing = false
                 previewAt = -1f
-            } else {
-                previewAt = state.second ?: -1f
             }
             delay(60)
+            waited += 60
         }
         previewAt = -1f
+    }
+
+    // Leaving the editor ends its preview, as on the desktop.
+    val stillPreviewing by rememberUpdatedState(previewing || starting)
+    DisposableEffect(Unit) {
+        onDispose { if (stillPreviewing) Prefs.scope.launch { runCatching { core.pause() } } }
     }
 
     fun update(change: suspend (MixSettings) -> MixSettings) {
@@ -120,32 +145,45 @@ fun MixSheet(
         }
     }
 
+    // The whole screen, as the user asked: the editor needs the room, and a
+    // sheet left the page showing above it.
     Column(
         Modifier
-            .fillMaxWidth()
-            .heightIn(max = 760.dp)
-            .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
-            .background(Tonearm.raised)
+            .fillMaxSize()
+            .background(Tonearm.bg)
+            // Taps land on the editor, not the page under it.
+            .clickable(
+                interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                indication = null,
+            ) {}
+            .statusBarsPadding()
             .navigationBarsPadding()
-            .padding(top = 10.dp),
+            .padding(top = 6.dp),
     ) {
-        Box(
-            Modifier.align(Alignment.CenterHorizontally).size(width = 36.dp, height = 4.dp)
-                .clip(RoundedCornerShape(2.dp)).background(Tonearm.line),
-        )
-        Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
             Row(
                 Modifier.fillMaxWidth().height(46.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 Title("Edit transition", size = 18.sp, weight = FontWeight.Bold)
+                // The editor is new, and still changing, as the desktop says.
+                Box(
+                    Modifier.height(20.dp).clip(RoundedCornerShape(5.dp)).background(Color(0xFF1ED760))
+                        .padding(horizontal = 6.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Title("Beta", size = 12.sp, color = Color(0xFF08080A), weight = FontWeight.Bold)
+                }
                 Spacer(Modifier.weight(1f))
                 PillButton("Save", primary = data?.changed == true) {
                     val current = settings ?: return@PillButton
                     scope.launch {
                         try {
                             withContext(Dispatchers.IO) { core.setTransition(from, to, current) }
+                            // The playlist's chips read again, so the saved
+                            // transition's name shows on its row.
+                            MixSaves.count++
                             onClose()
                         } catch (e: Exception) {
                             onError(e.message ?: "Couldn't save the transition")
@@ -170,13 +208,37 @@ fun MixSheet(
             if (picture == null) {
                 Bone(Modifier.fillMaxWidth().aspectRatio(340f / 230f), RoundedCornerShape(12.dp))
             } else {
-                MixPictureView(
-                    picture = picture,
-                    playhead = previewAt,
-                    onDrag = { side, delta, exact ->
-                        update { current -> core.mixEditorDrag(from, to, current, side.toUInt(), delta, exact) }
-                    },
-                )
+                Box(contentAlignment = Alignment.Center) {
+                    MixPictureView(
+                        picture = picture,
+                        playhead = previewAt,
+                        onDrag = { side, delta, exact ->
+                            update { current -> core.mixEditorDrag(from, to, current, side.toUInt(), delta, exact) }
+                        },
+                    )
+                    // Preview, in the middle of the picture as on the desktop:
+                    // play, or stop while it plays, with an outline running
+                    // round it while the songs open.
+                    PreviewButton(previewing, starting) {
+                        val current = settings ?: return@PreviewButton
+                        scope.launch {
+                            try {
+                                if (previewing || starting) {
+                                    starting = false
+                                    withContext(Dispatchers.IO) { core.pause() }
+                                    previewing = false
+                                } else {
+                                    starting = true
+                                    withContext(Dispatchers.IO) { core.previewTransition(from, to, current) }
+                                    previewing = true
+                                }
+                            } catch (e: Exception) {
+                                starting = false
+                                onError(e.message ?: "Couldn't preview the transition")
+                            }
+                        }
+                    }
+                }
             }
 
             Spacer(Modifier.height(12.dp))
@@ -212,6 +274,11 @@ fun MixSheet(
                                 .padding(horizontal = 12.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
+                            // Auto carries the sparkle, as on the desktop.
+                            if (index == 0) {
+                                Icon(Icons.sparkle, size = 14.sp, color = if (selected) Color(0xFF08080A) else Tonearm.accent)
+                                Spacer(Modifier.width(6.dp))
+                            }
                             Title(
                                 name, size = 14.sp, color = if (selected) Color(0xFF08080A) else Tonearm.text,
                                 weight = FontWeight.SemiBold,
@@ -241,23 +308,41 @@ fun MixSheet(
                 Spacer(Modifier.height(14.dp))
             }
         }
-        Box(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp)) {
-            PillButton(if (previewing) "Stop preview" else "Preview", onClick = {
-                val current = settings ?: return@PillButton
-                scope.launch {
-                    try {
-                        if (previewing) {
-                            withContext(Dispatchers.IO) { core.pause() }
-                            previewing = false
-                        } else {
-                            withContext(Dispatchers.IO) { core.previewTransition(from, to, current) }
-                            previewing = true
-                        }
-                    } catch (e: Exception) {
-                        onError(e.message ?: "Couldn't preview the transition")
-                    }
+    }
+}
+
+/** The desktop's preview button on the picture: 44 by 32, play or stop. */
+@Composable
+private fun PreviewButton(previewing: Boolean, starting: Boolean, onClick: () -> Unit) {
+    val spin = rememberInfiniteTransition(label = "spin")
+    val turn by spin.animateFloat(0f, 1f, infiniteRepeatable(tween(1100, easing = LinearEasing)), label = "turn")
+    Box(Modifier.size(52.dp, 40.dp), contentAlignment = Alignment.Center) {
+        if (starting && !previewing) {
+            Canvas(Modifier.fillMaxSize()) {
+                val stroke = 2.dp.toPx()
+                val radius = androidx.compose.ui.geometry.CornerRadius(13.dp.toPx())
+                drawRoundRect(Color(0x1FFFFFFF), cornerRadius = radius, style = Stroke(stroke))
+                // A bright piece of the outline running round it.
+                val path = Path().apply {
+                    addRoundRect(androidx.compose.ui.geometry.RoundRect(stroke / 2, stroke / 2, size.width - stroke / 2, size.height - stroke / 2, radius))
                 }
-            })
+                val measure = androidx.compose.ui.graphics.PathMeasure().apply { setPath(path, false) }
+                val length = measure.length
+                val piece = Path()
+                val start = turn * length
+                val end = start + length * 0.22f
+                measure.getSegment(start, minOf(end, length), piece, true)
+                if (end > length) measure.getSegment(0f, end - length, piece, true)
+                drawPath(piece, Color.White, style = Stroke(stroke, cap = StrokeCap.Round))
+            }
+        }
+        Box(
+            Modifier.size(44.dp, 32.dp).clip(RoundedCornerShape(9.dp)).background(Color(0x26FFFFFF))
+                .clickable(onClick = onClick),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (previewing) Box(Modifier.size(11.dp).clip(RoundedCornerShape(2.dp)).background(Color.White))
+            else Icon(Icons.play, size = 16.sp, filled = true, color = Color.White)
         }
     }
 }

@@ -765,7 +765,7 @@ fun PageView(
                     false
                 }
             }
-            LaunchedEffect(canMix, playlistId, mixing, songIds, mixRefresh) {
+            LaunchedEffect(canMix, playlistId, mixing, songIds, mixRefresh, MixSaves.count) {
                 if (!canMix || playlistId == null || mixing != true) {
                     mixRows = emptyMap()
                     return@LaunchedEffect
