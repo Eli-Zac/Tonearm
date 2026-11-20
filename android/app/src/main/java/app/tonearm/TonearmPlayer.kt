@@ -103,7 +103,9 @@ class TonearmPlayer(private val context: Context, private val core: Tonearm) :
             PlayState.LOADING -> STATE_BUFFERING
             PlayState.PLAYING, PlayState.PAUSED -> STATE_READY
             PlayState.ENDED -> STATE_ENDED
-            PlayState.IDLE, PlayState.FAILED -> if (queue.isEmpty()) STATE_IDLE else STATE_ENDED
+            // Media3 only allows a player error while idle.
+            PlayState.FAILED -> STATE_IDLE
+            PlayState.IDLE -> if (queue.isEmpty()) STATE_IDLE else STATE_ENDED
         }
         val playlist = queue.mapIndexed { i, song ->
             val item = MediaItemData.Builder(song.videoId + "#" + i).setMediaItem(mediaItem(song))
