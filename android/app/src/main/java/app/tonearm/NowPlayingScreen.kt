@@ -19,6 +19,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
@@ -133,12 +135,18 @@ fun NowPlayingScreen(
             // The cover stays put under the lyrics and queue, only hidden,
             // so its moving cover keeps playing rather than loading again
             // each time it comes back.
+            // Each view fades in and rises into place as the desktop's panel
+            // views do: 220 ms, coming up 16 dp.
+            val coverT by animateFloatAsState(if (panel == Panel.Cover) 1f else 0f, tween(220, easing = panelEasing))
+            val lyricsT by animateFloatAsState(if (panel == Panel.Lyrics) 1f else 0f, tween(220, easing = panelEasing))
+            val queueT by animateFloatAsState(if (panel == Panel.Queue) 1f else 0f, tween(220, easing = panelEasing))
+            val rise = with(LocalDensity.current) { 16.dp.toPx() }
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 // The cover and the lyrics under it, centred in the room
                 // left. The cover is as wide as everything else, and only
                 // gives up size on a screen too short to fit it.
                 Column(
-                    Modifier.fillMaxSize().graphicsLayer { alpha = if (panel == Panel.Cover) 1f else 0f },
+                    Modifier.fillMaxSize().graphicsLayer { alpha = coverT; translationY = (1f - coverT) * rise },
                     verticalArrangement = Arrangement.Center,
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
@@ -166,13 +174,20 @@ fun NowPlayingScreen(
             // Over the hidden cover: taking every touch, so a swipe
             // there never skips the song.
                 if (panel != Panel.Cover) {
-                    Box(Modifier.fillMaxSize().pointerInput(Unit) { awaitPointerEventScope { while (true) awaitPointerEvent() } }) {
-                        if (panel == Panel.Lyrics) {
-                            LyricsPane(lyrics, controller, time, Modifier.fillMaxSize())
-                        } else {
-                            QueuePane(core, { onMenu(it.asItem()) }, Modifier.fillMaxSize().padding(top = 8.dp))
-                        }
-                    }
+                    Box(Modifier.fillMaxSize().pointerInput(Unit) { awaitPointerEventScope { while (true) awaitPointerEvent() } })
+                }
+                // Kept while fading out, so they leave as smoothly as they came.
+                if (lyricsT > 0f) {
+                    LyricsPane(lyrics, controller, time, Modifier.fillMaxSize().graphicsLayer {
+                        alpha = lyricsT
+                        translationY = (1f - lyricsT) * rise
+                    })
+                }
+                if (queueT > 0f) {
+                    QueuePane(core, { onMenu(it.asItem()) }, Modifier.fillMaxSize().padding(top = 8.dp).graphicsLayer {
+                        alpha = queueT
+                        translationY = (1f - queueT) * rise
+                    })
                 }
             }
             Spacer(Modifier.height(16.dp))
@@ -315,6 +330,9 @@ private fun LikeButton(liked: Boolean, onClick: () -> Unit) {
 
 /** What Now Playing shows above the song's name. */
 enum class Panel { Cover, Lyrics, Queue }
+
+/** The desktop's panel views' curve, cubic-bezier(0.22, 1, 0.36, 1). */
+private val panelEasing = androidx.compose.animation.core.CubicBezierEasing(0.22f, 1f, 0.36f, 1f)
 
 @Composable
 private fun PanelButton(glyph: String, color: Color, onClick: () -> Unit) {
