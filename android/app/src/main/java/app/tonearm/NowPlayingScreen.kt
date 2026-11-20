@@ -130,18 +130,15 @@ fun NowPlayingScreen(
                 Spacer(Modifier.weight(1f))
                 Spacer(Modifier.size(40.dp))
             }
-            if (panel == Panel.Lyrics) {
-                LyricsPane(lyrics, controller, time, Modifier.weight(1f).fillMaxWidth())
-                Spacer(Modifier.height(16.dp))
-            } else if (panel == Panel.Queue) {
-                QueuePane(core, { onMenu(it.asItem()) }, Modifier.weight(1f).fillMaxWidth().padding(top = 8.dp))
-                Spacer(Modifier.height(16.dp))
-            } else {
+            // The cover stays put under the lyrics and queue, only hidden,
+            // so its moving cover keeps playing rather than loading again
+            // each time it comes back.
+            Box(Modifier.weight(1f).fillMaxWidth()) {
                 // The cover and the lyrics under it, centred in the room
                 // left. The cover is as wide as everything else, and only
                 // gives up size on a screen too short to fit it.
                 Column(
-                    Modifier.weight(1f).fillMaxWidth(),
+                    Modifier.fillMaxSize().graphicsLayer { alpha = if (panel == Panel.Cover) 1f else 0f },
                     verticalArrangement = Arrangement.Center,
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
@@ -166,8 +163,19 @@ fun NowPlayingScreen(
                         else -> Spacer(Modifier.height(60.dp))
                     }
                 }
-                Spacer(Modifier.height(16.dp))
+            // Over the hidden cover: taking every touch, so a swipe
+            // there never skips the song.
+                if (panel != Panel.Cover) {
+                    Box(Modifier.fillMaxSize().pointerInput(Unit) { awaitPointerEventScope { while (true) awaitPointerEvent() } }) {
+                        if (panel == Panel.Lyrics) {
+                            LyricsPane(lyrics, controller, time, Modifier.fillMaxSize())
+                        } else {
+                            QueuePane(core, { onMenu(it.asItem()) }, Modifier.fillMaxSize().padding(top = 8.dp))
+                        }
+                    }
+                }
             }
+            Spacer(Modifier.height(16.dp))
             // The name, with the heart beside it as on the desktop: filled
             // in the accent once liked.
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
