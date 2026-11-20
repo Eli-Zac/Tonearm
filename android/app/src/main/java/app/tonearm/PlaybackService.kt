@@ -120,6 +120,11 @@ class PlaybackService : MediaLibraryService() {
                 .build()
             return MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller)
                 .setAvailableSessionCommands(commands)
+                // Play, pause and skip for every controller. Media3 gives
+                // ones it doesn't trust (a Galaxy Watch's plugin) only the
+                // read-only commands, so the watch showed the song but its
+                // buttons were greyed out or did nothing.
+                .setAvailablePlayerCommands(MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS)
                 .setMediaButtonPreferences(car.buttons(car.wantsFull(session, controller)))
                 .build()
         }
