@@ -23,6 +23,7 @@ mod lyrics;
 mod menu;
 mod pages;
 mod playing;
+mod profile;
 mod resume;
 mod search;
 mod settings;
@@ -30,6 +31,7 @@ pub use downloads::{DownloadMarks, DownloadProgress};
 pub use lyrics::{LyricLine, Lyrics, Syllable};
 pub use menu::{MenuAction, MenuIcon, MenuLine};
 pub use pages::{Chip, Header, Item, ItemKind, Link, Page, Shelf, ShelfLayout};
+pub use profile::{Profile, TopArtist};
 pub use search::{SuggestedSearch, Suggestions};
 pub use settings::{Account, Choices, Connections};
 

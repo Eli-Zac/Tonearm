@@ -263,7 +263,19 @@ pub fn page(p: &model::Page) -> Page {
             channel_id: h.channel_id.clone(),
             followed: h.subscribed,
         }),
-        shelves: p.shelves.iter().filter(|s| !s.items.is_empty()).map(shelf).collect(),
+        shelves: {
+            // An artist's top songs are numbered like a chart, as the desktop's.
+            let artist = p.header.as_ref().is_some_and(|h| h.kind == model::PageKind::Artist);
+            p.shelves
+                .iter()
+                .filter(|s| !s.items.is_empty())
+                .map(|s| {
+                    let mut out = shelf(s);
+                    out.ranked |= artist && !s.carousel && s.title == "Popular";
+                    out
+                })
+                .collect()
+        },
         chips: p
             .chips
             .iter()

@@ -247,6 +247,27 @@ impl History {
             .collect()
     }
 
+    /// The page of an artist named as `top_artist_names` writes them: an
+    /// artist page that was opened, else a song or album crediting them
+    /// with a link. None when nothing in the history links them.
+    pub fn artist_id(&self, name: &str) -> Option<String> {
+        let folded = fold(name);
+        let opened = self.entries.values().find_map(|e| {
+            (e.item.kind == Kind::Artist && fold(&e.item.title) == folded)
+                .then(|| e.item.browse_id.clone())
+                .flatten()
+        });
+        opened.or_else(|| {
+            self.entries.values().find_map(|e| {
+                e.item
+                    .artists
+                    .iter()
+                    .find(|(n, id)| id.is_some() && fold(n) == folded)
+                    .and_then(|(_, id)| id.clone())
+            })
+        })
+    }
+
     /// How many songs, artists, and albums, playlists and artist pages
     /// the history holds.
     pub fn counts(&self) -> (usize, usize, usize) {

@@ -82,8 +82,8 @@ object SettingsPages {
 }
 
 private val brandYouTube = Color(0xFFFF0000)
-private val brandLastfm = Color(0xFFD51007)
-private val brandSpotify = Color(0xFF1DB954)
+internal val brandLastfm = Color(0xFFD51007)
+internal val brandSpotify = Color(0xFF1DB954)
 private val card = Color(0x0AFFFFFF)
 private val pressedCard = Color(0x14FFFFFF)
 
@@ -537,7 +537,7 @@ private fun Card(modifier: Modifier = Modifier, content: @Composable () -> Unit)
 /** A row that opens a sub page: an icon tile (or a logo on its brand
  *  colour), its title and a line under it, and an arrow. */
 @Composable
-private fun SubpageRow(
+internal fun SubpageRow(
     title: String,
     subtitle: String?,
     icon: String? = null,

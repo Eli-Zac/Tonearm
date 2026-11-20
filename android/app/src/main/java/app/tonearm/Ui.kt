@@ -77,13 +77,19 @@ interface Actions {
     fun downloadCollection(item: Item) {}
     /** Deletes these songs' downloads. */
     fun removeDownloads(videoIds: List<String>) {}
+    /** An album, artist or playlist page was opened from a card or row:
+     *  the history remembers it for the profile. */
+    fun opened(item: Item) {}
 }
 
 /** A tap on a card or row that isn't a song in a list. */
 fun Actions.tap(item: Item) {
     when {
         item.videoId != null -> playRadio(item)
-        item.browseId != null -> open(item.browseId!!, item.params, item.title)
+        item.browseId != null -> {
+            opened(item)
+            open(item.browseId!!, item.params, item.title)
+        }
         item.playlistId != null -> playItem(item)
     }
 }

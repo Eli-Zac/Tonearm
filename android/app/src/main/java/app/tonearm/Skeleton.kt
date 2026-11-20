@@ -160,7 +160,7 @@ private fun ShelfSkeleton(seed: Int) {
 
 /** A card, as ItemCard: the cover, its title and a line under it. */
 @Composable
-private fun CardSkeleton(seed: Int) {
+internal fun CardSkeleton(seed: Int) {
     Column(Modifier.width(150.dp)) {
         Bone(Modifier.size(150.dp), RoundedCornerShape(8.dp))
         Bone(Modifier.padding(top = 10.dp).fillMaxWidth(0.8f - (seed * 5 % 4) * 0.08f).height(11.dp))

@@ -194,6 +194,9 @@ fun App(core: Core, controller: MediaController?) {
         override fun follow(channelId: String, follow: Boolean, name: String) =
             libraryCall { core.follow(channelId, follow, name) }
         override fun notify(text: String) { toast = text }
+        override fun opened(item: Item) {
+            scope.launch(Dispatchers.IO) { runCatching { core.rememberOpen(item) } }
+        }
         // Says what was queued; the toast when it lands comes from the core.
         fun downloadCall(call: () -> String) {
             scope.launch {
@@ -261,6 +264,12 @@ fun App(core: Core, controller: MediaController?) {
                         onBack = { if (stack.isNotEmpty()) stack.removeAt(stack.lastIndex) },
                         onToast = { toast = it },
                     )
+                } else if (top?.id == PROFILE_ROUTE) {
+                    ProfileScreen(
+                        core, actions,
+                        onOpenSettings = { stack.add(Route(it, null, "")) },
+                        onBack = { stack.removeAt(stack.lastIndex) },
+                    )
                 } else if (top?.id == DOWNLOADS_ROUTE) {
                     DownloadsScreen(core, actions) { stack.removeAt(stack.lastIndex) }
                 } else if (top != null) {
@@ -275,7 +284,7 @@ fun App(core: Core, controller: MediaController?) {
                             HomeScreen(
                                 core, actions,
                                 onSettings = { stack.add(Route(SettingsPages.root, null, "Settings")) },
-                                onAccount = { stack.add(Route(SettingsPages.account, null, "Account")) },
+                                onAccount = { stack.add(Route(PROFILE_ROUTE, null, "Profile")) },
                             )
                             StatusFade()
                         }
