@@ -114,6 +114,8 @@ class PlaybackService : MediaLibraryService() {
         /** Everyone gets the usual commands, plus shuffle, repeat and like. */
         override fun onConnect(session: MediaSession, controller: MediaSession.ControllerInfo): MediaSession.ConnectionResult {
             val commands = MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS.buildUpon()
+                // No search in the car yet: without it, Android Auto shows no search button.
+                .remove(SessionCommand.COMMAND_CODE_LIBRARY_SEARCH)
                 .apply { car.commands.forEach { add(it) } }
                 .build()
             return MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller)

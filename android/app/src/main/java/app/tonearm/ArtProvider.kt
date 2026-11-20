@@ -38,6 +38,7 @@ class ArtProvider : ContentProvider() {
     private fun fetch(link: String, folder: File): File {
         val url = runCatching { URL(link) }.getOrNull() ?: throw FileNotFoundException("bad link")
         if (url.protocol != "https" || HOSTS.none { url.host == it || url.host.endsWith(".$it") }) {
+            android.util.Log.w("Tonearm", "art: not a cover host: ${url.host}")
             throw FileNotFoundException("not a cover host")
         }
         val name = MessageDigest.getInstance("SHA-1").digest(link.toByteArray()).joinToString("") { "%02x".format(it) }
@@ -87,12 +88,17 @@ class ArtProvider : ContentProvider() {
 
     companion object {
         private const val AUTHORITY = "app.tonearm.art"
-        private val HOSTS = listOf("googleusercontent.com", "ggpht.com", "ytimg.com", "scdn.co", "spotifycdn.com")
+        private const val VERSION = "2"
+        private val HOSTS = listOf("googleusercontent.com", "ggpht.com", "ytimg.com", "music.youtube.com", "gstatic.com", "scdn.co", "spotifycdn.com")
 
         /** The car's way to a cover: a link or a download's file path. */
         fun uri(art: String?): Uri? {
             if (art.isNullOrEmpty()) return null
-            return Uri.Builder().scheme("content").authority(AUTHORITY).path("art").appendQueryParameter("u", art).build()
+            // The version is part of the address: Android Auto remembers a cover
+            // that failed by its address, so a fix to how covers are served
+            // bumps it.
+            return Uri.Builder().scheme("content").authority(AUTHORITY).path("art")
+                .appendQueryParameter("v", VERSION).appendQueryParameter("u", art).build()
         }
     }
 }
