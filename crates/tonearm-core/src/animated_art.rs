@@ -336,14 +336,31 @@ fn candidates(http: &ureq::Agent, album: &str, artist: &str) -> Result<Vec<Strin
 /// A video's title as a song's: no "(Official Video)" or "[HD]", and no
 /// "Artist - " in front.
 fn song_title(title: &str, artist: &str) -> String {
+    // A note saying it is another recording (live, acoustic, a remix) stays:
+    // without it "Everlong (Live at the Roundhouse)" would find the studio
+    // "Everlong" and its album's moving cover. Notes about the upload
+    // ("Official Video", "Lyrics") go.
     let mut out = String::new();
+    let mut note = String::new();
     let mut depth = 0i32;
     for c in title.chars() {
         match c {
-            '(' | '[' => depth += 1,
-            ')' | ']' => depth = (depth - 1).max(0),
+            '(' | '[' => {
+                if depth == 0 {
+                    note.clear();
+                }
+                depth += 1;
+                note.push(c);
+            }
+            ')' | ']' => {
+                depth = (depth - 1).max(0);
+                note.push(c);
+                if depth == 0 && is_other_recording(&note) {
+                    out.push_str(&note);
+                }
+            }
             _ if depth == 0 => out.push(c),
-            _ => {}
+            _ => note.push(c),
         }
     }
     if let Some((left, right)) = out.split_once(" - ") {
@@ -352,6 +369,18 @@ fn song_title(title: &str, artist: &str) -> String {
         }
     }
     out.trim().to_string()
+}
+
+/// Whether a bracketed note in a title marks a different recording of the
+/// song, which has its own album (or none on Apple), not the studio one's.
+fn is_other_recording(note: &str) -> bool {
+    let words = plain(note);
+    let words: Vec<&str> = words.split(' ').collect();
+    const MARKS: [&str; 12] = [
+        "live", "acoustic", "remix", "demo", "unplugged", "instrumental",
+        "session", "sessions", "cover", "rehearsal", "orchestral", "piano",
+    ];
+    words.iter().any(|w| MARKS.contains(w))
 }
 
 /// The albums Apple has the song on, by name and id, when sure of them.
@@ -831,6 +860,17 @@ pub fn probe(album: &str, artist: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn song_titles_keep_notes_of_another_recording() {
+        assert_eq!(song_title("Everlong (Official HD Video)", "Foo Fighters"), "Everlong");
+        assert_eq!(
+            song_title("Everlong (Live at the Roundhouse, London)", "Foo Fighters"),
+            "Everlong (Live at the Roundhouse, London)",
+        );
+        assert_eq!(song_title("Foo Fighters - Everlong (Acoustic)", "Foo Fighters"), "Everlong (Acoustic)");
+        assert_eq!(song_title("Song [Lyrics]", "A"), "Song");
+    }
 
     #[test]
     fn editions_match_but_other_albums_do_not() {
