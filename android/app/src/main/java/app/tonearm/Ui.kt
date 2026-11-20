@@ -3,6 +3,7 @@ package app.tonearm
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
@@ -39,6 +40,7 @@ import kotlinx.coroutines.withContext
 import uniffi.tonearm_android.Header
 import uniffi.tonearm_android.Item
 import uniffi.tonearm_android.ItemKind
+import uniffi.tonearm_android.Link
 import uniffi.tonearm_android.Page
 import uniffi.tonearm_android.Shelf
 import uniffi.tonearm_android.ShelfLayout
@@ -63,6 +65,10 @@ interface Actions {
     /** An album's moving cover as a local file, when it has one and
      *  Settings shows moving covers. Blocks. */
     fun albumMotion(album: String, artist: String, firstSong: String): String? = null
+    /** Saves an album or playlist to the library, or takes it out. */
+    fun setSaved(playlistId: String, save: Boolean, title: String) {}
+    /** Follows an artist, or stops. */
+    fun follow(channelId: String, follow: Boolean, name: String) {}
 }
 
 /** A tap on a card or row that isn't a song in a list. */
@@ -379,19 +385,43 @@ fun PageHeader(header: Header, songs: List<Item>, actions: Actions) {
             songs.size > 1 -> { { actions.playList(songs.shuffled(), 0) } }
             else -> null
         }
-        val radio: (() -> Unit)? = header.radio?.let { r -> { actions.playWatch(r) } }
-        if (play != null || shuffle != null || radio != null) {
-            Row(
-                Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                play?.let {
-                    RoundButton(Icons.play, accent = true, size = 56.dp, onClick = it)
-                    Spacer(Modifier.width(8.dp))
+        // Spotify's arrangement with our own buttons: the page's small
+        // actions on the left (save or follow, then its menu, which also
+        // has an artist's radio), shuffle and the big round play button at
+        // the right end, under the thumb. Save and follow flip at once.
+        var saved by remember(header) { mutableStateOf(header.saved) }
+        var followed by remember(header) { mutableStateOf(header.followed) }
+        Row(
+            Modifier.fillMaxWidth().padding(start = 4.dp, end = 16.dp, top = 8.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            val channel = header.channelId
+            val following = followed
+            if (header.banner && channel != null && following != null) {
+                Box(
+                    Modifier.padding(start = 12.dp, end = 4.dp).height(32.dp).clip(RoundedCornerShape(16.dp))
+                        .border(1.dp, Color(0x66FFFFFF), RoundedCornerShape(16.dp))
+                        .clickable { followed = !following; actions.follow(channel, !following, header.title) }
+                        .padding(horizontal = 14.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Title(if (following) "Following" else "Follow", size = 14.sp)
                 }
-                shuffle?.let { HeroIcon(Icons.shuffle, onClick = it) }
-                radio?.let { HeroIcon(Icons.radio, onClick = it) }
+            }
+            val playlist = header.playlistId
+            val isSaved = saved
+            if (!header.banner && playlist != null && isSaved != null) {
+                HeroIcon(Icons.heart, filled = isSaved, color = if (isSaved) Tonearm.accent else null) {
+                    saved = !isSaved
+                    actions.setSaved(playlist, !isSaved, header.title)
+                }
+            }
+            HeroIcon(Icons.dots, filled = true) { actions.menu(header.asItem(saved)) }
+            Spacer(Modifier.weight(1f))
+            shuffle?.let { HeroIcon(Icons.shuffle, onClick = it) }
+            play?.let {
+                Spacer(Modifier.width(8.dp))
+                RoundButton(Icons.play, accent = true, size = 56.dp, onClick = it)
             }
         }
         if (header.about.isNotEmpty() && header.banner) {
@@ -403,14 +433,33 @@ fun PageHeader(header: Header, songs: List<Item>, actions: Actions) {
 /** An icon on its own in the row under a page's title, as the desktop's
  *  `HeroIcon`: soft white, 28 tall, in a 48dp touch target. */
 @Composable
-fun HeroIcon(glyph: String, onClick: () -> Unit) {
+fun HeroIcon(glyph: String, filled: Boolean = false, color: Color? = null, onClick: () -> Unit) {
     Box(
         Modifier.size(48.dp).clip(CircleShape).clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        Icon(glyph, size = 28.sp, color = Color(0xB3FFFFFF))
+        Icon(glyph, size = 26.sp, filled = filled, color = color ?: Color(0xB3FFFFFF))
     }
 }
+
+private val albumLabels = setOf("Album", "EP", "Single")
+
+/** The page itself as an item, for its menu: the same lines a long press
+ *  on its card gives. `saved` is the page's save state as it is now. */
+fun Header.asItem(saved: Boolean?): Item = Item(
+    kind = when {
+        banner -> ItemKind.ARTIST
+        label in albumLabels -> ItemKind.ALBUM
+        else -> ItemKind.PLAYLIST
+    },
+    title = title, subtitle = listOf(label, byline).filter { it.isNotEmpty() }.joinToString(" • "),
+    thumb = thumb, duration = "", videoId = null,
+    browseId = if (banner) channelId else null, playlistId = playlistId, params = null,
+    artist = byline, album = "", explicit = false,
+    artists = if (!banner && byline.isNotEmpty()) listOf(Link(byline, bylineId)) else emptyList(),
+    albumId = null, libraryPlaylist = if (saved != null) playlistId else null, saved = saved == true,
+    color = null, trend = Trend.NONE,
+)
 
 /** How a page header's art is shaped: an artist's banner is wider than tall. */
 fun headerRatio(banner: Boolean) = if (banner) 1.25f else 1f

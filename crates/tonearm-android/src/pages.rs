@@ -117,6 +117,12 @@ pub struct Header {
     pub shuffle: Option<Item>,
     pub radio: Option<Item>,
     pub playlist_id: Option<String>,
+    /// Some when the album or playlist can be saved to the library: whether
+    /// it is.
+    pub saved: Option<bool>,
+    /// An artist page's channel, and whether it is followed, when it can be.
+    pub channel_id: Option<String>,
+    pub followed: Option<bool>,
 }
 
 /// One of Home's moods, such as "Relax".
@@ -253,6 +259,9 @@ pub fn page(p: &model::Page) -> Page {
             shuffle: h.shuffle.as_ref().map(item),
             radio: h.radio.as_ref().map(item),
             playlist_id: h.playlist_id.clone(),
+            saved: h.liked,
+            channel_id: h.channel_id.clone(),
+            followed: h.subscribed,
         }),
         shelves: p.shelves.iter().filter(|s| !s.items.is_empty()).map(shelf).collect(),
         chips: p

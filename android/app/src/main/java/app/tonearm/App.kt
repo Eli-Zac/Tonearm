@@ -173,6 +173,22 @@ fun App(core: Core, controller: MediaController?) {
         override val playing: String? get() = playingId
         override fun albumMotion(album: String, artist: String, firstSong: String): String? =
             if (core.animatedCovers()) core.albumMotion(album, artist, firstSong) else null
+        // As the menu's save and follow: a note saying what happened, and
+        // the library's pages load again.
+        fun libraryCall(call: () -> String) {
+            scope.launch {
+                try {
+                    withContext(Dispatchers.IO) { call() }.takeIf { it.isNotEmpty() }?.let { toast = it }
+                    libraryEpoch++
+                } catch (e: Exception) {
+                    toast = e.message ?: "That didn't work"
+                }
+            }
+        }
+        override fun setSaved(playlistId: String, save: Boolean, title: String) =
+            libraryCall { core.setSaved(playlistId, save, title) }
+        override fun follow(channelId: String, follow: Boolean, name: String) =
+            libraryCall { core.follow(channelId, follow, name) }
     }
 
     // What a song's menu does, through the app.
