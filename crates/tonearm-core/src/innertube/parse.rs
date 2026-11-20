@@ -582,6 +582,25 @@ impl Walker {
                                 });
                             }
                         }
+                        // A mood or genre on "Moods & genres": its name, its
+                        // colour and the page it opens.
+                        "musicNavigationButtonRenderer" => {
+                            let browse = child.get("clickCommand").and_then(|c| c.get("browseEndpoint"));
+                            let title = child.get("buttonText").map(text).unwrap_or_default();
+                            if let (Some(browse), false) = (browse, title.is_empty()) {
+                                self.push(Item {
+                                    title,
+                                    browse_id: string(browse, "browseId"),
+                                    params: string(browse, "params"),
+                                    color: child
+                                        .get("solid")
+                                        .and_then(|s| s.get("leftStripeColor"))
+                                        .and_then(Value::as_u64)
+                                        .map(|c| c as u32),
+                                    ..Item::default()
+                                });
+                            }
+                        }
                         "playlistPanelVideoRenderer" => self.push(panel_item(child)),
                         "playlistPanelVideoWrapperRenderer" => {
                             if let Some(chosen) = song_of_wrapper(child) {
@@ -785,6 +804,26 @@ pub fn account(v: &Value) -> Option<Account> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn parses_mood_buttons_with_their_colour() {
+        let v = json!({"contents": {"gridRenderer": {
+            "header": {"gridHeaderRenderer": {"title": {"runs": [{"text": "Moods & moments"}]}}},
+            "items": [{"musicNavigationButtonRenderer": {
+                "buttonText": {"runs": [{"text": "Chill"}]},
+                "solid": {"leftStripeColor": 4282545907u64},
+                "clickCommand": {"browseEndpoint": {
+                    "browseId": "FEmusic_moods_and_genres_category", "params": "ggMPOg1uX1"
+                }}
+            }}]
+        }}});
+        let page = page(&v);
+        let item = page.shelves.iter().flat_map(|s| &s.items).next().expect("a mood");
+        assert_eq!(item.title, "Chill");
+        assert_eq!(item.browse_id.as_deref(), Some("FEmusic_moods_and_genres_category"));
+        assert_eq!(item.params.as_deref(), Some("ggMPOg1uX1"));
+        assert_eq!(item.color, Some(4282545907));
+    }
 
     #[test]
     fn parses_a_shelf_with_a_song() {

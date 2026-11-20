@@ -174,7 +174,16 @@ fun NowPlayingScreen(
                 Spacer(Modifier.weight(1f))
                 Dim("Now playing", 13.sp)
                 Spacer(Modifier.weight(1f))
-                Spacer(Modifier.size(40.dp))
+                // With the lyrics or queue up, an X opposite the arrow goes
+                // back to the cover. Its room is always kept, so the title
+                // never shifts; it fades with the panels.
+                val showX by animateFloatAsState(if (panel != Panel.Cover) 1f else 0f, tween(220), label = "x")
+                Box(
+                    Modifier.size(40.dp).clip(CircleShape)
+                        .graphicsLayer { alpha = showX }
+                        .then(if (panel != Panel.Cover) Modifier.clickable { onPanel(Panel.Cover) } else Modifier),
+                    contentAlignment = Alignment.Center,
+                ) { CloseMark() }
             }
             // The cover stays put under the lyrics and queue, only hidden,
             // so its moving cover keeps playing rather than loading again
@@ -305,6 +314,17 @@ private fun LyricsSkeleton(height: androidx.compose.ui.unit.Dp) {
     Column(Modifier.fillMaxWidth().height(height), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         TextSkeleton(0.72f, 18.dp)
         TextSkeleton(0.46f, 18.dp)
+    }
+}
+
+/** An X drawn as two strokes, the weight of the icon font's down arrow
+ *  (the font is cut down to the glyphs the app uses, and has none). */
+@Composable
+private fun CloseMark() {
+    androidx.compose.foundation.Canvas(Modifier.size(16.dp)) {
+        val w = 2.dp.toPx()
+        drawLine(Tonearm.text, androidx.compose.ui.geometry.Offset(0f, 0f), androidx.compose.ui.geometry.Offset(size.width, size.height), w, androidx.compose.ui.graphics.StrokeCap.Round)
+        drawLine(Tonearm.text, androidx.compose.ui.geometry.Offset(size.width, 0f), androidx.compose.ui.geometry.Offset(0f, size.height), w, androidx.compose.ui.graphics.StrokeCap.Round)
     }
 }
 

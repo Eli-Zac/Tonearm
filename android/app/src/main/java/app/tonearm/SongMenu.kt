@@ -63,6 +63,7 @@ fun Song.asItem() = Item(
     albumId = albumId,
     libraryPlaylist = null,
     saved = false,
+    color = null,
 )
 
 /**

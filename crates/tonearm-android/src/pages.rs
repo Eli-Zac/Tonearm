@@ -40,6 +40,8 @@ pub struct Item {
     /// behind it, and whether it is saved already.
     pub library_playlist: Option<String>,
     pub saved: bool,
+    /// A mood or genre's colour (0xAARRGGBB); None for everything else.
+    pub color: Option<u32>,
 }
 
 /// A name and, where there is one, the page it opens.
@@ -163,6 +165,7 @@ pub fn item(i: &model::Item) -> Item {
         album_id: i.album.as_ref().map(|(_, id)| id.clone()),
         library_playlist: i.library.as_ref().map(|(playlist, _)| playlist.clone()),
         saved: i.library.as_ref().is_some_and(|(_, saved)| *saved),
+        color: i.color,
     }
 }
 

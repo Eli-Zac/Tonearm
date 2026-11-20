@@ -518,11 +518,11 @@ fun SearchScreen(core: Core, actions: Actions) {
         }
     }
     // The list shows from the box taking the cursor, once there is
-    // something to list. Back with the keyboard up only puts the keyboard
-    // away (it hears Back first); with it down, Back closes the list.
+    // something to list. Back is not one of its steps: with the keyboard up
+    // the keyboard hears it first; else it leaves Search for Home, as the
+    // app's own Back does (the user asked).
     LaunchedEffect(focused) { if (focused) suggesting = true }
     val listing = suggesting && (query.isNotBlank() || recent.isNotEmpty())
-    BackHandler(enabled = listing) { putAway() }
     Column(Modifier.fillMaxSize()) {
         SearchBox(query, { query = it; suggesting = true }, { focused = it }) { search(query) }
         val words = searched
@@ -547,8 +547,9 @@ fun SearchScreen(core: Core, actions: Actions) {
                 },
                 onItemMenu = { tapped.menu(it) },
             )
-        } else if (words == null) {
-            Message("Search songs, albums, artists and playlists")
+        } else if (words == null || query.isBlank()) {
+            // Nothing typed: the moods and genres, as Explore lists them.
+            MoodsGrid(core) { tapped.open(it.browseId ?: return@MoodsGrid, it.params, it.title) }
         } else {
             PageView(
                 key = "search:$words",

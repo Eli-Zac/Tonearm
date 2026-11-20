@@ -37,6 +37,9 @@ pub struct Item {
     pub explicit: bool,
     /// On a chart, how the song's place moved since the last one.
     pub trend: Trend,
+    /// A mood or genre button's colour (0xAARRGGBB), as YouTube Music
+    /// stripes it. Only those buttons have one.
+    pub color: Option<u32>,
 }
 
 /// A chart song's move, as YouTube Music marks it beside the rank.

@@ -35,12 +35,13 @@ pub fn set_crossfade_choice(choice: i32) -> u32 {
 pub const LEVELLING: [(f32, f32); 4] = [(0.0, 0.0), (-19.0, 0.0), (-14.0, 0.0), (-11.0, 4.0)];
 pub const LEVELLING_NAMES: [&str; 4] = ["Off", "Quiet", "Normal", "Loud"];
 
-/// The volume levelling choice saved in Settings. Normal when none is.
+/// The volume levelling choice saved in Settings. Off when none is (the
+/// user's choice, on desktop and phone alike).
 pub fn levelling() -> i32 {
     store::load("levelling")
         .and_then(|text| text.trim().parse().ok())
         .filter(|choice: &i32| (0..LEVELLING.len() as i32).contains(choice))
-        .unwrap_or(2)
+        .unwrap_or(0)
 }
 
 /// Saves a levelling choice, giving it back in range.

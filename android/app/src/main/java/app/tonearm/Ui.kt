@@ -313,7 +313,7 @@ fun playlistItem(playlistId: String, title: String) = Item(
     kind = ItemKind.PLAYLIST, title = title, subtitle = "", thumb = "", duration = "",
     videoId = null, browseId = null, playlistId = playlistId, params = null,
     artist = "", album = "", explicit = false, artists = emptyList(), albumId = null,
-    libraryPlaylist = null, saved = false,
+    libraryPlaylist = null, saved = false, color = null,
 )
 
 @Composable

@@ -5346,6 +5346,11 @@ fn explore(client: &Client) -> Result<Page, String> {
         (client.browse("FEmusic_explore", None), chart.join().ok().flatten())
     });
     let mut page = page?;
+    // The core now reads mood and genre buttons (the phone's Search lists
+    // them); the desktop's Explore leaves them out, as it always has.
+    for shelf in &mut page.shelves {
+        shelf.items.retain(|i| i.color.is_none());
+    }
     let has_chart = page.shelves.iter().any(|s| s.title == CHART_TITLE);
     if let (false, Some(chart)) = (has_chart, chart) {
         // Where YouTube Music puts it: after the new releases.
