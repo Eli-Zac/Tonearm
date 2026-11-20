@@ -466,6 +466,9 @@ fun SearchScreen(core: Core, actions: Actions) {
     }
     var query by rememberSaveable { mutableStateOf("") }
     var searched by rememberSaveable { mutableStateOf<String?>(null) }
+    // Which tab of the results: 0 all, then songs, albums, artists,
+    // playlists, podcasts. A new search starts on All.
+    var searchTab by rememberSaveable { mutableIntStateOf(0) }
     // Anything tapped in the results puts the keyboard away first.
     val tapped = object : Actions by actions {
         override fun open(id: String, params: String?, title: String) { putAway(); actions.open(id, params, title) }
@@ -510,6 +513,7 @@ fun SearchScreen(core: Core, actions: Actions) {
         putAway()
         query = words
         searched = words
+        searchTab = 0
         scope.launch {
             recent = withContext(Dispatchers.IO) {
                 core.rememberSearch(words)
@@ -551,13 +555,44 @@ fun SearchScreen(core: Core, actions: Actions) {
             // Nothing typed: the moods and genres, as Explore lists them.
             MoodsGrid(core) { tapped.open(it.browseId ?: return@MoodsGrid, it.params, it.title) }
         } else {
+            // The desktop's tabs over the results. They stay put while a
+            // tab loads; only the results under them make way.
+            SearchTabs(searchTab) { searchTab = it }
+            val tab = searchTab
             PageView(
-                key = "search:$words",
-                load = { withContext(Dispatchers.IO) { core.searchPage(words) } },
-                more = { token -> withContext(Dispatchers.IO) { core.more(token) } },
+                key = "search:$words:$tab",
+                load = { withContext(Dispatchers.IO) { core.searchTab(words, tab.toUInt()) } },
+                more = { token -> withContext(Dispatchers.IO) { core.searchMore(token) } },
                 actions = tapped,
                 skeleton = PageSkeleton.Rows,
             )
+        }
+    }
+}
+
+/** The desktop's search tabs, in its order. */
+private val SEARCH_TABS = listOf("All", "Songs", "Albums", "Artists", "Playlists", "Podcasts")
+
+/** The results' tabs, as chips like Home's: the one showing lit. */
+@Composable
+fun SearchTabs(picked: Int, onPick: (Int) -> Unit) {
+    LazyRow(
+        contentPadding = PaddingValues(horizontal = 16.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier.padding(bottom = 4.dp),
+    ) {
+        items(SEARCH_TABS.size) { i ->
+            val on = i == picked
+            Box(
+                Modifier.height(34.dp).clip(RoundedCornerShape(17.dp))
+                    .background(if (on) Tonearm.text else Tonearm.raised)
+                    .clickable { if (!on) onPick(i) }
+                    .padding(horizontal = 14.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(SEARCH_TABS[i], color = if (on) Tonearm.bg else Tonearm.text, fontFamily = Tonearm.font,
+                    fontWeight = FontWeight.Medium, fontSize = 14.sp)
+            }
         }
     }
 }

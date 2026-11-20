@@ -93,4 +93,19 @@ impl Tonearm {
         }
         Ok(pages::page(&self.client.search(&query)?))
     }
+
+    /// One tab of the results, as the desktop's: 0 all, 1 songs, 2 albums,
+    /// 3 artists, 4 playlists, 5 podcasts.
+    pub fn search_tab(&self, query: String, tab: u32) -> Result<pages::Page, TonearmError> {
+        if tab == 0 {
+            return self.search_page(query);
+        }
+        Ok(pages::page(&self.client.search_in(&query, tab as usize)?))
+    }
+
+    /// More search results, as the list is scrolled. Search continues
+    /// through the search endpoint, not browse.
+    pub fn search_more(&self, continuation: String) -> Result<pages::Page, TonearmError> {
+        Ok(pages::page(&self.client.search_more(&continuation)?))
+    }
 }

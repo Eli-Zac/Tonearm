@@ -10,7 +10,10 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -68,15 +71,26 @@ fun MoodsGrid(core: Core, onOpen: (Item) -> Unit) {
     }
 }
 
+/** A mood: filled with its own colour, run diagonally from a deep blend
+ *  with the app's dark into a darker one, so the cards glow in the
+ *  mood's colour without leaving the app's muted look. */
 @Composable
 private fun MoodButton(item: Item, modifier: Modifier, onClick: () -> Unit) {
-    val stripe = item.color?.let { Color(it.toInt()) } ?: Tonearm.accent
-    Row(
-        modifier.height(52.dp).clip(RoundedCornerShape(8.dp)).background(Tonearm.raised).clickable(onClick = onClick),
-        verticalAlignment = Alignment.CenterVertically,
+    val hue = item.color?.let { Color(it.toInt()) } ?: Tonearm.accent
+    val fill = remember(hue) {
+        Brush.linearGradient(
+            0f to lerp(Tonearm.bg, hue, 0.62f),
+            1f to lerp(Tonearm.bg, hue, 0.18f),
+            start = Offset.Zero,
+            end = Offset.Infinite,
+        )
+    }
+    Box(
+        modifier.height(64.dp).clip(RoundedCornerShape(Tonearm.radius)).background(fill).clickable(onClick = onClick)
+            .padding(horizontal = 14.dp),
+        contentAlignment = Alignment.CenterStart,
     ) {
-        Box(Modifier.width(6.dp).fillMaxHeight().background(stripe))
-        Title(item.title, size = 14.sp, weight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 12.dp))
+        Title(item.title, size = 15.sp, weight = FontWeight.Bold)
     }
 }
 
@@ -87,8 +101,8 @@ private fun MoodsSkeleton() {
         Bone(Modifier.padding(top = 22.dp, bottom = 12.dp).width(170.dp).height(20.dp), RoundedCornerShape(7.dp))
         repeat(7) {
             Row(Modifier.fillMaxWidth().padding(bottom = 10.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Bone(Modifier.weight(1f).height(52.dp), RoundedCornerShape(8.dp))
-                Bone(Modifier.weight(1f).height(52.dp), RoundedCornerShape(8.dp))
+                Bone(Modifier.weight(1f).height(64.dp), RoundedCornerShape(Tonearm.radius))
+                Bone(Modifier.weight(1f).height(64.dp), RoundedCornerShape(Tonearm.radius))
             }
         }
     }
