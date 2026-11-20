@@ -219,6 +219,7 @@ impl Tonearm {
                 Moment::Started => {
                     let Some(song) = self.now_playing() else { continue };
                     self.remember(&song, 0.25);
+                    self.played_here(&song.video_id);
                     let seconds = if duration > 0.0 { duration } else { crate::lyrics::seconds_of(&song.duration) };
                     let item = song_item(&song);
                     self.services.send(services::Event::Started(services::Track {
@@ -239,8 +240,9 @@ impl Tonearm {
                     if self.client.signed_in() {
                         let worker = self.clone();
                         std::thread::spawn(move || {
-                            if let Err(message) = worker.client.add_to_history(&song.video_id) {
-                                eprintln!("tonearm: history: {message}");
+                            match worker.client.add_to_history(&song.video_id) {
+                                Ok(()) => worker.history_top_is(&song.video_id),
+                                Err(message) => eprintln!("tonearm: history: {message}"),
                             }
                         });
                     }

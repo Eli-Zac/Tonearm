@@ -23,6 +23,7 @@ mod lyrics;
 mod menu;
 mod pages;
 mod playing;
+mod resume;
 mod search;
 mod settings;
 pub use downloads::{DownloadMarks, DownloadProgress};
@@ -169,6 +170,11 @@ pub struct Tonearm {
     taste: Mutex<history::History>,
     /// The account signed in, once asked for.
     account: Mutex<Option<Account>>,
+    /// The song put back from last time, by video id, and how many
+    /// milliseconds in it starts. Taken by the first song to load.
+    resume_at: Mutex<Option<(String, u64)>>,
+    /// When the session was last saved.
+    saved: Mutex<resume::Saved>,
 }
 
 #[uniffi::export]
@@ -213,11 +219,16 @@ impl Tonearm {
             listen: Mutex::new(listen::Listen::default()),
             taste: Mutex::new(history::History::load()),
             account: Mutex::new(None),
+            resume_at: Mutex::new(None),
+            saved: Mutex::new(resume::Saved::default()),
         });
         // Signed in as last time, as the desktop app starts.
         if let Some(cookie) = store::load("session") {
             tonearm.apply(&cookie);
         }
+        // What played last, back in the player, paused.
+        tonearm.restore();
+        resume::check_elsewhere(Arc::downgrade(&tonearm));
         watch(Arc::downgrade(&tonearm));
         downloads::listen();
         Ok(tonearm)
@@ -462,7 +473,10 @@ impl Tonearm {
     }
 
     pub fn previous(&self) -> Result<(), TonearmError> {
-        let position = self.audio.status.position_ms.load(Ordering::SeqCst);
+        let position = match self.waiting() {
+            Some((_, ms)) => ms,
+            None => self.audio.status.position_ms.load(Ordering::SeqCst),
+        };
         let step = self.queue.lock().unwrap().previous(position);
         self.step(step)
     }
@@ -630,18 +644,41 @@ impl Tonearm {
         self.audio.reopen_output();
     }
 
-    pub fn resume(&self) {
+    pub fn resume(self: Arc<Self>) {
+        // The song put back from last time opens now, at its place.
+        if self.play_waiting() {
+            return;
+        }
         self.play_hold.set(true);
         self.audio.play();
     }
 
     pub fn seek(&self, seconds: f32) {
+        // A song put back and not opened yet moves its starting place.
+        if let Some((song, _)) = self.waiting() {
+            *self.resume_at.lock().unwrap() = Some((song.video_id, (seconds.max(0.0) * 1000.0) as u64));
+            self.changed();
+            return;
+        }
         self.seek_hold.set((seconds.max(0.0) * 1000.0) as u64);
         self.audio.seek(seconds);
     }
 
     pub fn playback(&self) -> Playback {
         let status = &self.audio.status;
+        if let Some((song, ms)) = self.waiting().filter(|_| !self.loading.load(Ordering::SeqCst)) {
+            let queue = self.queue.lock().unwrap();
+            return Playback {
+                state: PlayState::Paused,
+                position_ms: ms,
+                duration_ms: (lyrics::seconds_of(&song.duration) * 1000.0) as u64,
+                error: String::new(),
+                index: queue.index() as u32,
+                version: self.version.load(Ordering::SeqCst),
+                repeat: repeat_mode(queue.repeat),
+                shuffle: queue.shuffle(),
+            };
+        }
         let note = self.note.lock().unwrap().clone();
         let state = if self.loading.load(Ordering::SeqCst) {
             PlayState::Loading
@@ -678,13 +715,17 @@ impl Tonearm {
             error,
             index: queue.index() as u32,
             version: self.version.load(Ordering::SeqCst),
-            repeat: match queue.repeat {
-                Repeat::Off => RepeatMode::Off,
-                Repeat::All => RepeatMode::All,
-                Repeat::One => RepeatMode::One,
-            },
+            repeat: repeat_mode(queue.repeat),
             shuffle: queue.shuffle(),
         }
+    }
+}
+
+fn repeat_mode(repeat: Repeat) -> RepeatMode {
+    match repeat {
+        Repeat::Off => RepeatMode::Off,
+        Repeat::All => RepeatMode::All,
+        Repeat::One => RepeatMode::One,
     }
 }
 
@@ -842,6 +883,14 @@ impl Tonearm {
             return Ok(());
         };
         let request = self.request.fetch_add(1, Ordering::SeqCst) + 1;
+        // A song put back from last time starts where it was left.
+        let start = self
+            .resume_at
+            .lock()
+            .unwrap()
+            .take()
+            .filter(|(id, _)| *id == song.video_id)
+            .map(|(_, ms)| ms);
         self.note.lock().unwrap().clear();
         self.loading.store(true, Ordering::SeqCst);
         // A downloaded or cached copy needs no link and no network, so a
@@ -873,6 +922,11 @@ impl Tonearm {
         // Any song opened ahead was for the last one.
         self.fade.lock().unwrap().take();
         self.audio.load(input, generation);
+        // Commands run in order, so the seek lands once the song is open.
+        if let Some(ms) = start.filter(|ms| *ms > 0) {
+            self.seek_hold.set(ms);
+            self.audio.seek(ms as f32 / 1000.0);
+        }
         self.loading.store(false, Ordering::SeqCst);
         Ok(())
     }
@@ -906,6 +960,7 @@ fn watch(tonearm: Weak<Tonearm>) {
                 let Some(tonearm) = tonearm.upgrade() else { return };
                 tonearm.tick();
                 let status = &tonearm.audio.status;
+                tonearm.save_session(status.state.load(Ordering::SeqCst));
                 let generation = status.generation.load(Ordering::SeqCst);
                 match status.state.load(Ordering::SeqCst) {
                     audio::PLAYING | audio::PAUSED => {

@@ -87,6 +87,15 @@ impl<T: Clone> Queue<T> {
         }
     }
 
+    /// Puts back a queue saved as it was: already in its shuffled order if
+    /// shuffle was on, so nothing is mixed again. Its old order is not
+    /// kept, so turning shuffle off leaves the songs where they are.
+    pub fn restore(&mut self, items: Vec<T>, index: usize, shuffle: bool) {
+        self.unshuffled = None;
+        self.shuffle = shuffle;
+        self.set(items, index);
+    }
+
     /// Turns shuffle on or off. `same` tells two entries are one song.
     pub fn set_shuffle(&mut self, on: bool, same: impl Fn(&T, &T) -> bool) {
         if on == self.shuffle {
