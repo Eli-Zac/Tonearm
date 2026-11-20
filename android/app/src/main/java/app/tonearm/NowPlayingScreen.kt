@@ -112,19 +112,24 @@ fun NowPlayingScreen(
     val scope = rememberCoroutineScope()
     var height by remember { mutableIntStateOf(0) }
     val flick = with(LocalDensity.current) { 1000.dp.toPx() }
+    // Once it is going, the swipe's catcher goes too: it stays the size
+    // of the screen while the page slides off, and would take the taps
+    // meant for the mini-player under it.
+    var closing by remember { mutableStateOf(false) }
     Box(
         Modifier
             .fillMaxSize()
             .onSizeChanged { height = it.height }
             // Before the layer moves, so the finger is measured on the
             // screen, not on the sliding page.
-            .pointerInput(Unit) {
+            .then(if (closing) Modifier else Modifier.pointerInput(Unit) {
                 val tracker = androidx.compose.ui.input.pointer.util.VelocityTracker()
                 val settle = {
                     val speed = tracker.calculateVelocity().y
                     tracker.resetTracking()
                     scope.launch {
                         if (pulled.value > height / 4f || speed > flick) {
+                            closing = true
                             pulled.animateTo(height.toFloat(), tween(220, easing = FastOutSlowInEasing), speed)
                             onClose()
                         } else {
@@ -139,7 +144,7 @@ fun NowPlayingScreen(
                     tracker.addPosition(change.uptimeMillis, change.position)
                     scope.launch { pulled.snapTo((pulled.value + amount).coerceAtLeast(0f)) }
                 }
-            }
+            })
             .graphicsLayer { translationY = pulled.value }
             .background(Tonearm.bg),
     ) {
