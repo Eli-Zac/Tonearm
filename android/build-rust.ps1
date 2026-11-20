@@ -35,6 +35,10 @@ foreach ($triple in 'x86_64-linux-android', 'aarch64-linux-android') {
         "--target=${triple}26 --sysroot=$sysroot -I$sysroot/usr/include/$triple",
         'Process')
 }
+# Casting opens Tonearm's own receiver (song, cover, lyrics on a screen),
+# as the desktop's test builds do. Devices that can't open it fall back to
+# Google's Default Media Receiver.
+if (-not $env:TONEARM_CAST_APP) { $env:TONEARM_CAST_APP = '79497171' }
 # Builds for Android are kept off D:, which is short of room.
 if (-not $env:TONEARM_ANDROID_TARGET) { $env:TONEARM_ANDROID_TARGET = 'C:\Android\target' }
 $target = $env:TONEARM_ANDROID_TARGET

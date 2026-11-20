@@ -363,6 +363,8 @@ impl Cast {
         // A device that doesn't take up a level by this long after it was
         // sent moves the cast to scaling the stream.
         let mut volume_check: Option<(f32, Instant)> = None;
+        // The level last asked for here.
+        let mut sent_volume: Option<f32> = None;
         let mut heard = Instant::now();
         let mut pinged = Instant::now();
         let mut asked = Instant::now();
@@ -429,8 +431,12 @@ impl Cast {
                     channel.send(PLATFORM, RECEIVER, &json!({"type": "SET_VOLUME", "volume": {"level": level}, "requestId": id}))?;
                     if !scaled {
                         volume_check.get_or_insert((level, Instant::now())).0 = level;
+                        volume = Some(level);
                     }
-                    volume = Some(level);
+                    // A device that ignores its volume reports its own level
+                    // on, unchanged: `volume` stays that, and ours is kept
+                    // apart, so neither report reads as someone else's change.
+                    sent_volume = Some(level);
                     wanted_volume = None;
                     volume_sent = Instant::now();
                 }
@@ -477,7 +483,12 @@ impl Cast {
                         // Ours coming back changes nothing. Anyone else's,
                         // such as a phone's slider, moves ours, and with a
                         // device that ignores its volume, the stream's.
-                        if wanted_volume.is_none() && volume_check.is_none() && volume.is_none_or(|v| (v - level).abs() > 0.01) {
+                        let theirs = volume.is_none_or(|v| (v - level).abs() > 0.01)
+                            && sent_volume.is_none_or(|v| (v - level).abs() > 0.01);
+                        if scaled && !theirs {
+                            volume = Some(level);
+                        }
+                        if wanted_volume.is_none() && volume_check.is_none() && theirs {
                             volume = Some(level);
                             if scaled {
                                 self.pipe.set_gain(gain_for(level));
