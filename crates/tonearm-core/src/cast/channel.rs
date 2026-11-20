@@ -48,9 +48,11 @@ fn secure(addr: SocketAddr, tcp: TcpStream) -> Result<Tls, String> {
         .map_err(|e| format!("the device refused a secure connection ({e})"))
 }
 
-/// On Android, rustls. The handshake happens on the first message.
+/// On Android, rustls. The handshake is done here, while reads may still
+/// wait 5 s: left to the first message, it ran under the 40 ms reads and
+/// failed with "operation would block".
 #[cfg(target_os = "android")]
-fn secure(addr: SocketAddr, tcp: TcpStream) -> Result<Tls, String> {
+fn secure(addr: SocketAddr, mut tcp: TcpStream) -> Result<Tls, String> {
     use std::sync::Arc;
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let config = rustls::ClientConfig::builder_with_provider(provider.clone())
@@ -60,8 +62,13 @@ fn secure(addr: SocketAddr, tcp: TcpStream) -> Result<Tls, String> {
         .with_custom_certificate_verifier(Arc::new(AnyCertificate(provider)))
         .with_no_client_auth();
     let name = rustls::pki_types::ServerName::IpAddress(addr.ip().into());
-    let connection = rustls::ClientConnection::new(Arc::new(config), name)
+    let mut connection = rustls::ClientConnection::new(Arc::new(config), name)
         .map_err(|e| format!("the device refused a secure connection ({e})"))?;
+    while connection.is_handshaking() {
+        connection
+            .complete_io(&mut tcp)
+            .map_err(|e| format!("the device refused a secure connection ({e})"))?;
+    }
     Ok(rustls::StreamOwned::new(connection, tcp))
 }
 

@@ -259,18 +259,53 @@ mod platform {
     }
 }
 
+/// Elsewhere the app asks its system's own DNS-SD service (Android's
+/// NsdManager, which also holds the multicast lock a socket of ours would
+/// need) and tells the core what it hears through `seen` and `lost`.
+#[cfg(not(windows))]
+pub use platform::{lost, seen};
+
 #[cfg(not(windows))]
 mod platform {
     use super::Device;
+    use std::collections::HashMap;
     use std::sync::mpsc::Sender;
+    use std::sync::Mutex;
 
-    /// Other systems have their own DNS-SD service to ask (Android's
-    /// NsdManager), not written yet.
+    /// Devices announced and not yet gone, by their service's instance
+    /// name, and where the search running now wants them.
+    static ANNOUNCED: Mutex<Option<HashMap<String, Device>>> = Mutex::new(None);
+    static SINK: Mutex<Option<Sender<Device>>> = Mutex::new(None);
+
+    /// A device the system found: its instance name, TXT record, address
+    /// and port.
+    pub fn seen(instance: &str, txt: &[(String, String)], ip: std::net::IpAddr, port: u16) {
+        let Some(device) = super::device(txt, ip, port) else { return };
+        ANNOUNCED.lock().unwrap().get_or_insert_with(HashMap::new).insert(instance.into(), device.clone());
+        if let Some(sink) = SINK.lock().unwrap().as_ref() {
+            let _ = sink.send(device);
+        }
+    }
+
+    /// A device the system says has gone. The finder forgets it once it
+    /// has not been seen for a while, as on Windows.
+    pub fn lost(instance: &str) {
+        if let Some(announced) = ANNOUNCED.lock().unwrap().as_mut() {
+            announced.remove(instance);
+        }
+    }
+
     pub struct Search;
 
     impl Search {
-        pub fn start(_sink: Sender<Device>) -> Result<Search, String> {
-            Err("not written for this system yet".into())
+        /// Each search, every refresh, hears again of every device still
+        /// announced, so none is forgotten while it is there.
+        pub fn start(sink: Sender<Device>) -> Result<Search, String> {
+            for device in ANNOUNCED.lock().unwrap().iter().flat_map(|a| a.values()) {
+                let _ = sink.send(device.clone());
+            }
+            *SINK.lock().unwrap() = Some(sink);
+            Ok(Search)
         }
     }
 }

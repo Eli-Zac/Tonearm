@@ -18,6 +18,7 @@ use tonearm_core::queue::{Added, Queue, Repeat, Step};
 use tonearm_core::{audio, history, innertube, listen, offline, resolver, services, store, suggest};
 
 mod auto;
+mod cast;
 mod downloads;
 mod lyrics;
 mod menu;
@@ -27,6 +28,7 @@ mod profile;
 mod resume;
 mod search;
 mod settings;
+pub use cast::{CastDevice, CastKind, CastState};
 pub use downloads::{DownloadMarks, DownloadProgress};
 pub use lyrics::{LyricLine, Lyrics, Syllable};
 pub use menu::{MenuAction, MenuIcon, MenuLine};
@@ -711,7 +713,7 @@ impl Tonearm {
                 0
             } else {
                 self.seek_hold
-                    .apply(status.position_ms.load(Ordering::SeqCst), state == PlayState::Playing)
+                    .apply(status.position_ms.load(Ordering::SeqCst).saturating_sub(self.cast_lag_ms()), state == PlayState::Playing)
             },
             duration_ms: if loading { 0 } else { status.duration_ms.load(Ordering::SeqCst) },
             error,

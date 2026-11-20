@@ -12,6 +12,7 @@ import android.os.Handler
 import android.os.Looper
 import androidx.core.content.ContextCompat
 import androidx.media3.common.C
+import androidx.media3.common.DeviceInfo
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
@@ -84,6 +85,27 @@ class TonearmPlayer(private val context: Context, private val core: Tonearm) :
             invalidateState()
         }
         noisy(now.state == PlayState.PLAYING)
+        // The phone's volume keys move the device's volume while casting.
+        val on = core.casting()
+        val level = if (on) core.castState().volume else castLevel
+        if (on != castOn || (on && volumeStep(level) != volumeStep(castLevel))) {
+            castOn = on
+            castLevel = level
+            invalidateState()
+        }
+    }
+
+    /** Whether the music plays on a Cast device, and its volume, 0 to 1. */
+    private var castOn = false
+    private var castLevel = 0f
+
+    private fun volumeStep(level: Float) = Math.round(level * VOLUME_STEPS)
+
+    /** Sets the device's volume off the main thread, and shows it at once. */
+    private fun setCastVolume(level: Float): ListenableFuture<*> {
+        val clamped = level.coerceIn(0f, 1f)
+        castLevel = clamped
+        return work { core.castVolume(clamped) }
     }
 
     override fun getState(): State {
@@ -98,6 +120,16 @@ class TonearmPlayer(private val context: Context, private val core: Tonearm) :
                 COMMAND_GET_CURRENT_MEDIA_ITEM, COMMAND_GET_TIMELINE, COMMAND_GET_METADATA,
                 COMMAND_SET_REPEAT_MODE, COMMAND_RELEASE,
             )
+            .let {
+                if (castOn) {
+                    it.addAll(
+                        COMMAND_GET_DEVICE_VOLUME, COMMAND_SET_DEVICE_VOLUME_WITH_FLAGS,
+                        COMMAND_ADJUST_DEVICE_VOLUME_WITH_FLAGS,
+                    )
+                } else {
+                    it
+                }
+            }
             .build()
         val state = when (p.state) {
             PlayState.LOADING -> STATE_BUFFERING
@@ -128,6 +160,18 @@ class TonearmPlayer(private val context: Context, private val core: Tonearm) :
             )
             .setContentPositionMs { core.playback().positionMs.toLong() }
         if (queue.isNotEmpty()) builder.setCurrentMediaItemIndex(p.index.toInt().coerceIn(0, queue.size - 1))
+        // Casting is a remote playback: Android then sends the volume keys
+        // here, and shows the device's volume in its own slider.
+        if (castOn) {
+            builder
+                .setDeviceInfo(
+                    DeviceInfo.Builder(DeviceInfo.PLAYBACK_TYPE_REMOTE)
+                        .setMinVolume(0)
+                        .setMaxVolume(VOLUME_STEPS)
+                        .build(),
+                )
+                .setDeviceVolume(volumeStep(castLevel))
+        }
         // A song that fails just stops here. Its error is shown inside the
         // app from the core: handed to Media3, Android pops it up as well.
         return builder.build()
@@ -188,6 +232,15 @@ class TonearmPlayer(private val context: Context, private val core: Tonearm) :
         )
         return later { refresh() }
     }
+
+    override fun handleSetDeviceVolume(deviceVolume: Int, flags: Int): ListenableFuture<*> =
+        setCastVolume(deviceVolume.toFloat() / VOLUME_STEPS)
+
+    override fun handleIncreaseDeviceVolume(flags: Int): ListenableFuture<*> =
+        setCastVolume((volumeStep(castLevel) + 1).toFloat() / VOLUME_STEPS)
+
+    override fun handleDecreaseDeviceVolume(flags: Int): ListenableFuture<*> =
+        setCastVolume((volumeStep(castLevel) - 1).toFloat() / VOLUME_STEPS)
 
     override fun handleStop(): ListenableFuture<*> {
         core.pause()
@@ -297,6 +350,9 @@ class TonearmPlayer(private val context: Context, private val core: Tonearm) :
     }
 
     companion object {
+        /** The device's volume as Android's keys see it: 0 to 20. */
+        private const val VOLUME_STEPS = 20
+
         fun mediaItem(song: Song): MediaItem = MediaItem.Builder()
             .setMediaId(song.videoId)
             .setMediaMetadata(

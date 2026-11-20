@@ -45,6 +45,7 @@ impl Tonearm {
             self.apply_gain(generation);
         }
         self.track_listening(generation, playing, duration);
+        self.cast_now_playing();
         if playing && !self.loading.load(Ordering::SeqCst) {
             self.crossfade_check(generation, duration);
         }

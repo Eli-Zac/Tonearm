@@ -29,6 +29,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -43,6 +44,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import uniffi.tonearm_android.CastState
 import uniffi.tonearm_android.Item
 import uniffi.tonearm_android.Suggestions
 import uniffi.tonearm_android.isLibraryPage
@@ -77,6 +79,21 @@ fun App(core: Core, controller: MediaController?) {
     var toast by remember { mutableStateOf<String?>(null) }
     // The item whose menu is open, from a long press.
     var menuItem by remember { mutableStateOf<MenuRequest?>(null) }
+    // The Devices sheet, from Now Playing's cast button, and what the core
+    // knows of the Cast devices: read every second, along with the notes
+    // it leaves (a device that stopped playing).
+    var castOpen by remember { mutableStateOf(false) }
+    var cast by remember { mutableStateOf<CastState?>(null) }
+    val context = LocalContext.current
+    LaunchedEffect(Unit) {
+        while (true) {
+            withContext(Dispatchers.IO) {
+                runCatching { core.castState() }.getOrNull()?.let { cast = it }
+                runCatching { core.takeCastNote() }.getOrNull()?.let { toast = it }
+            }
+            delay(1000)
+        }
+    }
     // Bumped when something is saved to the library or an artist followed,
     // so the library's pages load again and show it.
     var libraryEpoch by remember { mutableIntStateOf(0) }
@@ -238,8 +255,9 @@ fun App(core: Core, controller: MediaController?) {
     }
 
     val stack = stacks.getValue(tab)
-    BackHandler(enabled = menuItem != null || nowPlayingOpen || stack.isNotEmpty() || tab != Tab.Home) {
+    BackHandler(enabled = castOpen || menuItem != null || nowPlayingOpen || stack.isNotEmpty() || tab != Tab.Home) {
         when {
+            castOpen -> castOpen = false
             menuItem != null -> menuItem = null
             nowPlayingOpen -> nowPlayingOpen = false
             stack.isNotEmpty() -> stack.removeAt(stack.lastIndex)
@@ -317,6 +335,8 @@ fun App(core: Core, controller: MediaController?) {
                     panel = panel,
                     onPanel = { panel = it },
                     onMenu = { menuItem = MenuRequest(it) },
+                    cast = cast,
+                    onCast = { castOpen = true },
                     liked = liked,
                     onLike = { flipLike() },
                     onOpenArtist = { id, name -> host.open(id, name) },
@@ -345,6 +365,41 @@ fun App(core: Core, controller: MediaController?) {
             exit = slideOutVertically { it },
         ) {
             shown?.let { ItemMenu(it, core, host) { menuItem = null } }
+        }
+        // The Devices sheet, the same way: dimmed behind, rising from the bottom.
+        AnimatedVisibility(castOpen, enter = fadeIn(), exit = fadeOut()) {
+            Box(
+                Modifier.fillMaxSize().background(Color(0x99000000)).clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                ) { castOpen = false },
+            )
+        }
+        AnimatedVisibility(
+            castOpen,
+            modifier = Modifier.align(Alignment.BottomCenter),
+            enter = slideInVertically { it },
+            exit = slideOutVertically { it },
+        ) {
+            CastSheet(
+                cast,
+                onPick = { index ->
+                    val phone = phoneName(context)
+                    scope.launch {
+                        withContext(Dispatchers.IO) {
+                            try {
+                                core.castPick(index, phone)
+                            } catch (e: Exception) {
+                                toast = e.message ?: "Couldn't use that device"
+                            }
+                            runCatching { core.castState() }.getOrNull()?.let { cast = it }
+                        }
+                    }
+                },
+                onVolume = { level ->
+                    scope.launch { withContext(Dispatchers.IO) { runCatching { core.castVolume(level) } } }
+                },
+            )
         }
         toast?.let { Toast(it, Modifier.align(Alignment.BottomCenter).padding(bottom = 150.dp)) }
         if (needsSignIn) {

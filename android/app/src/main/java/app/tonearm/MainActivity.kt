@@ -2,8 +2,12 @@ package app.tonearm
 
 import android.content.ComponentName
 import android.graphics.Color as AndroidColor
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -42,6 +46,7 @@ class MainActivity : ComponentActivity() {
             statusBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
         )
+        finder = CastFinder(this, core)
         setContent {
             TonearmTheme {
                 App(core, controller)
@@ -49,8 +54,25 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** Looks for Cast devices while the app is on screen. */
+    private var finder: CastFinder? = null
+
+    /** Android 17 apps need the user's say to reach devices on the
+     *  network, which Cast discovery does. The finder starts once it is
+     *  answered, or at once where nothing is asked. */
+    private val localNetwork = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+        finder?.start()
+    }
+
     override fun onStart() {
         super.onStart()
+        if (Build.VERSION.SDK_INT >= 37 &&
+            ContextCompat.checkSelfPermission(this, LOCAL_NETWORK) != PackageManager.PERMISSION_GRANTED
+        ) {
+            localNetwork.launch(LOCAL_NETWORK)
+        } else {
+            finder?.start()
+        }
         val token = SessionToken(this, ComponentName(this, PlaybackService::class.java))
         val future = MediaController.Builder(this, token).buildAsync()
         controllerFuture = future
@@ -58,12 +80,15 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        finder?.stop()
         controller = null
         controllerFuture?.let(MediaController::releaseFuture)
         controllerFuture = null
         super.onStop()
     }
 }
+
+private const val LOCAL_NETWORK = "android.permission.ACCESS_LOCAL_NETWORK"
 
 /** What the screen shows of the player, kept up to date from the session. */
 class NowPlaying(

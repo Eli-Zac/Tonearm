@@ -50,6 +50,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import uniffi.tonearm_android.CastState
 import uniffi.tonearm_android.Item
 import uniffi.tonearm_android.Tonearm as Core
 
@@ -67,6 +68,9 @@ fun NowPlayingScreen(
     onPanel: (Panel) -> Unit,
     /** A song's menu, from a long press in the queue. */
     onMenu: (Item) -> Unit,
+    /** The Cast devices, and the button that opens the Devices sheet. */
+    cast: CastState? = null,
+    onCast: () -> Unit = {},
     /** Whether the song is liked; null while unknown or signed out. */
     liked: Boolean?,
     onLike: () -> Unit,
@@ -300,6 +304,14 @@ fun NowPlayingScreen(
                         else -> Tonearm.dim
                     },
                 ) { toggle(Panel.Lyrics) }
+                Spacer(Modifier.weight(1f))
+                // Lit while the music plays on a device, or is reaching one.
+                Box(
+                    Modifier.size(48.dp).clip(CircleShape).clickable(onClick = onCast),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    CastMark(if (cast != null && (cast.active >= 0 || cast.connecting)) Tonearm.accent else Tonearm.dim)
+                }
                 Spacer(Modifier.weight(1f))
                 PanelButton(Icons.queue, if (panel == Panel.Queue) Tonearm.accent else Tonearm.dim) { toggle(Panel.Queue) }
             }
