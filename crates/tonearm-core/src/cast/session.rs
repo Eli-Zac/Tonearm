@@ -394,26 +394,31 @@ impl Cast {
                     }
                     wanted_volume = Some(level);
                 }
-                Ok(Command::Now(now)) => screen.update(now, self.pipe.lead()),
+                Ok(Command::Now(now)) => {
+                    let lead = self.pipe.lead();
+                    screen.anchor = Some((now.id.clone(), now.position + lead.as_secs_f32(), self.pipe.stream_seconds()));
+                    screen.update(now, lead)
+                }
                 Ok(Command::Lyrics(message)) => channel.send(&transport, TONEARM, &message)?,
                 Err(TryRecvError::Empty) => {}
             }
             if let Some(now) = screen.due() {
-                channel.send(
-                    &transport,
-                    TONEARM,
-                    &json!({
-                        "type": "NOW",
-                        "id": now.id,
-                        "title": now.title,
-                        "artist": now.artist,
-                        "album": now.album,
-                        "cover": now.cover,
-                        "duration": now.duration,
-                        "position": now.position,
-                        "paused": now.paused,
-                    }),
-                )?;
+                let mut message = json!({
+                    "type": "NOW",
+                    "id": now.id,
+                    "title": now.title,
+                    "artist": now.artist,
+                    "album": now.album,
+                    "cover": now.cover,
+                    "duration": now.duration,
+                    "position": now.position,
+                    "paused": now.paused,
+                });
+                if let Some((_, engine, stream)) = screen.anchor.as_ref().filter(|(id, ..)| *id == now.id) {
+                    message["engine"] = json!(engine);
+                    message["stream"] = json!(stream);
+                }
+                channel.send(&transport, TONEARM, &message)?;
             }
             // A slider dragged sends a stream of levels. The device gets
             // one every tenth of a second.
@@ -575,6 +580,12 @@ struct Screen {
     change: Option<NowPlaying>,
     /// Shown as paused whatever the app says: the device hasn't started.
     held: bool,
+    /// The song (by id) the engine is at, how far in it is, and the
+    /// device's own clock for the stream at that same moment. With it the
+    /// receiver reads the song's place straight off its audio element,
+    /// with no guess at how far the device trails or how long a message
+    /// took.
+    anchor: Option<(String, f32, f64)>,
 }
 
 impl Screen {

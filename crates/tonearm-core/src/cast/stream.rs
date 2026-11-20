@@ -158,6 +158,13 @@ impl Pipe {
         Duration::from_secs_f64((clock.sent - clock.played()).clamp(0.0, 30.0))
     }
 
+    /// Where the device's own media clock will stand when it plays what is
+    /// being streamed now.
+    pub fn stream_seconds(&self) -> f64 {
+        let clock = self.clock.lock().unwrap();
+        clock.base + clock.sent
+    }
+
     /// Ends the stream and the server. The feed stays, so the engine does
     /// not take the end of the cast for the end of the song: the song waits
     /// to move back to this computer.
