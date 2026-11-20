@@ -729,7 +729,13 @@ private fun Field(value: String, onChange: (String) -> Unit, placeholder: String
  *  the list under it, the picked one bold with a dot beside it. */
 @Composable
 private fun Dropdown(choices: Choices, title: String, onPick: (Int) -> Unit) {
-    var selected by remember { mutableIntStateOf(choices.selected.toInt()) }
+    ChoiceDropdown(title, choices.names, choices.selected.toInt(), onPick)
+}
+
+@Composable
+internal fun ChoiceDropdown(title: String, options: List<String>, selectedIndex: Int, onPick: (Int) -> Unit) {
+    var selected by remember(title, options) { mutableIntStateOf(selectedIndex) }
+    LaunchedEffect(selectedIndex) { selected = selectedIndex }
     var open by remember { mutableStateOf(false) }
     val press = remember { MutableInteractionSource() }
     val pressed by press.collectIsPressedAsState()
@@ -747,7 +753,7 @@ private fun Dropdown(choices: Choices, title: String, onPick: (Int) -> Unit) {
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Text(
-                choices.names.getOrElse(selected) { "" },
+                options.getOrElse(selected) { "" },
                 color = Tonearm.text, fontFamily = Tonearm.font, fontWeight = FontWeight.SemiBold, fontSize = 14.sp,
                 maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                 modifier = Modifier.widthIn(max = 150.dp),
@@ -770,7 +776,7 @@ private fun Dropdown(choices: Choices, title: String, onPick: (Int) -> Unit) {
                         Modifier.heightIn(max = 480.dp).verticalScroll(rememberScrollState()).padding(horizontal = 8.dp),
                         verticalArrangement = Arrangement.spacedBy(2.dp),
                     ) {
-                        choices.names.forEachIndexed { i, name ->
+                        options.forEachIndexed { i, name ->
                             val on = i == selected
                             Row(
                                 Modifier.fillMaxWidth().height(48.dp).clip(RoundedCornerShape(10.dp))

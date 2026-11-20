@@ -8,6 +8,7 @@
 
 use crate::analysis::Analysis;
 use crate::innertube::model::Item;
+#[cfg(test)]
 use crate::mix::{Param, Side, Transition};
 use crate::transition::{self, Preset, Settings};
 use crate::{credits, library, App, AppWindow, MixSong, Place};
@@ -49,27 +50,8 @@ pub struct Editing {
 /// A key's colour on the Camelot wheel: round the hue circle by number,
 /// paler for the majors.
 pub fn key_color(camelot: &str) -> slint::Color {
-    let number: f32 = camelot.trim_end_matches(['A', 'B']).parse().unwrap_or(1.0);
-    let hue = (number - 1.0) * 30.0;
-    let light = if camelot.ends_with('B') { 0.78 } else { 0.68 };
-    let (r, g, b) = hsl(hue, 0.65, light);
-    slint::Color::from_rgb_u8(r, g, b)
-}
-
-fn hsl(hue: f32, saturation: f32, light: f32) -> (u8, u8, u8) {
-    let c = (1.0 - (2.0 * light - 1.0).abs()) * saturation;
-    let x = c * (1.0 - ((hue / 60.0) % 2.0 - 1.0).abs());
-    let m = light - c / 2.0;
-    let (r, g, b) = match (hue / 60.0) as u32 {
-        0 => (c, x, 0.0),
-        1 => (x, c, 0.0),
-        2 => (0.0, c, x),
-        3 => (0.0, x, c),
-        4 => (x, 0.0, c),
-        _ => (c, 0.0, x),
-    };
-    let byte = |v: f32| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u8;
-    (byte(r), byte(g), byte(b))
+    let color = tonearm_core::mix_editor::key_color(camelot);
+    slint::Color::from_rgb_u8((color >> 16) as u8, (color >> 8) as u8, color as u8)
 }
 
 /// Sorts tempos as numbers, a rough one by its number too. Unknown is
@@ -345,24 +327,20 @@ impl App {
             }
         };
         let found = item.video_id.as_deref().and_then(|v| self.analysis_of(v));
-        let camelot = found
-            .as_ref()
-            .filter(|a| a.key_confidence >= 0.4)
-            .and_then(|a| a.camelot())
-            .unwrap_or_default();
+        let summary = tonearm_core::mix_editor::song_info(found.as_deref());
         let (art, has_art) = art.unwrap_or_default();
         MixSong {
             title: item.title.as_str().into(),
             artist: credits(item).0.into(),
             art,
             has_art,
-            bpm: found
-                .filter(|a| a.bpm > 0.0)
-                .map(|a| format!("{:.0} BPM", a.bpm))
-                .unwrap_or_default()
-                .into(),
-            key_color: key_color(&camelot),
-            camelot: camelot.into(),
+            bpm: summary.bpm.into(),
+            key_color: slint::Color::from_rgb_u8(
+                (summary.key_color >> 16) as u8,
+                (summary.key_color >> 8) as u8,
+                summary.key_color as u8,
+            ),
+            camelot: summary.camelot.into(),
             // `show_editor` fills it in, as it depends on the choices.
             warning: Default::default(),
         }
@@ -391,15 +369,15 @@ impl App {
         let plan = transition::plan(chosen, out.as_deref(), length, inn.as_deref(), self.mix_length());
         let out_start = plan.out_at.unwrap_or(length - plan.length);
         let start = out_start - PREVIEW_LEAD;
-        let picture = Picture::new(&plan, length);
+        let picture = tonearm_core::mix_editor::picture_data(&plan, length, out.as_deref(), inn.as_deref(), FREE_STEP);
         *self.preview_track.borrow_mut() = Some(PreviewTrack {
             from: a.clone(),
             to: b.clone(),
             out_start,
             in_from: plan.in_from,
-            speed: picture.in_speed(),
-            left: picture.from,
-            right: picture.to,
+            speed: picture.in_speed,
+            left: picture.left,
+            right: picture.right,
         });
         let items = songs[n..].iter().map(|(_, item)| item.clone()).collect();
         self.start_queue(items, 0, self.page_key(), false, Some(start.max(0.0) as f32));
@@ -546,41 +524,14 @@ impl App {
 
     /// A preset chip in the editor.
     pub fn mix_preset_picked(self: &Rc<Self>, index: usize) {
-        let Some(&preset) = Preset::OFFERED.get(index) else {
-            return;
-        };
-        self.change_mix(|s, app, from, to| {
-            // The length is its own choice: a preset keeps it.
-            let bars = s.bars;
-            *s = if preset == Preset::Auto {
-                app.auto_settings(from, to)
-            } else {
-                Settings::preset(preset)
-            };
-            s.bars = bars;
+        let analyses = self.editor_analyses();
+        self.update_mix(|settings| {
+            tonearm_core::mix_editor::pick_preset(settings, index, analyses.0.as_deref(), analyses.1.as_deref())
         });
     }
 
     pub fn mix_choice_picked(self: &Rc<Self>, part: u8, index: usize) {
-        self.change_mix(|s, _, _, _| {
-            use transition::*;
-            fn at<T: Copy>(choices: &[(T, &str)], index: usize) -> T {
-                choices[index.min(choices.len() - 1)].0
-            }
-            // How long it lasts goes with any preset, so it stays one.
-            if part == 5 {
-                s.bars = at(&LENGTH_CHOICES, index);
-                return;
-            }
-            match part {
-                0 => s.volume = at(&VOLUME_CHOICES, index),
-                1 => s.eq = at(&EQ_CHOICES, index),
-                2 => s.filter = at(&FILTER_CHOICES, index),
-                3 => s.effect = at(&EFFECT_CHOICES, index),
-                _ => s.looping = at(&LOOP_CHOICES, index),
-            }
-            s.preset = Preset::Custom;
-        });
+        self.update_mix(|settings| tonearm_core::mix_editor::pick_choice(settings, part as usize, index));
     }
 
     /// A song dragged along the picture by `seconds` of the transition:
@@ -589,83 +540,56 @@ impl App {
     /// It lands on the nearest beat, unless `exact`, as with Shift held,
     /// for fine timing.
     pub fn mix_dragged(self: &Rc<Self>, side: i32, seconds: f64, exact: bool) {
-        let speed = self.editing_speed();
-        let step = self.editing_step(side == 1);
-        self.change_mix(|s, _, _, _| {
-            let step = if exact { 0.0 } else { step };
-            if side == 0 {
-                s.out_shift = transition::snap(s.out_shift + seconds, step);
-            } else {
-                // The song coming in plays at its matched speed, so a second
-                // of the transition is that much of the song.
-                s.in_shift = transition::snap(s.in_shift + seconds * speed, step);
-            }
-            s.preset = Preset::Custom;
+        let analyses = self.editor_analyses();
+        let length = self.editing_length(&analyses.0);
+        self.update_mix(|settings| {
+            tonearm_core::mix_editor::drag(
+                settings,
+                side as usize,
+                seconds,
+                exact,
+                analyses.0.as_deref(),
+                length,
+                analyses.1.as_deref(),
+                self.mix_length(),
+            )
         });
-    }
-
-    /// The grid drags of the transition being edited snap to.
-    fn editing_step(&self, inn_side: bool) -> f64 {
-        let settings = self.editing.borrow().as_ref().map(|e| e.settings);
-        settings.map_or(0.0, |s| self.editing_step_for(&s, inn_side))
-    }
-
-    /// The grid's step with `settings`, in seconds of the song going out,
-    /// or of the one coming in with `inn_side`: a beat when the songs beat
-    /// match, else a fixed half second.
-    fn editing_step_for(&self, settings: &Settings, inn_side: bool) -> f64 {
-        let editing = self.editing.borrow();
-        let Some(e) = editing.as_ref() else {
-            return 0.0;
-        };
-        let out = e.from.video_id.as_deref().and_then(|v| self.analysis_of(v));
-        let inn = e.to.video_id.as_deref().and_then(|v| self.analysis_of(v));
-        let length = out.as_ref().map_or(credits(&e.from).1 as f64, |a| a.length as f64);
-        let beat = transition::drag_step(settings, out.as_deref(), length, inn.as_deref(), self.mix_length(), inn_side);
-        if beat > 0.0 { beat } else { FREE_STEP }
-    }
-
-    /// The speed the song coming in plays at through the mix being edited.
-    fn editing_speed(&self) -> f64 {
-        let editing = self.editing.borrow();
-        let Some(e) = editing.as_ref() else {
-            return 1.0;
-        };
-        let out = e.from.video_id.as_deref().and_then(|v| self.analysis_of(v));
-        let inn = e.to.video_id.as_deref().and_then(|v| self.analysis_of(v));
-        let length = out.as_ref().map_or(credits(&e.from).1 as f64, |a| a.length as f64);
-        let plan = transition::plan(e.settings, out.as_deref(), length, inn.as_deref(), self.mix_length());
-        Picture::new(&plan, length).in_speed()
     }
 
     pub fn mix_beatmatch_toggled(self: &Rc<Self>) {
-        if !self.ui.get_mix_can_beatmatch() {
-            return;
-        }
-        self.change_mix(|s, _, _, _| {
-            s.beatmatch = !s.beatmatch;
-            s.preset = Preset::Custom;
-        });
+        let can = self.ui.get_mix_can_beatmatch();
+        self.update_mix(|settings| Ok(tonearm_core::mix_editor::toggle_beatmatch(settings, can)));
     }
 
     pub fn mix_key_lock_toggled(self: &Rc<Self>) {
-        if !self.ui.get_mix_can_beatmatch() || !self.ui.get_mix_beatmatch() {
-            return;
-        }
-        self.change_mix(|s, _, _, _| {
-            s.key_lock = !s.key_lock;
-            s.preset = Preset::Custom;
-        });
+        let can = self.ui.get_mix_can_beatmatch();
+        self.update_mix(|settings| Ok(tonearm_core::mix_editor::toggle_key_lock(settings, can)));
     }
 
-    fn change_mix(self: &Rc<Self>, change: impl FnOnce(&mut Settings, &App, &str, &str)) {
-        let ids = self.editing.borrow().as_ref().and_then(|e| {
-            Some((e.from.video_id.clone()?, e.to.video_id.clone()?, e.settings))
-        });
-        let Some((from, to, mut settings)) = ids else {
+    fn editor_analyses(&self) -> (Option<Rc<Analysis>>, Option<Rc<Analysis>>) {
+        let editing = self.editing.borrow();
+        let Some(e) = editing.as_ref() else { return (None, None) };
+        (
+            e.from.video_id.as_deref().and_then(|v| self.analysis_of(v)),
+            e.to.video_id.as_deref().and_then(|v| self.analysis_of(v)),
+        )
+    }
+
+    fn editing_length(&self, out: &Option<Rc<Analysis>>) -> f64 {
+        let editing = self.editing.borrow();
+        editing
+            .as_ref()
+            .map(|e| out.as_ref().map_or(credits(&e.from).1 as f64, |a| a.length as f64))
+            .unwrap_or_default()
+    }
+
+    fn update_mix(self: &Rc<Self>, change: impl FnOnce(Settings) -> Result<Settings, String>) {
+        let Some(settings) = self.editing.borrow().as_ref().map(|e| e.settings) else {
             return;
         };
-        change(&mut settings, self, &from, &to);
+        let Ok(settings) = change(settings) else {
+            return;
+        };
         if let Some(editing) = self.editing.borrow_mut().as_mut() {
             editing.settings = settings;
         }
@@ -702,27 +626,27 @@ impl App {
         };
         let s = e.settings;
         let ui = &self.ui;
-        ui.set_mix_preset(Preset::OFFERED.iter().position(|p| *p == s.preset).map_or(-1, |i| i as i32));
-        ui.set_mix_volume(transition::index_of(&transition::VOLUME_CHOICES, s.volume) as i32);
-        ui.set_mix_eq(transition::index_of(&transition::EQ_CHOICES, s.eq) as i32);
-        ui.set_mix_filter(transition::index_of(&transition::FILTER_CHOICES, s.filter) as i32);
-        ui.set_mix_effect(transition::index_of(&transition::EFFECT_CHOICES, s.effect) as i32);
-        ui.set_mix_loop(transition::index_of(&transition::LOOP_CHOICES, s.looping) as i32);
-        ui.set_mix_length(transition::index_of(&transition::LENGTH_CHOICES, s.bars) as i32);
-        ui.set_mix_beatmatch(s.beatmatch);
-        ui.set_mix_key_lock(s.key_lock);
-        ui.set_mix_changed(s != e.saved);
         let out = e.from.video_id.as_deref().and_then(|v| self.analysis_of(v));
         let inn = e.to.video_id.as_deref().and_then(|v| self.analysis_of(v));
         let out_length = out.as_ref().map_or(credits(&e.from).1 as f64, |a| a.length as f64);
-        let plan = transition::plan(s, out.as_deref(), out_length, inn.as_deref(), self.mix_length());
+        let snap_step = tonearm_core::mix_editor::drag_step(&s, out.as_deref(), out_length, inn.as_deref(), self.mix_length(), false);
+        let data = tonearm_core::mix_editor::editor_data(s, e.saved, out.as_deref(), out_length, inn.as_deref(), self.mix_length(), snap_step);
+        ui.set_mix_preset(data.preset_selected);
+        ui.set_mix_length(data.choices[0].selected as i32);
+        ui.set_mix_volume(data.choices[1].selected as i32);
+        ui.set_mix_eq(data.choices[2].selected as i32);
+        ui.set_mix_filter(data.choices[3].selected as i32);
+        ui.set_mix_effect(data.choices[4].selected as i32);
+        ui.set_mix_loop(data.choices[5].selected as i32);
+        ui.set_mix_beatmatch(s.beatmatch);
+        ui.set_mix_key_lock(s.key_lock);
+        ui.set_mix_changed(data.changed);
         // Whether the songs could be beat matched at all, whatever the
         // toggle says. When not, the tempos say why and the toggle is off.
-        let why = transition::why_unmatched(out.as_deref(), out_length, inn.as_deref(), self.mix_length(), s.bars);
-        ui.set_mix_can_beatmatch(why.is_none());
-        let warning = why.unwrap_or_default();
-        let picture_span = Picture::new(&plan, out_length);
-        ui.set_mix_span((picture_span.to - picture_span.from) as f32);
+        ui.set_mix_can_beatmatch(data.can_beatmatch);
+        let warning = data.why_unmatched;
+        let picture = data.picture;
+        ui.set_mix_span(picture.span);
 
         for (get, set) in [
             (AppWindow::get_mix_from as fn(&AppWindow) -> MixSong, AppWindow::set_mix_from as fn(&AppWindow, MixSong)),
@@ -734,23 +658,18 @@ impl App {
                 set(ui, song);
             }
         }
-        let picture = Picture::new(&plan, out_length);
-        let (out_all, out_low) = picture.wave(out.as_deref(), Side::Out);
-        let (in_all, in_low) = picture.wave(inn.as_deref(), Side::In);
-        ui.set_mix_out_wave(out_all.into());
-        ui.set_mix_out_low(out_low.into());
-        ui.set_mix_in_wave(in_all.into());
-        ui.set_mix_in_low(in_low.into());
-        let (card_from, card_to) = picture.card();
-        ui.set_mix_card_from(card_from);
-        ui.set_mix_card_to(card_to);
-        ui.set_mix_volume_path(picture.lanes(Param::Volume).into());
-        ui.set_mix_bass_path(picture.lanes(Param::Bass).into());
-        ui.set_mix_filter_path(picture.filters().into());
-        ui.set_mix_fx_path(picture.lanes(Param::Send).into());
-        let (bars, beats) = picture.grid(self.editing_step_for(&s, false));
-        ui.set_mix_bars_path(bars.into());
-        ui.set_mix_beats_path(beats.into());
+        ui.set_mix_out_wave(picture.out_wave.into());
+        ui.set_mix_out_low(picture.out_low.into());
+        ui.set_mix_in_wave(picture.in_wave.into());
+        ui.set_mix_in_low(picture.in_low.into());
+        ui.set_mix_card_from(picture.card_from);
+        ui.set_mix_card_to(picture.card_to);
+        ui.set_mix_volume_path(picture.volume.into());
+        ui.set_mix_bass_path(picture.bass.into());
+        ui.set_mix_filter_path(picture.filter.into());
+        ui.set_mix_fx_path(picture.effect.into());
+        ui.set_mix_bars_path(picture.bars.into());
+        ui.set_mix_beats_path(picture.beats.into());
 
     }
 }
@@ -758,11 +677,14 @@ impl App {
 /// The picture's size in the editor, in logical pixels: the side panel's
 /// width less its padding, by the graph's height in `app.slint`. Paths are
 /// drawn at this size, as Slint keeps a path's proportions.
+#[cfg(test)]
 pub const PICTURE_WIDTH: f64 = 340.0;
+#[cfg(test)]
 pub const PICTURE_HEIGHT: f64 = 230.0;
 
 /// Draws a transition: the song going out in the top half, the one coming
 /// in below, from a little before the mix to a little after.
+#[cfg(test)]
 struct Picture<'a> {
     plan: &'a Transition,
     out_length: f64,
@@ -772,8 +694,10 @@ struct Picture<'a> {
 }
 
 /// Points along each line.
+#[cfg(test)]
 const STEPS: usize = 170;
 
+#[cfg(test)]
 impl<'a> Picture<'a> {
     /// The next song's speed through the mix.
     fn in_speed(&self) -> f64 {
@@ -983,6 +907,7 @@ fn spinner(turn: f64) -> String {
 }
 
 /// Slint wants a path to have something in it.
+#[cfg(test)]
 fn or_nothing(path: String) -> String {
     if path.is_empty() { "M 0 0".into() } else { path }
 }

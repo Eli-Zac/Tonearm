@@ -3,6 +3,8 @@ package app.tonearm
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -84,6 +86,7 @@ fun App(core: Core, controller: MediaController?) {
     // it leaves (a device that stopped playing).
     var castOpen by remember { mutableStateOf(false) }
     var cast by remember { mutableStateOf<CastState?>(null) }
+    var mixEdit by remember { mutableStateOf<Pair<Item, Item>?>(null) }
     val context = LocalContext.current
     LaunchedEffect(Unit) {
         while (true) {
@@ -172,6 +175,10 @@ fun App(core: Core, controller: MediaController?) {
             openForPlay()
             runPlay { core.playList(items, index.toUInt()) }
         }
+        override fun playListFromPlaylist(items: List<Item>, index: Int, playlistId: String) {
+            openForPlay()
+            runPlay { core.playListFromPlaylist(items, index.toUInt(), playlistId) }
+        }
         override fun playRadio(item: Item) {
             openForPlay()
             runPlay { core.playRadio(item) }
@@ -208,6 +215,19 @@ fun App(core: Core, controller: MediaController?) {
         }
         override fun setSaved(playlistId: String, save: Boolean, title: String) =
             libraryCall { core.setSaved(playlistId, save, title) }
+        override fun playlistMixEnabled(playlistId: String) = core.playlistMixEnabled(playlistId)
+        override fun setPlaylistMix(playlistId: String, on: Boolean, onComplete: () -> Unit) {
+            scope.launch {
+                try {
+                    withContext(Dispatchers.IO) { core.setPlaylistMix(playlistId, on) }
+                    onComplete()
+                } catch (e: Exception) {
+                    toast = e.message ?: "Couldn't change mix mode"
+                }
+            }
+        }
+        override fun mixRows(playlistId: String, videoIds: List<String>) = core.mixRows(playlistId, videoIds)
+        override fun editMix(from: Item, to: Item) { mixEdit = from to to }
         override fun follow(channelId: String, follow: Boolean, name: String) =
             libraryCall { core.follow(channelId, follow, name) }
         override fun notify(text: String) { toast = text }
@@ -255,8 +275,9 @@ fun App(core: Core, controller: MediaController?) {
     }
 
     val stack = stacks.getValue(tab)
-    BackHandler(enabled = castOpen || menuItem != null || nowPlayingOpen || stack.isNotEmpty() || tab != Tab.Home) {
+    BackHandler(enabled = mixEdit != null || castOpen || menuItem != null || nowPlayingOpen || stack.isNotEmpty() || tab != Tab.Home) {
         when {
+            mixEdit != null -> mixEdit = null
             castOpen -> castOpen = false
             menuItem != null -> menuItem = null
             nowPlayingOpen -> nowPlayingOpen = false
@@ -400,6 +421,28 @@ fun App(core: Core, controller: MediaController?) {
                     scope.launch { withContext(Dispatchers.IO) { runCatching { core.castVolume(level) } } }
                 },
             )
+        }
+        AnimatedVisibility(mixEdit != null, enter = fadeIn(), exit = fadeOut()) {
+            Box(
+                Modifier.fillMaxSize().background(Color(0x99000000)).clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                ) { mixEdit = null },
+            )
+        }
+        var shownMixEdit by remember { mutableStateOf<Pair<Item, Item>?>(null) }
+        if (mixEdit != null) shownMixEdit = mixEdit
+        AnimatedVisibility(
+            mixEdit != null,
+            modifier = Modifier.align(Alignment.BottomCenter),
+            enter = fadeIn(tween(220, easing = CubicBezierEasing(0.22f, 1f, 0.36f, 1f))) +
+                slideInVertically(tween(220, easing = CubicBezierEasing(0.22f, 1f, 0.36f, 1f))) { 16 },
+            exit = fadeOut(tween(220, easing = CubicBezierEasing(0.22f, 1f, 0.36f, 1f))) +
+                slideOutVertically(tween(220, easing = CubicBezierEasing(0.22f, 1f, 0.36f, 1f))) { 16 },
+        ) {
+            shownMixEdit?.let { (from, to) ->
+                MixSheet(from, to, core, onClose = { mixEdit = null }) { message -> toast = message }
+            }
         }
         toast?.let { Toast(it, Modifier.align(Alignment.BottomCenter).padding(bottom = 150.dp)) }
         if (needsSignIn) {

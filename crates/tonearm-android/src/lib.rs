@@ -21,6 +21,7 @@ mod auto;
 mod cast;
 mod downloads;
 mod lyrics;
+mod mix;
 mod menu;
 mod pages;
 mod playing;
@@ -31,6 +32,7 @@ mod settings;
 pub use cast::{CastDevice, CastKind, CastState};
 pub use downloads::{DownloadMarks, DownloadProgress};
 pub use lyrics::{LyricLine, Lyrics, Syllable};
+pub use mix::MixRow;
 pub use menu::{MenuAction, MenuIcon, MenuLine};
 pub use pages::{Chip, Header, Item, ItemKind, Link, Page, Shelf, ShelfLayout};
 pub use profile::{Profile, TopArtist};
@@ -156,6 +158,10 @@ pub struct Tonearm {
     crossfade: AtomicU32,
     /// The current queue came from a playlist with mix mode on.
     mix_mode: AtomicBool,
+    /// Settings and timing for an editor preview queue.
+    preview_mix: Mutex<Option<PreviewMix>>,
+    /// The playlist the current queue came from, if any.
+    playlist_origin: Mutex<Option<String>>,
     levelling: AtomicI32,
     /// Songs' loudness as YouTube measures it, by video id. None once
     /// asked for and not known.
@@ -183,6 +189,17 @@ pub struct Tonearm {
     saved: Mutex<resume::Saved>,
 }
 
+pub(crate) struct PreviewMix {
+    pub from: String,
+    pub to: String,
+    pub settings: tonearm_core::transition::Settings,
+    pub out_start: f64,
+    pub in_from: f64,
+    pub speed: f64,
+    pub left: f64,
+    pub right: f64,
+}
+
 #[uniffi::export]
 impl Tonearm {
     /// Starts the core, keeping its settings and data under `home`: the
@@ -190,7 +207,7 @@ impl Tonearm {
     #[uniffi::constructor]
     pub fn new(home: String) -> Result<Arc<Self>, TonearmError> {
         store::set_home(home.into());
-        // The phone never beat matches, so songs need no analysis.
+        // Analysis is enabled only while a mixed playlist is in use.
         tonearm_core::analysis::set_enabled(false);
         let service_settings = services::Settings::load();
         let resolver = resolver::default().ok_or_else(|| "no way to find song links".to_string())?;
@@ -215,6 +232,8 @@ impl Tonearm {
             translated: Mutex::new(HashMap::new()),
             crossfade: AtomicU32::new(tonearm_core::settings::crossfade()),
             mix_mode: AtomicBool::new(false),
+            preview_mix: Mutex::new(None),
+            playlist_origin: Mutex::new(None),
             levelling: AtomicI32::new(tonearm_core::settings::levelling()),
             loudness: Mutex::new(HashMap::new()),
             gained: AtomicU64::new(0),
@@ -471,8 +490,12 @@ impl Tonearm {
         index: u32,
         playlist_id: Option<String>,
     ) -> Result<(), TonearmError> {
-        let mixed = playlist_id.is_some_and(|id| tonearm_core::library::mixed_playlists().contains(&id));
+        self.preview_mix.lock().unwrap().take();
+        let mixed = playlist_id
+            .as_ref()
+            .is_some_and(|id| tonearm_core::library::mixed_playlists().contains(id));
         self.mix_mode.store(mixed, Ordering::SeqCst);
+        *self.playlist_origin.lock().unwrap() = playlist_id;
         tonearm_core::analysis::set_enabled(mixed);
         // Loading before the queue moves, so the new song is never shown at
         // the last one's place (see `step`).

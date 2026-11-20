@@ -120,8 +120,9 @@ fun PageSkeletonView(kind: PageSkeleton, modifier: Modifier = Modifier) {
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
                     Bone(Modifier.size(56.dp), CircleShape)
-                    Bone(Modifier.size(28.dp), RoundedCornerShape(8.dp))
-                    Bone(Modifier.size(28.dp), RoundedCornerShape(8.dp))
+                    repeat(if (kind == PageSkeleton.Detail) 3 else 2) {
+                        Bone(Modifier.size(28.dp), RoundedCornerShape(8.dp))
+                    }
                 }
                 repeat(8) { RowSkeleton(it + 2) }
             }

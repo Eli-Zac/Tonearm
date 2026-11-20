@@ -96,7 +96,7 @@ impl Tonearm {
     /// does without beat matching. With crossfade off the next song is
     /// handed to the engine to start the moment this one ends.
     fn crossfade_check(self: &Arc<Self>, generation: u64, duration: f32) {
-        if self.mix_mode.load(Ordering::SeqCst) {
+        if self.mix_mode.load(Ordering::SeqCst) || self.preview_mix.lock().unwrap().is_some() {
             self.mixed_crossfade_check(generation, duration);
             return;
         }
@@ -167,6 +167,10 @@ impl Tonearm {
             if self.fade.lock().unwrap().take().is_some_and(|n| n.armed) {
                 self.audio.unfollow();
             }
+            if self.preview_mix.lock().unwrap().take().is_some() {
+                self.mix_mode.store(false, Ordering::SeqCst);
+                tonearm_core::analysis::set_enabled(false);
+            }
             return;
         };
         let Some(playing) = self.now_playing().map(|song| song.video_id) else {
@@ -186,16 +190,27 @@ impl Tonearm {
         }
         let out = tonearm_core::library::analysis(&playing);
         let inn = tonearm_core::library::analysis(&video_id);
-        let (settings, plan) = transition::plan_between(
-            &playing,
-            &video_id,
-            true,
-            out.as_ref(),
-            duration as f64,
-            inn.as_ref(),
-            seconds,
-            None,
-        );
+        let preview = self.preview_mix.lock().unwrap();
+        let selected = preview
+            .as_ref()
+            .filter(|mix| mix.from == playing && mix.to == video_id)
+            .map(|mix| mix.settings);
+        let (settings, plan) = if let Some(settings) = selected {
+            let plan = transition::plan(settings, out.as_ref(), duration as f64, inn.as_ref(), seconds);
+            (settings, plan)
+        } else {
+            transition::plan_between(
+                &playing,
+                &video_id,
+                true,
+                out.as_ref(),
+                duration as f64,
+                inn.as_ref(),
+                seconds,
+                None,
+            )
+        };
+        drop(preview);
         let status = &self.audio.status;
         let position = status.position_ms.load(Ordering::SeqCst) as f32 / 1000.0;
         let left = duration - position;

@@ -113,6 +113,8 @@ pub struct Header {
     pub thumb: String,
     /// The thumb is an artist's wide banner, not square art.
     pub banner: bool,
+    /// Whether this is a playlist the signed-in user can edit.
+    pub editable: bool,
     /// What the play and shuffle buttons start, for an artist.
     pub shuffle: Option<Item>,
     pub radio: Option<Item>,
@@ -256,6 +258,7 @@ pub fn page(p: &model::Page) -> Page {
             about: h.about.clone(),
             thumb: art(&h.thumb, 1080),
             banner: h.banner,
+            editable: h.editable,
             shuffle: h.shuffle.as_ref().map(item),
             radio: h.radio.as_ref().map(item),
             playlist_id: h.playlist_id.clone(),

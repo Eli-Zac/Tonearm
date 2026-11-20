@@ -23,6 +23,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.Shape
@@ -36,11 +37,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import uniffi.tonearm_android.Header
 import uniffi.tonearm_android.Item
 import uniffi.tonearm_android.ItemKind
 import uniffi.tonearm_android.Link
+import uniffi.tonearm_android.MixRow
 import uniffi.tonearm_android.Page
 import uniffi.tonearm_android.Shelf
 import uniffi.tonearm_android.ShelfLayout
@@ -52,6 +55,8 @@ interface Actions {
     fun open(id: String, params: String?, title: String)
     /** A song in a list: plays the list from it. */
     fun playList(items: List<Item>, index: Int)
+    /** A song on a playlist page, retaining that playlist as queue source. */
+    fun playListFromPlaylist(items: List<Item>, index: Int, playlistId: String) = playList(items, index)
     /** A song card: plays it, then its radio. */
     fun playRadio(item: Item)
     /** A card's play button: plays the album, playlist, artist or mix. */
@@ -67,6 +72,13 @@ interface Actions {
     fun albumMotion(album: String, artist: String, firstSong: String): String? = null
     /** Saves an album or playlist to the library, or takes it out. */
     fun setSaved(playlistId: String, save: Boolean, title: String) {}
+    /** Reads or changes a playlist's persistent mix mode. */
+    fun playlistMixEnabled(playlistId: String): Boolean = false
+    fun setPlaylistMix(playlistId: String, on: Boolean, onComplete: () -> Unit = {}) = onComplete()
+    /** Tempo, key and transition labels for the songs of a mixed playlist. */
+    fun mixRows(playlistId: String, videoIds: List<String>): List<MixRow> = emptyList()
+    /** Opens the editor for the transition from one song into the next. */
+    fun editMix(from: Item, to: Item) {}
     /** Follows an artist, or stops. */
     fun follow(channelId: String, follow: Boolean, name: String) {}
     /** Tells the user something, in a toast. */
@@ -270,7 +282,15 @@ fun ItemCard(item: Item, width: Dp, wide: Boolean, actions: Actions) {
 
 // ---------------------------------------------------------------- shelves
 
-fun LazyListScope.shelf(shelf: Shelf, actions: Actions, onAlbum: Boolean = false) {
+fun LazyListScope.shelf(
+    shelf: Shelf,
+    actions: Actions,
+    onAlbum: Boolean = false,
+    mixing: Boolean = false,
+    mixRows: Map<String, MixRow> = emptyMap(),
+    playlistId: String? = null,
+    mixItems: Map<String, Item> = emptyMap(),
+) {
     if (shelf.title.isNotEmpty()) {
         item(contentType = "title") {
             Row(
@@ -294,16 +314,32 @@ fun LazyListScope.shelf(shelf: Shelf, actions: Actions, onAlbum: Boolean = false
     }
     when (shelf.layout) {
         ShelfLayout.LIST -> itemsIndexed(shelf.items, contentType = { _, _ -> "row" }) { i, item ->
-            ItemRow(
-                item,
-                playing = item.videoId != null && item.videoId == actions.playing,
-                onClick = { if (item.videoId != null) actions.playList(shelf.items, i) else actions.tap(item) },
-                // A long press: its menu.
-                onPlay = { actions.menu(item) },
-                rank = if (shelf.ranked) i + 1 else 0,
-                // An album's own page needs no album name on every row.
-                showAlbum = !onAlbum,
-            )
+            Column {
+                ItemRow(
+                    item,
+                    playing = item.videoId != null && item.videoId == actions.playing,
+                    onClick = {
+                        if (item.videoId != null) {
+                            if (playlistId != null) actions.playListFromPlaylist(shelf.items, i, playlistId)
+                            else actions.playList(shelf.items, i)
+                        } else actions.tap(item)
+                    },
+                    // A long press: its menu.
+                    onPlay = { actions.menu(item) },
+                    rank = if (shelf.ranked) i + 1 else 0,
+                    // An album's own page needs no album name on every row.
+                    showAlbum = !onAlbum,
+                )
+                if (mixing && item.videoId != null) {
+                    MixRowLine(mixRows[item.videoId]) { row ->
+                        row.toVideoId?.let { next ->
+                            val from = mixItems[row.fromVideoId]
+                            val to = mixItems[next]
+                            if (from != null && to != null) actions.editMix(from, to)
+                        }
+                    }
+                }
+            }
         }
         // Pages to open and nothing to show for them, such as Explore's
         // "New releases", "Charts" and "Moods & genres": buttons, not
@@ -356,7 +392,15 @@ fun LazyListScope.shelf(shelf: Shelf, actions: Actions, onAlbum: Boolean = false
 // ----------------------------------------------------------------- header
 
 @Composable
-fun PageHeader(header: Header, songs: List<Item>, actions: Actions, complete: Boolean = true) {
+fun PageHeader(
+    header: Header,
+    songs: List<Item>,
+    actions: Actions,
+    complete: Boolean = true,
+    canMix: Boolean = false,
+    mixing: Boolean? = false,
+    onMixToggle: (Boolean) -> Unit = {},
+) {
     Column(Modifier.fillMaxWidth()) {
         // Every page's art fills the top, up under the status bar, fading
         // into the page with the title over it: an artist's wide banner,
@@ -399,6 +443,9 @@ fun PageHeader(header: Header, songs: List<Item>, actions: Actions, complete: Bo
         val shuffle: (() -> Unit)? = when {
             header.banner -> null
             header.shuffle != null -> { { actions.playWatch(header.shuffle!!) } }
+            header.playlistId != null && songs.size > 1 -> {
+                { actions.playListFromPlaylist(songs.shuffled(), 0, header.playlistId!!) }
+            }
             songs.size > 1 -> { { actions.playList(songs.shuffled(), 0) } }
             else -> null
         }
@@ -464,6 +511,13 @@ fun PageHeader(header: Header, songs: List<Item>, actions: Actions, complete: Bo
             HeroIcon(Icons.dots, filled = true) { actions.menu(header.asItem(saved)) }
             Spacer(Modifier.weight(1f))
             shuffle?.let { HeroIcon(Icons.shuffle, onClick = it) }
+            if (canMix) {
+                if (mixing == null) {
+                    Bone(Modifier.padding(end = 4.dp).size(48.dp), CircleShape)
+                } else {
+                    MixButton(mixing) { onMixToggle(!mixing) }
+                }
+            }
             play?.let {
                 Spacer(Modifier.width(8.dp))
                 RoundButton(Icons.play, accent = true, size = 56.dp, onClick = it)
@@ -484,6 +538,80 @@ fun HeroIcon(glyph: String, filled: Boolean = false, color: Color? = null, onCli
         contentAlignment = Alignment.Center,
     ) {
         Icon(glyph, size = 26.sp, filled = filled, color = color ?: Color(0xB3FFFFFF))
+    }
+}
+
+@Composable
+private fun MixButton(mixing: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier.size(48.dp).clip(CircleShape).clickable(
+            interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+            indication = null,
+            onClick = onClick,
+        ),
+        contentAlignment = Alignment.Center,
+    ) {
+        SlidersMark(if (mixing) Tonearm.accent else Color(0xB3FFFFFF))
+    }
+}
+
+@Composable
+private fun SlidersMark(color: Color) {
+    Canvas(Modifier.size(18.dp)) {
+        val stroke = 1.5.dp.toPx()
+        val centers = listOf(size.width * 0.18f, size.width * 0.5f, size.width * 0.82f)
+        val knobs = listOf(size.height * 0.35f, size.height * 0.68f, size.height * 0.46f)
+        centers.forEachIndexed { index, x ->
+            drawLine(color, Offset(x, size.height * 0.08f), Offset(x, size.height * 0.92f), stroke, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+            drawLine(color, Offset(x - stroke * 1.5f, knobs[index]), Offset(x + stroke * 1.5f, knobs[index]), stroke * 1.4f, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+        }
+    }
+}
+
+@Composable
+private fun MixRowLine(row: MixRow?, onEdit: (MixRow) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().height(32.dp).padding(start = 80.dp, end = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (row == null) {
+            Bone(Modifier.width(28.dp).height(12.dp))
+            Spacer(Modifier.width(10.dp))
+            Bone(Modifier.width(26.dp).height(12.dp))
+        } else {
+            if (row.analyzing && row.bpm.isEmpty()) Bone(Modifier.width(28.dp).height(12.dp))
+            else Dim(row.bpm, 12.sp, modifier = Modifier.widthIn(min = 28.dp))
+            Spacer(Modifier.width(10.dp))
+            if (row.analyzing && row.key.isEmpty()) Bone(Modifier.width(26.dp).height(12.dp))
+            else if (row.key.isNotEmpty()) {
+                Box(
+                    Modifier.clip(RoundedCornerShape(5.dp))
+                        .background(Color(row.keyColor.toInt()))
+                        .padding(horizontal = 5.dp, vertical = 1.dp),
+                ) {
+                    Title(row.key, size = 11.sp, color = Color(0xFF101014), weight = FontWeight.Bold)
+                }
+            } else Spacer(Modifier.width(26.dp))
+        }
+        Spacer(Modifier.weight(1f))
+        if (row == null) {
+            Bone(Modifier.width(58.dp).height(22.dp), RoundedCornerShape(11.dp))
+        } else if (row.toVideoId != null) {
+            Box(
+                Modifier.height(22.dp).clip(RoundedCornerShape(11.dp))
+                    .background(Color(0x14FFFFFF))
+                    .clickable(
+                        interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                        indication = null,
+                    ) { onEdit(row) }
+                    .padding(horizontal = 10.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Title(row.transition, size = 11.sp, weight = FontWeight.Medium, color = Tonearm.dim)
+            }
+        } else {
+            Spacer(Modifier.width(58.dp))
+        }
     }
 }
 
@@ -621,6 +749,34 @@ fun PageView(
         }
         else -> {
             val state = rememberLazyListState()
+            val header = shown.header
+            val playlistId = header?.playlistId
+            val canMix = header?.editable == true && playlistId != null
+            var mixing by remember(key, playlistId) { mutableStateOf<Boolean?>(if (canMix) null else false) }
+            var mixRefresh by remember(key) { mutableIntStateOf(0) }
+            var mixRows by remember(key) { mutableStateOf<Map<String, MixRow>>(emptyMap()) }
+            val songs = remember(shown) { shown.songs() }
+            val songIds = remember(songs) { songs.mapNotNull { it.videoId } }
+            val mixItems = remember(songs) { songs.mapNotNull { item -> item.videoId?.let { it to item } }.toMap() }
+            LaunchedEffect(canMix, playlistId) {
+                mixing = if (canMix && playlistId != null) {
+                    withContext(Dispatchers.IO) { actions.playlistMixEnabled(playlistId) }
+                } else {
+                    false
+                }
+            }
+            LaunchedEffect(canMix, playlistId, mixing, songIds, mixRefresh) {
+                if (!canMix || playlistId == null || mixing != true) {
+                    mixRows = emptyMap()
+                    return@LaunchedEffect
+                }
+                while (true) {
+                    val rows = withContext(Dispatchers.IO) { actions.mixRows(playlistId, songIds) }
+                    mixRows = rows.associateBy { it.fromVideoId }
+                    if (rows.none { it.analyzing }) break
+                    delay(750)
+                }
+            }
             // Near the end: the next shelves.
             val nearEnd by remember(key) {
                 derivedStateOf {
@@ -644,9 +800,28 @@ fun PageView(
             }
             LazyColumn(state = state, contentPadding = PaddingValues(bottom = 24.dp)) {
                 top?.let { t -> item(contentType = "top") { t(shown) } }
-                shown.header?.let { h -> item(contentType = "header") { PageHeader(h, shown.songs(), actions, complete = shown.continuation == null) } }
+                shown.header?.let { h ->
+                    item(contentType = "header") {
+                        PageHeader(
+                            h,
+                            shown.songs(),
+                            actions,
+                            complete = shown.continuation == null,
+                            canMix = canMix,
+                            mixing = mixing,
+                            onMixToggle = { on ->
+                                val id = playlistId ?: return@PageHeader
+                                mixing = on
+                                actions.setPlaylistMix(id, on) { mixRefresh++ }
+                            },
+                        )
+                    }
+                }
                 val onAlbum = shown.header?.label in setOf("Album", "EP", "Single")
-                shown.shelves.forEach { shelf(it, actions, onAlbum) }
+                val sourcePlaylist = playlistId?.takeIf { shown.header?.label == "Playlist" }
+                shown.shelves.forEach {
+                    shelf(it, actions, onAlbum, mixing == true, mixRows, sourcePlaylist, mixItems)
+                }
                 // The next shelves on their way: rows of bones, as the
                 // desktop shows under a list still loading.
                 if (loadingMore) items(3) { RowSkeleton(it + 5) }
