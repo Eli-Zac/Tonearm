@@ -292,12 +292,32 @@ impl Cast {
         // full, which is how loud the device's own remote has it.
         let mut scaled = ignores_its_volume(&self.device);
         let mut answered = false;
+        // LG's TVs refuse ours now and then (NOT_FOUND) or don't answer at
+        // all, then open it on a later try. Asked again a few times before
+        // Google's receiver stands in.
+        let mut refused = 0;
+        let mut retry_at: Option<Instant> = None;
+        let mut launched = Instant::now();
         let (transport, session) = loop {
-            if started.elapsed() > Duration::from_secs(20) {
+            if started.elapsed() > Duration::from_secs(25) {
                 return Err(format!("{name} didn't start the player"));
             }
             if let Ok(Command::Stop) = rx.try_recv() {
                 return Ok(());
+            }
+            if retry_at.is_some_and(|at| Instant::now() >= at) {
+                retry_at = None;
+                launch = self.next_request();
+                launched = Instant::now();
+                channel.send(PLATFORM, RECEIVER, &json!({"type": "LAUNCH", "appId": self.app, "requestId": launch}))?;
+            }
+            // No word on ours for a while: Google's instead.
+            if self.app != DEFAULT_APP && !answered && retry_at.is_none() && launched.elapsed() > Duration::from_secs(8) {
+                eprintln!("cast: {name} didn't answer opening {}, using the default receiver", self.app);
+                self.app = DEFAULT_APP;
+                launch = self.next_request();
+                launched = Instant::now();
+                channel.send(PLATFORM, RECEIVER, &json!({"type": "LAUNCH", "appId": self.app, "requestId": launch}))?;
             }
             let Some(message) = channel.poll()? else { continue };
             self.ping_back(&mut channel, &message)?;
@@ -321,10 +341,16 @@ impl Cast {
                 }
                 // A device that won't open ours, such as one not yet allowed
                 // to while it is unpublished, gets Google's instead.
+                Some("LAUNCH_ERROR") if self.app != DEFAULT_APP && refused < 2 => {
+                    refused += 1;
+                    eprintln!("cast: {name} wouldn't open {} ({}), asking again", self.app, p["reason"]);
+                    retry_at = Some(Instant::now() + Duration::from_millis(1500));
+                }
                 Some("LAUNCH_ERROR") if self.app != DEFAULT_APP => {
                     eprintln!("cast: {name} wouldn't open {} ({}), using the default receiver", self.app, p["reason"]);
                     self.app = DEFAULT_APP;
                     launch = self.next_request();
+                    launched = Instant::now();
                     channel.send(PLATFORM, RECEIVER, &json!({"type": "LAUNCH", "appId": self.app, "requestId": launch}))?;
                 }
                 Some("LAUNCH_ERROR") => {

@@ -147,23 +147,25 @@ impl Tonearm {
         self.end_cast(None, false, device.is_none());
         let Some(device) = device else { return };
         let pipe = cast::Pipe::new();
-        let generation = with(|c| {
-            c.generation += 1;
-            c.generation
-        });
-        let me = Arc::downgrade(&self);
-        let session = cast::Session::start(
-            device,
-            pipe.clone(),
-            TITLE.into(),
-            format!("Playing from {phone}"),
-            move |event| cast_event(&me, generation, event),
-        );
         // The song stops here at once and carries on from the same place
-        // on the device once it plays.
-        self.audio.route(Some(pipe));
+        // on the device once it plays. Routed before the cast starts, so
+        // a cast that fails at once routes it back here after, not before.
+        self.audio.route(Some(pipe.clone()));
+        let me = Arc::downgrade(&self);
+        // Started and kept under one lock: a cast that fails at once (a
+        // device gone from its address refuses in a moment) has its end
+        // wait for the session to be kept. Kept after, the end found no
+        // session, and the sheet said "Connecting…" for ever.
         with(|c| {
-            c.session = Some(session);
+            c.generation += 1;
+            let generation = c.generation;
+            c.session = Some(cast::Session::start(
+                device,
+                pipe,
+                TITLE.into(),
+                format!("Playing from {phone}"),
+                move |event| cast_event(&me, generation, event),
+            ));
             c.connecting = true;
             c.volume = 1.0;
             c.lyrics_sent = None;
