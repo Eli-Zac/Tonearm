@@ -2,6 +2,11 @@ package app.tonearm
 
 import android.app.PendingIntent
 import android.content.Intent
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
+import android.os.Handler
+import android.os.Looper
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.util.UnstableApi
@@ -21,6 +26,7 @@ import uniffi.tonearm_android.Tonearm
 @UnstableApi
 class PlaybackService : MediaSessionService() {
     private var session: MediaSession? = null
+    private var devices: AudioDeviceCallback? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -35,6 +41,30 @@ class PlaybackService : MediaSessionService() {
             .setSessionActivity(open)
             .setCallback(Callback(core))
             .build()
+        // A car, earbuds or headphones coming or going: the core's output
+        // stays on the device it opened, which on Android may have left
+        // (Android Auto's stream goes silent rather than following), so it
+        // opens the default output again. Once at once, and once more after
+        // Bluetooth has had time to take the route.
+        val audio = getSystemService(AUDIO_SERVICE) as AudioManager
+        val main = Handler(Looper.getMainLooper())
+        val reopen = Runnable { core.audioDevicesChanged() }
+        devices = object : AudioDeviceCallback() {
+            // Registering reports every device there already; only later
+            // calls are changes.
+            private var first = true
+            override fun onAudioDevicesAdded(added: Array<out AudioDeviceInfo>) {
+                if (first) { first = false; return }
+                changed(added)
+            }
+            override fun onAudioDevicesRemoved(removed: Array<out AudioDeviceInfo>) = changed(removed)
+            private fun changed(which: Array<out AudioDeviceInfo>) {
+                if (which.none { it.isSink }) return
+                main.removeCallbacks(reopen)
+                core.audioDevicesChanged()
+                main.postDelayed(reopen, 1500)
+            }
+        }.also { audio.registerAudioDeviceCallback(it, main) }
         // Tonearm's own icon in the status bar, not the generic one.
         setMediaNotificationProvider(
             DefaultMediaNotificationProvider.Builder(this).build().apply {
@@ -83,6 +113,8 @@ class PlaybackService : MediaSessionService() {
     }
 
     override fun onDestroy() {
+        devices?.let { (getSystemService(AUDIO_SERVICE) as AudioManager).unregisterAudioDeviceCallback(it) }
+        devices = null
         session?.run {
             player.release()
             release()

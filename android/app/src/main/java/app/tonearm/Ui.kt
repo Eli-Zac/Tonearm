@@ -69,6 +69,12 @@ interface Actions {
     fun setSaved(playlistId: String, save: Boolean, title: String) {}
     /** Follows an artist, or stops. */
     fun follow(channelId: String, follow: Boolean, name: String) {}
+    /** Tells the user something, in a toast. */
+    fun notify(text: String) {}
+    /** Saves songs on the phone, to play offline. */
+    fun download(items: List<Item>) {}
+    /** Saves every song of an album or playlist, fetched first. */
+    fun downloadCollection(item: Item) {}
 }
 
 /** A tap on a card or row that isn't a song in a list. */
@@ -153,6 +159,9 @@ fun ItemRow(item: Item, playing: Boolean, onClick: () -> Unit, onPlay: (() -> Un
                 Dim(item.line(showAlbum))
             }
         }
+        // A song's download slot, kept whether or not it is saved, as the
+        // desktop's rows: saved, downloading, or empty.
+        item.videoId?.let { DownloadMark(it) }
         if (item.duration.isNotEmpty()) Dim(item.duration, 13.sp, modifier = Modifier.padding(start = 8.dp))
     }
 }
@@ -339,7 +348,7 @@ fun LazyListScope.shelf(shelf: Shelf, actions: Actions, onAlbum: Boolean = false
 // ----------------------------------------------------------------- header
 
 @Composable
-fun PageHeader(header: Header, songs: List<Item>, actions: Actions) {
+fun PageHeader(header: Header, songs: List<Item>, actions: Actions, complete: Boolean = true) {
     Column(Modifier.fillMaxWidth()) {
         // Every page's art fills the top, up under the status bar, fading
         // into the page with the title over it: an artist's wide banner,
@@ -414,6 +423,20 @@ fun PageHeader(header: Header, songs: List<Item>, actions: Actions) {
                 HeroIcon(Icons.heart, filled = isSaved, color = if (isSaved) Tonearm.accent else null) {
                     saved = !isSaved
                     actions.setSaved(playlist, !isSaved, header.title)
+                }
+            }
+            // Download, after save, as Spotify has it: an album's or
+            // playlist's songs. A playlist still loading its rest is
+            // fetched whole first.
+            if (!header.banner) {
+                val downloads = LocalDownloads.current
+                HeaderDownload(songs) {
+                    val ids = songs.mapNotNull { it.videoId }
+                    when {
+                        ids.all { it in downloads.saved } && complete -> actions.notify("Every song here is downloaded")
+                        !complete && header.playlistId != null -> actions.downloadCollection(header.asItem(saved))
+                        else -> actions.download(songs)
+                    }
                 }
             }
             HeroIcon(Icons.dots, filled = true) { actions.menu(header.asItem(saved)) }
@@ -564,7 +587,12 @@ fun PageView(
     }
     val shown = page
     when {
-        error != null && shown == null -> Message(error!!)
+        // A page that keeps its top while loading keeps it on failing too:
+        // Library's way to Downloads stays there offline.
+        error != null && shown == null -> Column(Modifier.fillMaxSize()) {
+            if (topWhileLoading) top?.invoke(null)
+            Message(error!!)
+        }
         shown == null -> Column(Modifier.fillMaxSize()) {
             if (topWhileLoading) top?.invoke(null)
             PageSkeletonView(skeleton)
@@ -594,7 +622,7 @@ fun PageView(
             }
             LazyColumn(state = state, contentPadding = PaddingValues(bottom = 24.dp)) {
                 top?.let { t -> item(contentType = "top") { t(shown) } }
-                shown.header?.let { h -> item(contentType = "header") { PageHeader(h, shown.songs(), actions) } }
+                shown.header?.let { h -> item(contentType = "header") { PageHeader(h, shown.songs(), actions, complete = shown.continuation == null) } }
                 val onAlbum = shown.header?.label in setOf("Album", "EP", "Single")
                 shown.shelves.forEach { shelf(it, actions, onAlbum) }
                 // The next shelves on their way: rows of bones, as the

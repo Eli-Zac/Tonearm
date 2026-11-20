@@ -161,8 +161,10 @@ private fun Entries(
             is MenuAction.Follow -> host.run {
                 core.follow(action.channel, action.follow, item.title).also { host.libraryChanged() }
             }
-            // Not offered until the phone has downloads.
-            is MenuAction.ToggleDownload, is MenuAction.DownloadAll, is MenuAction.AddToPlaylist -> {}
+            is MenuAction.ToggleDownload -> host.run { core.toggleDownload(item) }
+            // Its songs are fetched first, which takes a moment.
+            is MenuAction.DownloadAll -> host.run { core.downloadCollection(item) }
+            is MenuAction.AddToPlaylist -> {}
         }
     }
     Column(Modifier.padding(vertical = 6.dp)) {

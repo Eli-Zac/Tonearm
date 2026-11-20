@@ -68,6 +68,9 @@ enum Command {
     /// Plays into a Cast device's stream from now on, or with None, back
     /// on this computer.
     Route(Option<Arc<Pipe>>),
+    /// Opens the default output again and moves the song onto it: the
+    /// device under it changed in a way its name doesn't show.
+    Reopen,
     Stop,
 }
 
@@ -221,6 +224,14 @@ impl Audio {
     }
     pub fn pause(&self) {
         let _ = self.tx.send(Command::Pause);
+    }
+    /// The system's outputs changed (headphones or a car connected or
+    /// gone): plays on through the default output as it is now. On Android
+    /// the default output keeps one name whatever it routes to, and a
+    /// stream on a device that left (Android Auto, say) goes silent rather
+    /// than following, so the app says when to move.
+    pub fn reopen_output(&self) {
+        let _ = self.tx.send(Command::Reopen);
     }
     pub fn seek(&self, seconds: f32) {
         let _ = self.tx.send(Command::Seek(seconds));
@@ -663,6 +674,21 @@ fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
                     p.out.set_volume(volume);
                 }
             }
+            // Unopened, the next play opens the default as it is then; while
+            // casting, the phone's own output isn't in use.
+            Ok(Command::Reopen) if output.is_some() && cast.is_none() => match open_output() {
+                Ok(moved) => {
+                    if let Some(p) = &mut playing {
+                        if let Err(e) = p.move_to(Target::Device(&moved.handle), volume) {
+                            eprintln!("audio output: {e}");
+                        }
+                    }
+                    output = Some(moved);
+                    checked = Instant::now();
+                }
+                Err(e) => eprintln!("audio output: {e}"),
+            },
+            Ok(Command::Reopen) => {}
             Ok(Command::Stop) => {
                 playing = None;
                 next = None;

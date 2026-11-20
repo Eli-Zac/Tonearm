@@ -117,6 +117,10 @@ fun App(core: Core, controller: MediaController?) {
         needsSignIn = failed != null && failed != answeredFor && !signingIn && !core.signedIn()
     }
 
+    // What is saved on the phone, for every row and header that marks it;
+    // what finishes or fails shows as a toast.
+    val downloads = rememberDownloads(core) { toast = it }
+
     LaunchedEffect(toast) {
         if (toast != null) {
             delay(3500)
@@ -189,6 +193,19 @@ fun App(core: Core, controller: MediaController?) {
             libraryCall { core.setSaved(playlistId, save, title) }
         override fun follow(channelId: String, follow: Boolean, name: String) =
             libraryCall { core.follow(channelId, follow, name) }
+        override fun notify(text: String) { toast = text }
+        // Says what was queued; the toast when it lands comes from the core.
+        fun downloadCall(call: () -> String) {
+            scope.launch {
+                try {
+                    toast = withContext(Dispatchers.IO) { call() }
+                } catch (e: Exception) {
+                    toast = e.message ?: "Couldn't download that"
+                }
+            }
+        }
+        override fun download(items: List<Item>) = downloadCall { core.download(items) }
+        override fun downloadCollection(item: Item) = downloadCall { core.downloadCollection(item) }
     }
 
     // What a song's menu does, through the app.
@@ -228,6 +245,7 @@ fun App(core: Core, controller: MediaController?) {
 
     // Height of the mini-player and tabs under the pages, in pixels.
     var below by remember { mutableIntStateOf(0) }
+    CompositionLocalProvider(LocalDownloads provides downloads) {
     Box(Modifier.fillMaxSize().background(Tonearm.bg)) {
         Column(Modifier.fillMaxSize()) {
             // The pages end above the mini-player and tabs, so a page that
@@ -242,6 +260,8 @@ fun App(core: Core, controller: MediaController?) {
                         onBack = { if (stack.isNotEmpty()) stack.removeAt(stack.lastIndex) },
                         onToast = { toast = it },
                     )
+                } else if (top?.id == DOWNLOADS_ROUTE) {
+                    DownloadsScreen(core, actions) { stack.removeAt(stack.lastIndex) }
                 } else if (top != null) {
                     // Pages run up under the status bar, so an artist's
                     // banner reaches the top edge.
@@ -325,6 +345,7 @@ fun App(core: Core, controller: MediaController?) {
                 stacks.getValue(tab).add(Route(SettingsPages.signIn, null, "Sign in"))
             }
         }
+    }
     }
 }
 
@@ -501,8 +522,14 @@ fun LibraryScreen(core: Core, actions: Actions, epoch: Int) {
         actions = actions,
         topWhileLoading = true,
         top = {
-            Title("Library", size = 28.sp, weight = FontWeight.ExtraBold,
-                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 4.dp))
+            Column {
+                Title("Library", size = 28.sp, weight = FontWeight.ExtraBold,
+                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 4.dp))
+                // Downloads first, as YouTube Music's library has them; it
+                // stays up when the library can't load, so offline songs
+                // are always a tap away.
+                DownloadsEntry(core) { actions.open(DOWNLOADS_ROUTE, null, "Downloads") }
+            }
         },
     )
 }

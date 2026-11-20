@@ -17,12 +17,14 @@ use tonearm_core::innertube::model::{self, Kind};
 use tonearm_core::queue::{Added, Queue, Repeat, Step};
 use tonearm_core::{audio, history, innertube, listen, offline, resolver, services, store, suggest};
 
+mod downloads;
 mod lyrics;
 mod menu;
 mod pages;
 mod playing;
 mod search;
 mod settings;
+pub use downloads::{DownloadMarks, DownloadProgress};
 pub use lyrics::{LyricLine, Lyrics, Syllable};
 pub use menu::{MenuAction, MenuIcon, MenuLine};
 pub use pages::{Chip, Header, Item, ItemKind, Link, Page, Shelf, ShelfLayout};
@@ -111,7 +113,7 @@ impl From<String> for TonearmError {
 #[derive(uniffi::Object)]
 pub struct Tonearm {
     client: innertube::Client,
-    resolver: Box<dyn resolver::Resolver>,
+    resolver: Arc<dyn resolver::Resolver>,
     audio: audio::Audio,
     queue: Mutex<Queue<Song>>,
     /// Counts songs loaded, so the engine can tell them apart.
@@ -181,7 +183,7 @@ impl Tonearm {
         let resolver = resolver::default().ok_or_else(|| "no way to find song links".to_string())?;
         let tonearm = Arc::new(Tonearm {
             client: innertube::Client::new(),
-            resolver,
+            resolver: Arc::from(resolver),
             audio: audio::Audio::new(),
             queue: Mutex::new(Queue::default()),
             generation: AtomicU64::new(0),
@@ -216,6 +218,7 @@ impl Tonearm {
             tonearm.apply(&cookie);
         }
         watch(Arc::downgrade(&tonearm));
+        downloads::listen();
         Ok(tonearm)
     }
 
@@ -501,7 +504,7 @@ impl Tonearm {
             playing,
             liked,
             in_library,
-            downloads: false,
+            downloads: true,
         };
         menu::lines(&item, &context)
     }
@@ -618,6 +621,12 @@ impl Tonearm {
     pub fn pause(&self) {
         self.play_hold.set(false);
         self.audio.pause();
+    }
+
+    /// The phone's audio outputs changed: a car, earbuds or headphones
+    /// connected or left. The song moves onto the output in use now.
+    pub fn audio_devices_changed(&self) {
+        self.audio.reopen_output();
     }
 
     pub fn resume(&self) {
@@ -834,16 +843,27 @@ impl Tonearm {
         let request = self.request.fetch_add(1, Ordering::SeqCst) + 1;
         self.note.lock().unwrap().clear();
         self.loading.store(true, Ordering::SeqCst);
-        let found = self.resolver.resolve(&song.video_id);
-        if self.request.load(Ordering::SeqCst) != request {
-            return Ok(());
-        }
-        let stream = match found {
-            Ok(stream) => stream,
-            Err(message) => {
-                *self.note.lock().unwrap() = message.clone();
-                self.loading.store(false, Ordering::SeqCst);
-                return Err(message.into());
+        // A downloaded or cached copy needs no link and no network, so a
+        // download plays with no connection at all.
+        let input = match offline::local_file(&song.video_id) {
+            Some(path) => audio::Input::File(path),
+            None => {
+                let found = self.resolver.resolve(&song.video_id);
+                if self.request.load(Ordering::SeqCst) != request {
+                    return Ok(());
+                }
+                match found {
+                    Ok(stream) => audio::Input::Http {
+                        url: stream.url,
+                        headers: stream.headers,
+                        cache_as: Some(song.video_id.clone()),
+                    },
+                    Err(message) => {
+                        *self.note.lock().unwrap() = message.clone();
+                        self.loading.store(false, Ordering::SeqCst);
+                        return Err(message.into());
+                    }
+                }
             }
         };
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
@@ -851,14 +871,6 @@ impl Tonearm {
         self.seek_hold.clear();
         // Any song opened ahead was for the last one.
         self.fade.lock().unwrap().take();
-        let input = match offline::local_file(&song.video_id) {
-            Some(path) => audio::Input::File(path),
-            None => audio::Input::Http {
-                url: stream.url,
-                headers: stream.headers,
-                cache_as: Some(song.video_id.clone()),
-            },
-        };
         self.audio.load(input, generation);
         self.loading.store(false, Ordering::SeqCst);
         Ok(())

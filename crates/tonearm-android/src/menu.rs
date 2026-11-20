@@ -1,6 +1,5 @@
 //! An item's long-press menu: the core's lines, which the desktop's right
-//! click menu offers too, in what Kotlin can read. Downloads are left out
-//! until the phone has a Downloads screen.
+//! click menu offers too, in what Kotlin can read.
 
 use crate::pages::{self, Item};
 use tonearm_core::menu as core;

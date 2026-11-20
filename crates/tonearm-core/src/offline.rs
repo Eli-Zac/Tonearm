@@ -61,8 +61,11 @@ struct Saved {
 struct State {
     loaded: bool,
     downloads: HashMap<String, Saved>,
-    /// Being downloaded right now.
+    /// Being downloaded right now, or fetched into the cache ahead.
     busy: HashSet<String>,
+    /// Queued to download, or downloading: the songs `queue` took. Songs
+    /// fetched ahead into the cache are not among them.
+    saving: Vec<String>,
     /// How far each running download has got, from 0 to 1.
     progress: HashMap<String, f32>,
     cache_mb: Option<u64>,
@@ -168,6 +171,16 @@ pub fn progress(video_id: &str) -> f32 {
 
 pub fn is_downloading(video_id: &str) -> bool {
     state().busy.contains(video_id)
+}
+
+/// The video ids of every downloaded song, in no order. Reads no files.
+pub fn downloaded_ids() -> Vec<String> {
+    state().downloads.keys().cloned().collect()
+}
+
+/// Songs queued to download or downloading, in the order asked.
+pub fn queued() -> Vec<String> {
+    state().saving.clone()
 }
 
 /// Downloaded songs, newest first.
@@ -605,6 +618,9 @@ pub fn queue(
             })
             .collect()
     };
+    state()
+        .saving
+        .extend(fresh.iter().filter_map(|i| i.video_id.clone()));
     let total = fresh.len();
     for (n, item) in fresh.iter().cloned().enumerate() {
         let resolver = resolver.clone();
@@ -616,6 +632,7 @@ pub fn queue(
                 let mut state = state();
                 state.busy.remove(&video_id);
                 state.progress.remove(&video_id);
+                state.saving.retain(|id| *id != video_id);
             }
             EVENTS.emit(Event::Finished {
                 item,
