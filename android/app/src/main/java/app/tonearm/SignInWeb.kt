@@ -28,7 +28,7 @@ private const val YOUTUBE_SIGN_IN =
         "&continue=https%3A%2F%2Fmusic.youtube.com%2F"
 private const val YOUTUBE_MUSIC = "https://music.youtube.com"
 
-private const val SPOTIFY_SIGN_IN = "https://accounts.spotify.com/login?continue=https%3A%2F%2Fopen.spotify.com%2F"
+private const val SPOTIFY_SIGN_IN = "https://accounts.spotify.com/en/login?continue=https%3A%2F%2Fopen.spotify.com%2F"
 private const val SPOTIFY_WEB = "https://open.spotify.com"
 
 /**
@@ -80,7 +80,6 @@ fun SpotifySignIn(core: Core, onBack: () -> Unit, onToast: (String) -> Unit) {
         ready = { _, cookies -> cookies.split(';').any { it.trim().startsWith("sp_dc=") } },
         accept = { cookies ->
             if (core.spotifySignIn(cookies)) {
-                Prefs.servicesNote = "Spotify sign in connected"
                 "Spotify sign in connected"
             } else {
                 null
@@ -179,6 +178,13 @@ private fun SignInWeb(
                         }
                         override fun onPageFinished(view: WebView, address: String) {
                             url = address
+                        }
+                    }
+                    // The page's own console, in logcat under TonearmWeb.
+                    webChromeClient = object : android.webkit.WebChromeClient() {
+                        override fun onConsoleMessage(m: android.webkit.ConsoleMessage): Boolean {
+                            android.util.Log.d("TonearmWeb", "${m.messageLevel()} ${m.message()} @ ${m.sourceId()}:${m.lineNumber()}")
+                            return true
                         }
                     }
                     loadUrl(start)

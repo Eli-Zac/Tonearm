@@ -22,6 +22,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.SolidColor
@@ -686,8 +687,26 @@ fun PillButton(text: String, primary: Boolean = false, danger: Boolean = false, 
 @Composable
 private fun Field(value: String, onChange: (String) -> Unit, placeholder: String, secret: Boolean = false) {
     var focused by remember { mutableStateOf(false) }
+    // While focused, the whole pill (and a little room round it) is kept
+    // in view, asked again as the keyboard slides up, so it ends clear of
+    // the keyboard rather than half under it.
+    val requester = remember { androidx.compose.foundation.relocation.BringIntoViewRequester() }
+    val density = LocalDensity.current
+    val keyboard = WindowInsets.ime.getBottom(density)
+    var size by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
+    LaunchedEffect(focused, keyboard) {
+        if (focused && size.height > 0) {
+            val room = with(density) { 16.dp.toPx() }
+            requester.bringIntoView(
+                androidx.compose.ui.geometry.Rect(0f, -room, size.width.toFloat(), size.height + room),
+            )
+        }
+    }
     Box(
-        Modifier.fillMaxWidth().height(40.dp).clip(RoundedCornerShape(20.dp))
+        Modifier.fillMaxWidth().height(40.dp)
+            .onSizeChanged { size = it }
+            .bringIntoViewRequester(requester)
+            .clip(RoundedCornerShape(20.dp))
             .background(if (focused) Color(0x1CFFFFFF) else Color(0x10FFFFFF))
             .border(1.dp, if (focused) Color(0x40FFFFFF) else Color.Transparent, RoundedCornerShape(20.dp))
             .padding(horizontal = 18.dp),
