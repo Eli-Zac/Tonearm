@@ -99,9 +99,16 @@ fun App(core: Core, controller: MediaController?) {
 
     // A song that can't play while signed out: YouTube wants a sign in
     // before it gives out streams on many networks, so offer one.
+    // Asked once per failed song, and never over the sign-in page itself:
+    // coming back from another app (a password manager, say) reads the
+    // same failure again.
     var needsSignIn by remember { mutableStateOf(false) }
-    val failed = now?.error
-    LaunchedEffect(failed) { needsSignIn = failed != null && !core.signedIn() }
+    var answeredFor by rememberSaveable { mutableStateOf<String?>(null) }
+    val failed = now?.error?.let { "${now.id}:$it" }
+    LaunchedEffect(failed) {
+        val signingIn = stacks.values.any { it.lastOrNull()?.id == SettingsPages.signIn }
+        needsSignIn = failed != null && failed != answeredFor && !signingIn && !core.signedIn()
+    }
 
     LaunchedEffect(toast) {
         if (toast != null) {
@@ -270,8 +277,9 @@ fun App(core: Core, controller: MediaController?) {
         }
         toast?.let { Toast(it, Modifier.align(Alignment.BottomCenter).padding(bottom = 150.dp)) }
         if (needsSignIn) {
-            SignInDialog(onDismiss = { needsSignIn = false }) {
+            SignInDialog(onDismiss = { needsSignIn = false; answeredFor = failed }) {
                 needsSignIn = false
+                answeredFor = failed
                 nowPlayingOpen = false
                 stacks.getValue(tab).add(Route(SettingsPages.signIn, null, "Sign in"))
             }
