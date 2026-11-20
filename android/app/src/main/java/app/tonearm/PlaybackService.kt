@@ -17,7 +17,11 @@ import androidx.media3.session.MediaLibraryService
 import androidx.media3.session.MediaLibraryService.LibraryParams
 import androidx.media3.session.MediaLibraryService.MediaLibrarySession
 import androidx.media3.session.MediaSession
+import androidx.media3.session.MediaConstants
+import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionError
+import androidx.media3.session.SessionResult
+import com.google.common.util.concurrent.ListeningExecutorService
 import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
@@ -35,6 +39,7 @@ import uniffi.tonearm_android.Tonearm
 class PlaybackService : MediaLibraryService() {
     private var session: MediaLibrarySession? = null
     private var devices: AudioDeviceCallback? = null
+    private var controls: CarControls? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -46,9 +51,14 @@ class PlaybackService : MediaLibraryService() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
         val player = TonearmPlayer(this, core)
-        session = MediaLibrarySession.Builder(this, player, Callback(core, player, AutoLibrary(core)))
+        val work = MoreExecutors.listeningDecorator(Executors.newFixedThreadPool(2))
+        val car = CarControls(core, work)
+        controls = car
+        session = MediaLibrarySession.Builder(this, player, Callback(core, player, AutoLibrary(core), car, work))
             .setSessionActivity(open)
+            .setMediaButtonPreferences(car.buttons())
             .build()
+            .also { car.start(it) }
         // A car, earbuds or headphones coming or going: the core's output
         // stays on the device it opened, which on Android may have left
         // (Android Auto's stream goes silent rather than following), so it
@@ -89,9 +99,30 @@ class PlaybackService : MediaLibraryService() {
         private val core: Tonearm,
         private val player: TonearmPlayer,
         private val library: AutoLibrary,
-    ) : MediaLibrarySession.Callback {
+        private val car: CarControls,
         /** The car's browsing reaches the network, so it runs off the main thread. */
-        private val work = MoreExecutors.listeningDecorator(Executors.newFixedThreadPool(2))
+        private val work: ListeningExecutorService,
+    ) : MediaLibrarySession.Callback {
+        /** Everyone gets the usual commands, plus shuffle, repeat and like. */
+        override fun onConnect(session: MediaSession, controller: MediaSession.ControllerInfo): MediaSession.ConnectionResult {
+            val commands = MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS.buildUpon()
+                .apply { car.commands.forEach { add(it) } }
+                .build()
+            return MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller)
+                .setAvailableSessionCommands(commands)
+                .setMediaButtonPreferences(car.buttons())
+                .build()
+        }
+
+        override fun onCustomCommand(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            customCommand: SessionCommand,
+            args: Bundle,
+        ): ListenableFuture<SessionResult> {
+            car.press(customCommand.customAction)
+            return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+        }
 
         override fun onGetLibraryRoot(
             session: MediaLibrarySession,
@@ -102,8 +133,16 @@ class PlaybackService : MediaLibraryService() {
             // folder says otherwise.
             val style = Bundle().apply {
                 putBoolean(AutoLibrary.STYLE_SUPPORTED, true)
-                putInt(AutoLibrary.BROWSABLE_HINT, AutoLibrary.GRID)
-                putInt(AutoLibrary.PLAYABLE_HINT, AutoLibrary.LIST)
+                putInt(MediaConstants.EXTRAS_KEY_CONTENT_STYLE_BROWSABLE, AutoLibrary.GRID)
+                putInt(MediaConstants.EXTRAS_KEY_CONTENT_STYLE_PLAYABLE, AutoLibrary.LIST)
+            }
+            // Asked for what played last (Android Auto starting up): the
+            // queue as it was left, if there is one.
+            if (params?.isRecent == true) {
+                if (core.queue().isEmpty()) return Futures.immediateFuture(LibraryResult.ofError(SessionError.ERROR_NOT_SUPPORTED))
+                return Futures.immediateFuture(
+                    LibraryResult.ofItem(library.recentRoot(), LibraryParams.Builder().setRecent(true).setExtras(style).build()),
+                )
             }
             return Futures.immediateFuture(
                 LibraryResult.ofItem(library.root(), LibraryParams.Builder().setExtras(style).build()),
@@ -193,6 +232,8 @@ class PlaybackService : MediaLibraryService() {
     override fun onDestroy() {
         devices?.let { (getSystemService(AUDIO_SERVICE) as AudioManager).unregisterAudioDeviceCallback(it) }
         devices = null
+        controls?.stop()
+        controls = null
         session?.run {
             player.release()
             release()
