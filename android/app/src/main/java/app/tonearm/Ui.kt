@@ -238,7 +238,8 @@ fun PageHeader(header: Header, songs: List<Item>, actions: Actions) {
                     modifier = Modifier.align(Alignment.BottomStart).padding(horizontal = 16.dp))
             }
         } else {
-            Box(Modifier.fillMaxWidth().padding(top = 8.dp), contentAlignment = Alignment.Center) {
+            // Square art sits below the status bar and the back button.
+            Box(Modifier.fillMaxWidth().statusBarsPadding().padding(top = 48.dp), contentAlignment = Alignment.Center) {
                 Art(header.thumb, 240.dp, RoundedCornerShape(Tonearm.radius))
             }
             Spacer(Modifier.height(18.dp))

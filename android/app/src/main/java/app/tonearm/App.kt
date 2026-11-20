@@ -99,15 +99,19 @@ fun App(core: Core, controller: MediaController?) {
 
     Box(Modifier.fillMaxSize().background(Tonearm.bg)) {
         Column(Modifier.fillMaxSize()) {
-            Box(Modifier.weight(1f).statusBarsPadding()) {
+            Box(Modifier.weight(1f)) {
                 val top = stack.lastOrNull()
                 if (top != null) {
+                    // Pages run up under the status bar, so an artist's
+                    // banner reaches the top edge.
                     PageScreen(top, core, actions) { stack.removeAt(stack.lastIndex) }
                 } else {
-                    when (tab) {
-                        Tab.Home -> HomeScreen(core, actions)
-                        Tab.Search -> SearchScreen(core, actions)
-                        Tab.Library -> LibraryScreen(core, actions)
+                    Box(Modifier.statusBarsPadding()) {
+                        when (tab) {
+                            Tab.Home -> HomeScreen(core, actions)
+                            Tab.Search -> SearchScreen(core, actions)
+                            Tab.Library -> LibraryScreen(core, actions)
+                        }
                     }
                 }
             }
@@ -293,15 +297,28 @@ fun PageScreen(route: Route, core: Core, actions: Actions, onBack: () -> Unit) {
             more = { token -> withContext(Dispatchers.IO) { core.more(token) } },
             actions = actions,
             top = { page ->
-                // Pages without a header (a mood, "Show all") get a title.
+                // Pages without a header (a mood, "Show all") get a title,
+                // clear of the status bar and the back button.
                 if (page.header == null) {
                     Title(page.title.ifEmpty { route.title }, size = 26.sp, weight = FontWeight.ExtraBold, lines = 2,
-                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 56.dp, bottom = 4.dp))
+                        modifier = Modifier.statusBarsPadding()
+                            .padding(start = 16.dp, end = 16.dp, top = 56.dp, bottom = 4.dp))
                 }
             },
         )
+        // A fade behind the status bar, so the clock and battery read over
+        // a bright banner.
         Box(
-            Modifier.padding(8.dp).size(40.dp).clip(RoundedCornerShape(20.dp))
+            Modifier.fillMaxWidth().windowInsetsTopHeight(WindowInsets.statusBars.add(WindowInsets(top = 24.dp)))
+                .background(
+                    androidx.compose.ui.graphics.Brush.verticalGradient(
+                        0f to androidx.compose.ui.graphics.Color(0x8C000000),
+                        1f to androidx.compose.ui.graphics.Color.Transparent,
+                    ),
+                ),
+        )
+        Box(
+            Modifier.statusBarsPadding().padding(8.dp).size(40.dp).clip(RoundedCornerShape(20.dp))
                 .background(androidx.compose.ui.graphics.Color(0x9908080A)).clickable(onClick = onBack),
             contentAlignment = Alignment.Center,
         ) {
