@@ -12,6 +12,10 @@ use tonearm_core::{audio, history, offline, services, transition};
 /// How long before the fade the next song starts opening. Its link and
 /// first bytes can take a while to come.
 const PREPARE_AHEAD: f32 = 30.0;
+/// Mixed playlists can start well before the end when the songs beat match.
+const PREPARE_AHEAD_MIXING: f32 = 75.0;
+/// Give the queue thread a moment to hand off a beat-matched transition.
+const MIX_LEAD: f32 = 0.5;
 /// A fade shorter than this, left after a late start, is not worth it.
 const SHORTEST_FADE: f32 = 0.5;
 
@@ -92,6 +96,10 @@ impl Tonearm {
     /// does without beat matching. With crossfade off the next song is
     /// handed to the engine to start the moment this one ends.
     fn crossfade_check(self: &Arc<Self>, generation: u64, duration: f32) {
+        if self.mix_mode.load(Ordering::SeqCst) {
+            self.mixed_crossfade_check(generation, duration);
+            return;
+        }
         if duration <= 0.0 {
             return;
         }
@@ -141,6 +149,112 @@ impl Tonearm {
         // old song short.
         let settings = transition::Settings::auto(None, None, false);
         let plan = transition::plan(settings, None, duration as f64, None, left.min(seconds) as f64);
+        self.fade.lock().unwrap().take();
+        let generation = self.move_on(index);
+        self.audio.crossfade(token, generation, plan);
+    }
+
+    /// Plays the saved or automatic transition for a mixed playlist.
+    fn mixed_crossfade_check(self: &Arc<Self>, generation: u64, duration: f32) {
+        if duration <= 0.0 {
+            return;
+        }
+        let target = {
+            let queue = self.queue.lock().unwrap();
+            queue.follows().and_then(|i| queue.items().get(i).map(|s| (i, s.video_id.clone())))
+        };
+        let Some((index, video_id)) = target else {
+            if self.fade.lock().unwrap().take().is_some_and(|n| n.armed) {
+                self.audio.unfollow();
+            }
+            return;
+        };
+        let Some(playing) = self.now_playing().map(|song| song.video_id) else {
+            return;
+        };
+        let seconds = self.crossfade.load(Ordering::SeqCst) as f64;
+        let seconds = if seconds == 0.0 {
+            tonearm_core::transition::MIX_MODE_SECONDS
+        } else {
+            seconds
+        };
+        if offline::saved_file(&playing).is_some() {
+            tonearm_core::analysis::request(&playing);
+        }
+        if offline::saved_file(&video_id).is_some() {
+            tonearm_core::analysis::request(&video_id);
+        }
+        let out = tonearm_core::library::analysis(&playing);
+        let inn = tonearm_core::library::analysis(&video_id);
+        let (settings, plan) = transition::plan_between(
+            &playing,
+            &video_id,
+            true,
+            out.as_ref(),
+            duration as f64,
+            inn.as_ref(),
+            seconds,
+            None,
+        );
+        let status = &self.audio.status;
+        let position = status.position_ms.load(Ordering::SeqCst) as f32 / 1000.0;
+        let left = duration - position;
+        let opened = self
+            .fade
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|n| n.generation == generation && n.index == index && n.video_id == video_id)
+            .map(|n| (n.token, n.armed));
+        let Some((token, armed)) = opened else {
+            let ahead = match plan.out_at {
+                Some(at) => duration - at as f32 + PREPARE_AHEAD,
+                None => plan.length as f32 + PREPARE_AHEAD_MIXING,
+            };
+            if left <= ahead {
+                self.prepare_next(generation, index, video_id);
+            }
+            return;
+        };
+        let ready = status.prepared.load(Ordering::SeqCst) == token;
+        if let Some(at) = plan.out_at {
+            let at = at as f32;
+            if position < at - MIX_LEAD {
+                return;
+            }
+            if ready && position <= at {
+                self.fade.lock().unwrap().take();
+                let generation = self.move_on(index);
+                self.audio.crossfade(token, generation, plan);
+                return;
+            }
+        }
+        if settings.volume == transition::Volume::Cut {
+            if !armed && ready {
+                self.audio.follow(token, self.gain_for(&video_id));
+                if let Some(next) = self.fade.lock().unwrap().as_mut() {
+                    next.armed = true;
+                }
+            }
+            return;
+        }
+        let length = plan.length as f32;
+        if left > length || !ready || left < SHORTEST_FADE.min(length) {
+            return;
+        }
+        let mut unmatched = settings;
+        unmatched.beatmatch = false;
+        unmatched.bars = 0;
+        let (_, plan) = transition::plan_between(
+            &playing,
+            &video_id,
+            true,
+            None,
+            duration as f64,
+            None,
+            left.min(length) as f64,
+            Some(unmatched),
+        );
         self.fade.lock().unwrap().take();
         let generation = self.move_on(index);
         self.audio.crossfade(token, generation, plan);

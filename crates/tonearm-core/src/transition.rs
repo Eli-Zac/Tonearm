@@ -16,6 +16,9 @@
 use crate::analysis::{Analysis, LocalGrid};
 use crate::mix::{Curve, Effect, EffectKind, Lane, Param, Side, Transition};
 
+/// Default transition length for a mixed playlist when crossfade is off.
+pub const MIX_MODE_SECONDS: f64 = 8.0;
+
 /// How the two songs' volumes cross.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Volume {
@@ -668,6 +671,38 @@ pub fn plan(
         _ => None,
     };
     Transition { out_at, in_from, length, lanes, effect, out_loop, key_lock }
+}
+
+/// Chooses the saved setting, or Auto's pick when none was saved.
+pub fn settings_between(
+    from: &str,
+    to: &str,
+    mix_mode: bool,
+    out: Option<&Analysis>,
+    inn: Option<&Analysis>,
+    override_settings: Option<Settings>,
+) -> Settings {
+    override_settings
+        .or_else(|| crate::library::transition(from, to))
+        .unwrap_or_else(|| Settings::auto(out, inn, mix_mode))
+}
+
+/// Chooses and plans the transition between two songs. An explicit setting
+/// (for example one being previewed) takes precedence over a saved setting;
+/// otherwise Auto uses the songs' analyses and whether this is a mixed playlist.
+pub fn plan_between(
+    from: &str,
+    to: &str,
+    mix_mode: bool,
+    out: Option<&Analysis>,
+    out_length: f64,
+    inn: Option<&Analysis>,
+    seconds: f64,
+    override_settings: Option<Settings>,
+) -> (Settings, Transition) {
+    let settings = settings_between(from, to, mix_mode, out, inn, override_settings);
+    let plan = plan(settings, out, out_length, inn, seconds);
+    (settings, plan)
 }
 
 /// A lane for one song, from (seconds, value, curve) keys.

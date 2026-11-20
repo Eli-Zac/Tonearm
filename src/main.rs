@@ -342,7 +342,7 @@ const SYNC_CHECK: Duration = Duration::from_secs(60);
 const SYNC_SOON: Duration = Duration::from_secs(2);
 
 /// How long mixes last in a playlist's mix mode when crossfade is off.
-const MIX_MODE_SECONDS: f32 = 8.0;
+const MIX_MODE_SECONDS: f32 = tonearm_core::transition::MIX_MODE_SECONDS as f32;
 
 struct Cover {
     generation: u64,
@@ -3549,16 +3549,15 @@ impl App {
     /// The transition from `from` into `to`: one being previewed from the
     /// editor, the one chosen by hand, or Auto's pick for the two songs.
     fn transition_settings(&self, from: &str, to: &str) -> transition::Settings {
-        if let Some((a, b, settings)) = self.previewing.borrow().as_ref() {
-            if a == from && b == to {
-                return *settings;
-            }
-        }
-        library::transition(from, to).unwrap_or_else(|| {
-            let out = self.analysis_of(from);
-            let inn = self.analysis_of(to);
-            transition::Settings::auto(out.as_deref(), inn.as_deref(), self.mix_mode())
-        })
+        let out = self.analysis_of(from);
+        let inn = self.analysis_of(to);
+        let preview = self
+            .previewing
+            .borrow()
+            .as_ref()
+            .filter(|(a, b, _)| a == from && b == to)
+            .map(|(_, _, settings)| *settings);
+        transition::settings_between(from, to, self.mix_mode(), out.as_deref(), inn.as_deref(), preview)
     }
 
     /// The mix from the playing song into the next one. Beat matched once
@@ -3575,10 +3574,24 @@ impl App {
                 return Some((p.settings, p.plan.clone()));
             }
         }
-        let settings = self.transition_settings(&playing, next_id);
         let out = self.analysis_of(&playing);
         let inn = self.analysis_of(next_id);
-        let plan = transition::plan(settings, out.as_deref(), duration as f64, inn.as_deref(), seconds as f64);
+        let preview = self
+            .previewing
+            .borrow()
+            .as_ref()
+            .filter(|(from, to, _)| from == &playing && to == next_id)
+            .map(|(_, _, settings)| *settings);
+        let (settings, plan) = transition::plan_between(
+            &playing,
+            next_id,
+            self.mix_mode(),
+            out.as_deref(),
+            duration as f64,
+            inn.as_deref(),
+            seconds as f64,
+            preview,
+        );
         *self.planned.borrow_mut() = Some(Planned {
             from: playing,
             into: next_id.to_string(),

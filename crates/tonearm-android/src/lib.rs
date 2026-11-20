@@ -154,6 +154,8 @@ pub struct Tonearm {
     /// Crossfade length in seconds, zero for off, and the levelling choice,
     /// as saved in Settings.
     crossfade: AtomicU32,
+    /// The current queue came from a playlist with mix mode on.
+    mix_mode: AtomicBool,
     levelling: AtomicI32,
     /// Songs' loudness as YouTube measures it, by video id. None once
     /// asked for and not known.
@@ -212,6 +214,7 @@ impl Tonearm {
             recent: Mutex::new(None),
             translated: Mutex::new(HashMap::new()),
             crossfade: AtomicU32::new(tonearm_core::settings::crossfade()),
+            mix_mode: AtomicBool::new(false),
             levelling: AtomicI32::new(tonearm_core::settings::levelling()),
             loudness: Mutex::new(HashMap::new()),
             gained: AtomicU64::new(0),
@@ -399,7 +402,8 @@ impl Tonearm {
             .map(pages::core_item)
             .filter_map(|i| song(&i))
             .collect();
-        self.set_queue(songs, start as u32)
+        let playlist_id = items.iter().find_map(|item| item.playlist_id.clone());
+        self.set_queue_from_playlist(songs, start as u32, playlist_id)
     }
 
     /// A song card tapped: plays the song, then its radio. A music video
@@ -439,7 +443,7 @@ impl Tonearm {
         if songs.is_empty() {
             return Err("Nothing to play".to_string().into());
         }
-        self.set_queue(songs, 0)
+        self.set_queue_from_playlist(songs, 0, item.playlist_id.clone())
     }
 
     /// An artist's shuffle or radio button, as YouTube Music starts them.
@@ -453,11 +457,23 @@ impl Tonearm {
         if songs.is_empty() {
             return Err("Nothing to play".to_string().into());
         }
-        self.set_queue(songs, 0)
+        self.set_queue_from_playlist(songs, 0, item.playlist_id.clone())
     }
 
     /// Plays `songs` from `index`, in place of the queue.
     pub fn set_queue(&self, songs: Vec<Song>, index: u32) -> Result<(), TonearmError> {
+        self.set_queue_from_playlist(songs, index, None)
+    }
+
+    fn set_queue_from_playlist(
+        &self,
+        songs: Vec<Song>,
+        index: u32,
+        playlist_id: Option<String>,
+    ) -> Result<(), TonearmError> {
+        let mixed = playlist_id.is_some_and(|id| tonearm_core::library::mixed_playlists().contains(&id));
+        self.mix_mode.store(mixed, Ordering::SeqCst);
+        tonearm_core::analysis::set_enabled(mixed);
         // Loading before the queue moves, so the new song is never shown at
         // the last one's place (see `step`).
         self.loading.store(true, Ordering::SeqCst);
@@ -566,7 +582,7 @@ impl Tonearm {
             return Err("There are no songs in it".to_string().into());
         }
         let songs = if shuffle { tonearm_core::queue::shuffled(songs) } else { songs };
-        self.set_queue(songs, 0)
+        self.set_queue_from_playlist(songs, 0, item.playlist_id.clone())
     }
 
     /// An artist's shuffle or radio from their menu, as the desktop plays
