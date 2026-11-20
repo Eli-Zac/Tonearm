@@ -11,10 +11,18 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.DefaultMediaNotificationProvider
+import android.os.Bundle
+import androidx.media3.session.LibraryResult
+import androidx.media3.session.MediaLibraryService
+import androidx.media3.session.MediaLibraryService.LibraryParams
+import androidx.media3.session.MediaLibraryService.MediaLibrarySession
 import androidx.media3.session.MediaSession
-import androidx.media3.session.MediaSessionService
+import androidx.media3.session.SessionError
+import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
+import com.google.common.util.concurrent.MoreExecutors
+import java.util.concurrent.Executors
 import uniffi.tonearm_android.Tonearm
 
 /**
@@ -24,8 +32,8 @@ import uniffi.tonearm_android.Tonearm
  * foreground while something plays.
  */
 @UnstableApi
-class PlaybackService : MediaSessionService() {
-    private var session: MediaSession? = null
+class PlaybackService : MediaLibraryService() {
+    private var session: MediaLibrarySession? = null
     private var devices: AudioDeviceCallback? = null
 
     override fun onCreate() {
@@ -37,9 +45,9 @@ class PlaybackService : MediaSessionService() {
             Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-        session = MediaSession.Builder(this, TonearmPlayer(this, core))
+        val player = TonearmPlayer(this, core)
+        session = MediaLibrarySession.Builder(this, player, Callback(core, player, AutoLibrary(core)))
             .setSessionActivity(open)
-            .setCallback(Callback(core))
             .build()
         // A car, earbuds or headphones coming or going: the core's output
         // stays on the device it opened, which on Android may have left
@@ -73,7 +81,77 @@ class PlaybackService : MediaSessionService() {
         )
     }
 
-    private class Callback(private val core: Tonearm) : MediaSession.Callback {
+    /**
+     * The session's answers: to the phone's own screen, and to Android Auto,
+     * which browses `library` and plays what is picked there.
+     */
+    private class Callback(
+        private val core: Tonearm,
+        private val player: TonearmPlayer,
+        private val library: AutoLibrary,
+    ) : MediaLibrarySession.Callback {
+        /** The car's browsing reaches the network, so it runs off the main thread. */
+        private val work = MoreExecutors.listeningDecorator(Executors.newFixedThreadPool(2))
+
+        override fun onGetLibraryRoot(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            params: LibraryParams?,
+        ): ListenableFuture<LibraryResult<MediaItem>> {
+            // Folders of albums show as a grid, songs as a list, unless a
+            // folder says otherwise.
+            val style = Bundle().apply {
+                putBoolean(AutoLibrary.STYLE_SUPPORTED, true)
+                putInt(AutoLibrary.BROWSABLE_HINT, AutoLibrary.GRID)
+                putInt(AutoLibrary.PLAYABLE_HINT, AutoLibrary.LIST)
+            }
+            return Futures.immediateFuture(
+                LibraryResult.ofItem(library.root(), LibraryParams.Builder().setExtras(style).build()),
+            )
+        }
+
+        override fun onGetChildren(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            parentId: String,
+            page: Int,
+            pageSize: Int,
+            params: LibraryParams?,
+        ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> = work.submit<LibraryResult<ImmutableList<MediaItem>>> {
+            try {
+                val all = library.children(parentId)
+                val from = (page.toLong() * pageSize).coerceAtMost(all.size.toLong()).toInt()
+                val to = (from.toLong() + pageSize).coerceAtMost(all.size.toLong()).toInt()
+                LibraryResult.ofItemList(ImmutableList.copyOf(all.subList(from, to)), params)
+            } catch (e: Exception) {
+                LibraryResult.ofError(SessionError.ERROR_IO)
+            }
+        }
+
+        /**
+         * Picked in the car: the queue the phone would play for the same tap,
+         * handed to the player whole, so its songs keep their details. Anything
+         * else (the phone's own screen, a resumed queue) passes as it is.
+         */
+        override fun onSetMediaItems(
+            mediaSession: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            mediaItems: MutableList<MediaItem>,
+            startIndex: Int,
+            startPositionMs: Long,
+        ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+            val picked = mediaItems.singleOrNull()?.mediaId
+            if (picked == null || !library.knows(picked)) {
+                return super.onSetMediaItems(mediaSession, controller, mediaItems, startIndex, startPositionMs)
+            }
+            return work.submit<MediaSession.MediaItemsWithStartPosition> {
+                val (songs, start) = library.queueFor(picked) ?: throw IllegalStateException("gone")
+                if (songs.isEmpty()) throw IllegalStateException("Nothing to play")
+                player.pending = songs
+                MediaSession.MediaItemsWithStartPosition(songs.map(TonearmPlayer::mediaItem), start, C.TIME_UNSET)
+            }
+        }
+
         /** Songs come by their video id, with no link: the core finds the
          *  stream itself. Media3 otherwise turns away items without one. */
         override fun onAddMediaItems(
@@ -102,7 +180,7 @@ class PlaybackService : MediaSessionService() {
         }
     }
 
-    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = session
+    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession? = session
 
     /** Swiped away from recents: the music stops only if it wasn't playing. */
     override fun onTaskRemoved(rootIntent: Intent?) {

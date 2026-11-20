@@ -150,6 +150,29 @@ impl Tonearm {
         format!("Removed {title} from downloads")
     }
 
+    /// The title of a song being downloaded or saved, for the download
+    /// notification. Empty when unknown.
+    pub fn download_title(&self, video_id: String) -> String {
+        offline::title_of(&video_id)
+            .or_else(|| offline::queued_title(&video_id))
+            .unwrap_or_default()
+    }
+
+    /// Deletes the downloads of several songs, such as an album's, from its
+    /// page header. Songs not downloaded are passed over. Blocks on the disk.
+    pub fn remove_downloads(&self, video_ids: Vec<String>) -> String {
+        let saved: Vec<String> = video_ids.into_iter().filter(|id| offline::is_downloaded(id)).collect();
+        for id in &saved {
+            offline::remove(id);
+        }
+        changed();
+        match saved.len() {
+            0 => "Nothing here is downloaded".into(),
+            1 => "Removed 1 song from downloads".into(),
+            n => format!("Removed {n} songs from downloads"),
+        }
+    }
+
     /// The Downloads page: every saved song, newest first, read from the
     /// phone alone, so it opens with no connection.
     pub fn downloads_page(&self) -> Page {

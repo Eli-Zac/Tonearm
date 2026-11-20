@@ -143,12 +143,21 @@ class TonearmPlayer(private val context: Context, private val core: Tonearm) :
         return later { refresh() }
     }
 
+    /** The queue Android Auto's pick was worked out to, set just before
+     *  Media3 hands its items here. */
+    @Volatile
+    var pending: List<Song>? = null
+
     override fun handleSetMediaItems(
         mediaItems: MutableList<MediaItem>,
         startIndex: Int,
         startPositionMs: Long,
     ): ListenableFuture<*> {
-        val songs = mediaItems.map(::song)
+        // A queue built for a pick in the car comes whole, with every
+        // song's details; the media items carry only some of them.
+        val built = pending?.takeIf { it.map(Song::videoId) == mediaItems.map { m -> m.mediaId } }
+        pending = null
+        val songs = built ?: mediaItems.map(::song)
         val start = if (startIndex == C.INDEX_UNSET) 0 else startIndex
         focus()
         return work { core.setQueue(songs, start.toUInt()) }

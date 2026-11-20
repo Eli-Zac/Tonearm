@@ -65,7 +65,8 @@ struct State {
     busy: HashSet<String>,
     /// Queued to download, or downloading: the songs `queue` took. Songs
     /// fetched ahead into the cache are not among them.
-    saving: Vec<String>,
+    /// Each with its title, for a notice of what is downloading.
+    saving: Vec<(String, String)>,
     /// How far each running download has got, from 0 to 1.
     progress: HashMap<String, f32>,
     cache_mb: Option<u64>,
@@ -180,7 +181,16 @@ pub fn downloaded_ids() -> Vec<String> {
 
 /// Songs queued to download or downloading, in the order asked.
 pub fn queued() -> Vec<String> {
-    state().saving.clone()
+    state().saving.iter().map(|(id, _)| id.clone()).collect()
+}
+
+/// The title of a song queued to download.
+pub fn queued_title(video_id: &str) -> Option<String> {
+    state()
+        .saving
+        .iter()
+        .find(|(id, _)| id == video_id)
+        .map(|(_, title)| title.clone())
 }
 
 /// Downloaded songs, newest first.
@@ -618,9 +628,11 @@ pub fn queue(
             })
             .collect()
     };
-    state()
-        .saving
-        .extend(fresh.iter().filter_map(|i| i.video_id.clone()));
+    state().saving.extend(
+        fresh
+            .iter()
+            .filter_map(|i| Some((i.video_id.clone()?, i.title.clone()))),
+    );
     let total = fresh.len();
     for (n, item) in fresh.iter().cloned().enumerate() {
         let resolver = resolver.clone();
@@ -632,7 +644,7 @@ pub fn queue(
                 let mut state = state();
                 state.busy.remove(&video_id);
                 state.progress.remove(&video_id);
-                state.saving.retain(|id| *id != video_id);
+                state.saving.retain(|(id, _)| *id != video_id);
             }
             EVENTS.emit(Event::Finished {
                 item,

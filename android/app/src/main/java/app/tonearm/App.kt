@@ -206,6 +206,7 @@ fun App(core: Core, controller: MediaController?) {
         }
         override fun download(items: List<Item>) = downloadCall { core.download(items) }
         override fun downloadCollection(item: Item) = downloadCall { core.downloadCollection(item) }
+        override fun removeDownloads(videoIds: List<String>) = downloadCall { core.removeDownloads(videoIds) }
     }
 
     // What a song's menu does, through the app.
@@ -352,22 +353,39 @@ fun App(core: Core, controller: MediaController?) {
 /** When a song couldn't play signed out: why, and a way in. Styled as the settings' choice dialogs. */
 @Composable
 fun SignInDialog(onDismiss: () -> Unit, onSignIn: () -> Unit) {
+    ConfirmDialog(
+        title = "Sign in to play songs",
+        text = "YouTube needs you signed in to play songs on this network.",
+        cancel = "Not now",
+        confirm = "Sign in",
+        onDismiss = onDismiss,
+        onConfirm = onSignIn,
+    )
+}
+
+/** A question with two answers, styled as the settings' choice dialogs. */
+@Composable
+fun ConfirmDialog(
+    title: String,
+    text: String,
+    confirm: String,
+    cancel: String = "Cancel",
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
     androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
         Column(
             Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Tonearm.raised)
                 .border(1.dp, Tonearm.line, RoundedCornerShape(16.dp))
                 .padding(20.dp),
         ) {
-            Title("Sign in to play songs", size = 18.sp, weight = FontWeight.Bold)
+            Title(title, size = 18.sp, weight = FontWeight.Bold)
             Spacer(Modifier.height(8.dp))
-            Text(
-                "YouTube needs you signed in to play songs on this network.",
-                color = Tonearm.dim, fontFamily = Tonearm.font, fontSize = 15.sp,
-            )
+            Text(text, color = Tonearm.dim, fontFamily = Tonearm.font, fontSize = 15.sp)
             Spacer(Modifier.height(20.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
-                PillButton("Not now", onClick = onDismiss)
-                PillButton("Sign in", primary = true, onClick = onSignIn)
+                PillButton(cancel, onClick = onDismiss)
+                PillButton(confirm, primary = true, onClick = onConfirm)
             }
         }
     }

@@ -75,6 +75,8 @@ interface Actions {
     fun download(items: List<Item>) {}
     /** Saves every song of an album or playlist, fetched first. */
     fun downloadCollection(item: Item) {}
+    /** Deletes these songs' downloads. */
+    fun removeDownloads(videoIds: List<String>) {}
 }
 
 /** A tap on a card or row that isn't a song in a list. */
@@ -428,14 +430,28 @@ fun PageHeader(header: Header, songs: List<Item>, actions: Actions, complete: Bo
             // Download, after save, as Spotify has it: an album's or
             // playlist's songs. A playlist still loading its rest is
             // fetched whole first.
+            // Once every song is saved, a tap offers to delete them again.
             if (!header.banner) {
                 val downloads = LocalDownloads.current
+                var removing by remember { mutableStateOf(false) }
                 HeaderDownload(songs) {
                     val ids = songs.mapNotNull { it.videoId }
                     when {
-                        ids.all { it in downloads.saved } && complete -> actions.notify("Every song here is downloaded")
+                        ids.all { it in downloads.saved } -> removing = true
                         !complete && header.playlistId != null -> actions.downloadCollection(header.asItem(saved))
                         else -> actions.download(songs)
+                    }
+                }
+                if (removing) {
+                    val count = songs.count { downloads.isSaved(it.videoId) }
+                    ConfirmDialog(
+                        title = "Remove downloads?",
+                        text = "${if (count == 1) "1 song" else "$count songs"} from ${header.title} will be deleted from this phone.",
+                        confirm = "Remove",
+                        onDismiss = { removing = false },
+                    ) {
+                        removing = false
+                        actions.removeDownloads(songs.mapNotNull { it.videoId })
                     }
                 }
             }

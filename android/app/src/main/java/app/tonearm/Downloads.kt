@@ -54,6 +54,10 @@ val LocalDownloads = compositionLocalOf { DownloadState() }
 fun rememberDownloads(core: Core, onNote: (String) -> Unit): DownloadState {
     var state by remember { mutableStateOf(DownloadState()) }
     val note by rememberUpdatedState(onNote)
+    val context = androidx.compose.ui.platform.LocalContext.current
+    // Downloads under way hold the app up, so they finish with it closed.
+    val downloading = state.busy.isNotEmpty()
+    LaunchedEffect(downloading) { if (downloading) DownloadService.start(context) }
     LaunchedEffect(core) {
         var seen = 0uL
         while (true) {
