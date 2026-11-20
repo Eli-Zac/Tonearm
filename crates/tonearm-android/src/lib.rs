@@ -10,21 +10,24 @@
 //! things stand with `playback`, a few times a second.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use tonearm_core::innertube::model::{self, Kind};
 use tonearm_core::queue::{Added, Queue, Repeat, Step};
-use tonearm_core::{audio, innertube, resolver, store, suggest};
+use tonearm_core::{audio, history, innertube, listen, offline, resolver, services, store, suggest};
 
 mod lyrics;
 mod menu;
 mod pages;
+mod playing;
 mod search;
+mod settings;
 pub use lyrics::{LyricLine, Lyrics, Syllable};
 pub use menu::{MenuAction, MenuIcon, MenuLine};
 pub use pages::{Chip, Header, Item, ItemKind, Link, Page, Shelf, ShelfLayout};
 pub use search::{SuggestedSearch, Suggestions};
+pub use settings::{Account, Choices, Connections};
 
 uniffi::setup_scaffolding!();
 
@@ -127,7 +130,9 @@ pub struct Tonearm {
     /// The last song whose radio was asked for, so it is asked once.
     topped_for: Mutex<String>,
     /// Lyrics found, by video id, so going back to a song doesn't ask again.
-    lyrics: Mutex<HashMap<String, Lyrics>>,
+    lyrics: Mutex<HashMap<String, tonearm_core::lyrics::Lyrics>>,
+    /// Lyrics machine translated, by video id and language.
+    translated: Mutex<HashMap<(String, String), Lyrics>>,
     /// Whether songs are liked, by video id, as last read or set.
     liked: Mutex<HashMap<String, bool>>,
     /// Where a seek sent the song, reported until the engine catches up.
@@ -138,6 +143,29 @@ pub struct Tonearm {
     suggest: Mutex<suggest::Cache>,
     /// Recent searches, read from disk the first time they are wanted.
     recent: Mutex<Option<Vec<String>>>,
+    /// Crossfade length in seconds, zero for off, and the levelling choice,
+    /// as saved in Settings.
+    crossfade: AtomicU32,
+    levelling: AtomicI32,
+    /// Songs' loudness as YouTube measures it, by video id. None once
+    /// asked for and not known.
+    loudness: Mutex<HashMap<String, Option<f32>>>,
+    /// The generation whose levelling gain was last sent.
+    gained: AtomicU64,
+    /// The next song, opened ahead to crossfade or follow into.
+    fade: Mutex<Option<playing::FadeNext>>,
+    fade_token: AtomicU64,
+    /// Last.fm and Spotify, and what they are told.
+    services: services::Services,
+    service_settings: Mutex<services::Settings>,
+    /// A Last.fm sign in waiting for the user to approve it.
+    lastfm_token: Mutex<String>,
+    /// How long the song playing has played, for scrobbling and history.
+    listen: Mutex<listen::Listen>,
+    /// What was played and opened, kept on the phone.
+    taste: Mutex<history::History>,
+    /// The account signed in, once asked for.
+    account: Mutex<Option<Account>>,
 }
 
 #[uniffi::export]
@@ -147,6 +175,9 @@ impl Tonearm {
     #[uniffi::constructor]
     pub fn new(home: String) -> Result<Arc<Self>, TonearmError> {
         store::set_home(home.into());
+        // The phone never beat matches, so songs need no analysis.
+        tonearm_core::analysis::set_enabled(false);
+        let service_settings = services::Settings::load();
         let resolver = resolver::default().ok_or_else(|| "no way to find song links".to_string())?;
         let tonearm = Arc::new(Tonearm {
             client: innertube::Client::new(),
@@ -166,6 +197,19 @@ impl Tonearm {
             play_hold: audio::PlayHold::default(),
             suggest: Mutex::new(suggest::Cache::default()),
             recent: Mutex::new(None),
+            translated: Mutex::new(HashMap::new()),
+            crossfade: AtomicU32::new(tonearm_core::settings::crossfade()),
+            levelling: AtomicI32::new(tonearm_core::settings::levelling()),
+            loudness: Mutex::new(HashMap::new()),
+            gained: AtomicU64::new(0),
+            fade: Mutex::new(None),
+            fade_token: AtomicU64::new(0),
+            services: services::Services::start(service_settings.clone()),
+            service_settings: Mutex::new(service_settings),
+            lastfm_token: Mutex::new(String::new()),
+            listen: Mutex::new(listen::Listen::default()),
+            taste: Mutex::new(history::History::load()),
+            account: Mutex::new(None),
         });
         // Signed in as last time, as the desktop app starts.
         if let Some(cookie) = store::load("session") {
@@ -178,14 +222,30 @@ impl Tonearm {
     /// Signs in with a YouTube Music `Cookie:` header and keeps it for next
     /// time. False when the cookie isn't a signed-in one.
     pub fn sign_in(&self, cookie: String) -> Result<bool, TonearmError> {
+        let Some(cookie) = innertube::normalize_cookie(&cookie) else {
+            return Ok(false);
+        };
         if !self.apply(&cookie) {
             return Ok(false);
         }
+        // YouTube Music has to know the account, else the cookie is no good.
+        *self.account.lock().unwrap() = None;
+        if self.account().is_none() {
+            self.client.set_cookie(None);
+            self.resolver.set_cookie(None);
+            if let Some(old) = store::load("session") {
+                self.apply(&old);
+            }
+            return Ok(false);
+        }
         store::save("session", &cookie)?;
+        self.liked.lock().unwrap().clear();
         Ok(true)
     }
 
     pub fn sign_out(&self) {
+        *self.account.lock().unwrap() = None;
+        self.liked.lock().unwrap().clear();
         store::clear("session");
         self.client.set_cookie(None);
         self.resolver.set_cookie(None);
@@ -234,42 +294,37 @@ impl Tonearm {
     /// when nobody has them. `seconds` is the song's length, which matches
     /// the right recording; zero takes it from the queue.
     pub fn lyrics(&self, video_id: String, title: String, artist: String, seconds: f32) -> Option<Lyrics> {
-        if let Some(found) = self.lyrics.lock().unwrap().get(&video_id) {
-            return Some(found.clone());
-        }
-        // The queue's own name for the song wins: the app's can still be
-        // the last song's for a moment as the next one comes on, which
-        // would find the wrong song's lyrics.
-        let queued = {
-            let queue = self.queue.lock().unwrap();
-            queue.items().iter().find(|s| s.video_id == video_id).cloned()
-        };
-        let (title, artist) = match &queued {
-            Some(song) => (song.title.clone(), song.artist.clone()),
-            None => (title, artist),
-        };
-        let seconds = if seconds > 0.0 {
-            seconds
-        } else {
-            queued.map(|s| lyrics::seconds_of(&s.duration)).unwrap_or(0.0)
-        };
-        let query = tonearm_core::lyrics::Query {
-            video_id: &video_id,
-            title: &title,
-            artist: &artist,
-            seconds,
-        };
-        let found = Lyrics::from(&tonearm_core::lyrics::fetch(&self.client, &query)?);
-        if found.lines.is_empty() {
+        let mut found = self.core_lyrics(video_id, title, artist, seconds)?;
+        // The lyrics' own translation into the language picked in Settings.
+        tonearm_core::lyrics::official_translations(&mut found.lines, translate_target());
+        Some(Lyrics::from(&found))
+    }
+
+    /// The song's lyrics with every line translated into the language
+    /// picked in Settings: their own translation where they have one, Google
+    /// Translate's for the rest, as the desktop does. None when translation
+    /// is off, or `lyrics` already had every line's. Blocks.
+    pub fn translated_lyrics(&self, video_id: String) -> Option<Lyrics> {
+        let target = translate_target();
+        if target.is_empty() {
             return None;
         }
-        let mut cache = self.lyrics.lock().unwrap();
-        // A few dozen songs is plenty to go back through.
+        let key = (video_id.clone(), target.to_string());
+        if let Some(done) = self.translated.lock().unwrap().get(&key) {
+            return Some(done.clone());
+        }
+        let mut found = self.lyrics.lock().unwrap().get(&video_id).cloned()?;
+        let missing = tonearm_core::lyrics::official_translations(&mut found.lines, target);
+        if missing.is_empty() || !tonearm_core::lyrics::translate_missing(&mut found.lines, &missing, target) {
+            return None;
+        }
+        let done = Lyrics::from(&found);
+        let mut cache = self.translated.lock().unwrap();
         if cache.len() >= 40 {
             cache.clear();
         }
-        cache.insert(video_id, found.clone());
-        Some(found)
+        cache.insert(key, done.clone());
+        Some(done)
     }
 
     // -------------------------------------------------------- moving covers
@@ -365,6 +420,9 @@ impl Tonearm {
 
     /// Plays `songs` from `index`, in place of the queue.
     pub fn set_queue(&self, songs: Vec<Song>, index: u32) -> Result<(), TonearmError> {
+        // Loading before the queue moves, so the new song is never shown at
+        // the last one's place (see `step`).
+        self.loading.store(true, Ordering::SeqCst);
         self.queue.lock().unwrap().start(songs, index as usize);
         self.changed();
         self.play_current()
@@ -602,6 +660,46 @@ impl Tonearm {
 }
 
 impl Tonearm {
+    /// The core's lyrics for a song, cached by video id.
+    fn core_lyrics(&self, video_id: String, title: String, artist: String, seconds: f32) -> Option<tonearm_core::lyrics::Lyrics> {
+        if let Some(found) = self.lyrics.lock().unwrap().get(&video_id) {
+            return Some(found.clone());
+        }
+        // The queue's own name for the song wins: the app's can still be
+        // the last song's for a moment as the next one comes on, which
+        // would find the wrong song's lyrics.
+        let queued = {
+            let queue = self.queue.lock().unwrap();
+            queue.items().iter().find(|s| s.video_id == video_id).cloned()
+        };
+        let (title, artist) = match &queued {
+            Some(song) => (song.title.clone(), song.artist.clone()),
+            None => (title, artist),
+        };
+        let seconds = if seconds > 0.0 {
+            seconds
+        } else {
+            queued.map(|s| lyrics::seconds_of(&s.duration)).unwrap_or(0.0)
+        };
+        let query = tonearm_core::lyrics::Query {
+            video_id: &video_id,
+            title: &title,
+            artist: &artist,
+            seconds,
+        };
+        let found = tonearm_core::lyrics::fetch(&self.client, &query)?;
+        if found.lines.is_empty() {
+            return None;
+        }
+        let mut cache = self.lyrics.lock().unwrap();
+        // A few dozen songs is plenty to go back through.
+        if cache.len() >= 40 {
+            cache.clear();
+        }
+        cache.insert(video_id, found.clone());
+        Some(found)
+    }
+
     /// Searches and finds links as the cookie's owner. False when it isn't
     /// a signed-in cookie.
     fn apply(&self, cookie: &str) -> bool {
@@ -689,6 +787,11 @@ impl Tonearm {
     fn step(&self, step: Step) -> Result<(), TonearmError> {
         match step {
             Step::Play(index) => {
+                // Loading first: between the queue moving on and the new
+                // stream loading, the engine still reports the last song's
+                // place, which the app would show (and run lyrics from) as
+                // the new song's.
+                self.loading.store(true, Ordering::SeqCst);
                 self.queue.lock().unwrap().go(index);
                 self.changed();
                 self.play_current()
@@ -706,6 +809,7 @@ impl Tonearm {
     /// made meanwhile wins.
     fn play_current(&self) -> Result<(), TonearmError> {
         let Some(song) = self.queue.lock().unwrap().current().cloned() else {
+            self.loading.store(false, Ordering::SeqCst);
             return Ok(());
         };
         let request = self.request.fetch_add(1, Ordering::SeqCst) + 1;
@@ -726,14 +830,17 @@ impl Tonearm {
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         // A seek held for the last song is not this one's place.
         self.seek_hold.clear();
-        self.audio.load(
-            audio::Input::Http {
+        // Any song opened ahead was for the last one.
+        self.fade.lock().unwrap().take();
+        let input = match offline::local_file(&song.video_id) {
+            Some(path) => audio::Input::File(path),
+            None => audio::Input::Http {
                 url: stream.url,
                 headers: stream.headers,
-                cache_as: None,
+                cache_as: Some(song.video_id.clone()),
             },
-            generation,
-        );
+        };
+        self.audio.load(input, generation);
         self.loading.store(false, Ordering::SeqCst);
         Ok(())
     }
@@ -765,6 +872,7 @@ fn watch(tonearm: Weak<Tonearm>) {
             loop {
                 std::thread::sleep(Duration::from_millis(250));
                 let Some(tonearm) = tonearm.upgrade() else { return };
+                tonearm.tick();
                 let status = &tonearm.audio.status;
                 let generation = status.generation.load(Ordering::SeqCst);
                 match status.state.load(Ordering::SeqCst) {
@@ -827,6 +935,31 @@ fn credit(subtitle: &str) -> String {
         .find(|p| !p.is_empty() && !labels.contains(p) && !is_duration(p) && !is_count(p))
         .unwrap_or_default()
         .to_string()
+}
+
+/// The language picked in Settings to translate lyrics into; empty for off.
+fn translate_target() -> &'static str {
+    tonearm_core::settings::TRANSLATE_CHOICES[tonearm_core::settings::translate()]
+}
+
+/// A queued song as the core's item, for the history.
+fn song_item(song: &Song) -> innertube::model::Item {
+    innertube::model::Item {
+        kind: Kind::Song,
+        title: song.title.clone(),
+        subtitle: [song.artist.as_str(), song.album.as_str()]
+            .iter()
+            .filter(|p| !p.is_empty())
+            .copied()
+            .collect::<Vec<_>>()
+            .join(" • "),
+        thumb: song.cover.clone(),
+        duration: song.duration.clone(),
+        video_id: Some(song.video_id.clone()),
+        artists: song.artists.iter().map(|a| (a.name.clone(), a.id.clone())).collect(),
+        album: song.album_id.clone().map(|id| (song.album.clone(), id)),
+        ..innertube::model::Item::default()
+    }
 }
 
 fn song(item: &innertube::model::Item) -> Option<Song> {

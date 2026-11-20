@@ -73,6 +73,11 @@ object Icons {
     const val trash = ""
     const val download = ""
     const val recent = ""
+    const val settings = "\ue270"
+    const val right = "\ue13a"
+    const val speakerHigh = "\ue44a"
+    const val connections = "\ueb5a"
+    const val sparkle = "\ue6a2"
 }
 
 @Composable

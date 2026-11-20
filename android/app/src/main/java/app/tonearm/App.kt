@@ -103,6 +103,13 @@ fun App(core: Core, controller: MediaController?) {
         }
     }
 
+    // Starting something opens Now Playing on the song itself, never on
+    // the lyrics or queue left open last time.
+    fun openForPlay() {
+        panel = Panel.Cover
+        nowPlayingOpen = true
+    }
+
     // Every play runs the core off the main thread, and says why if it fails.
     fun runPlay(call: () -> Unit) {
         scope.launch {
@@ -120,20 +127,20 @@ fun App(core: Core, controller: MediaController?) {
         }
         // A song tapped opens Now Playing; it fills in as the song loads.
         override fun playList(items: List<Item>, index: Int) {
-            nowPlayingOpen = true
+            openForPlay()
             runPlay { core.playList(items, index.toUInt()) }
         }
         override fun playRadio(item: Item) {
-            nowPlayingOpen = true
+            openForPlay()
             runPlay { core.playRadio(item) }
         }
         // Anything starting to play opens Now Playing too.
         override fun playItem(item: Item) {
-            nowPlayingOpen = true
+            openForPlay()
             runPlay { core.playItem(item) }
         }
         override fun playWatch(item: Item) {
-            nowPlayingOpen = true
+            openForPlay()
             runPlay { core.playWatch(item) }
         }
         override fun menu(item: Item) {
@@ -157,7 +164,7 @@ fun App(core: Core, controller: MediaController?) {
             }
         }
         override fun play(call: () -> Unit) {
-            nowPlayingOpen = true
+            openForPlay()
             runPlay(call)
         }
         override fun open(id: String, title: String) {
@@ -184,7 +191,14 @@ fun App(core: Core, controller: MediaController?) {
         Column(Modifier.fillMaxSize()) {
             Box(Modifier.weight(1f)) {
                 val top = stack.lastOrNull()
-                if (top != null) {
+                if (top != null && SettingsPages.isSettings(top.id)) {
+                    SettingsScreen(
+                        top.id, core,
+                        onOpen = { stack.add(Route(it, null, "")) },
+                        onBack = { if (stack.isNotEmpty()) stack.removeAt(stack.lastIndex) },
+                        onToast = { toast = it },
+                    )
+                } else if (top != null) {
                     // Pages run up under the status bar, so an artist's
                     // banner reaches the top edge.
                     PageScreen(top, core, actions, libraryEpoch) { stack.removeAt(stack.lastIndex) }
@@ -193,7 +207,7 @@ fun App(core: Core, controller: MediaController?) {
                         // Home runs up under the status bar, so its glows
                         // reach the top edge rather than stopping short.
                         Tab.Home -> Box {
-                            HomeScreen(core, actions)
+                            HomeScreen(core, actions) { stack.add(Route(SettingsPages.root, null, "Settings")) }
                             StatusFade()
                         }
                         Tab.Search -> Box(Modifier.statusBarsPadding()) { SearchScreen(core, actions) }
@@ -302,7 +316,7 @@ fun Toast(text: String, modifier: Modifier = Modifier) {
 // ------------------------------------------------------------------- tabs
 
 @Composable
-fun HomeScreen(core: Core, actions: Actions) {
+fun HomeScreen(core: Core, actions: Actions, onSettings: () -> Unit) {
     // A mood chip shows Home again, picked for that mood.
     var chip by remember { mutableStateOf<Pair<String, String?>?>(null) }
     PageView(
@@ -317,8 +331,19 @@ fun HomeScreen(core: Core, actions: Actions) {
         top = { page ->
             // Under the status bar: the glows start there, the words below it.
             Column(Modifier.homeGlow(WindowInsets.statusBars.getTop(LocalDensity.current).toFloat()).statusBarsPadding()) {
-                Title("Home", size = 28.sp, weight = FontWeight.ExtraBold,
-                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 10.dp))
+                // Settings beside the title, as the desktop's menu has it.
+                Row(
+                    Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 14.dp, bottom = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Title("Home", size = 28.sp, weight = FontWeight.ExtraBold, modifier = Modifier.weight(1f))
+                    Box(
+                        Modifier.size(44.dp).clip(RoundedCornerShape(22.dp)).clickable(onClick = onSettings),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(Icons.settings, size = 24.sp, color = Tonearm.text)
+                    }
+                }
                 if (page.chips.isNotEmpty()) {
                     LazyRow(
                         contentPadding = PaddingValues(horizontal = 16.dp),

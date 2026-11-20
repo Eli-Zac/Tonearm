@@ -230,6 +230,19 @@ impl<T> Queue<T> {
         }
     }
 
+    /// The place of the song the playing one runs into at its end, when
+    /// that can be a crossfade or a gapless start: never under repeat one,
+    /// where the song plays again, nor into itself.
+    pub fn follows(&self) -> Option<usize> {
+        if self.repeat == Repeat::One {
+            return None;
+        }
+        match self.next() {
+            Step::Play(next) if next != self.index => Some(next),
+            _ => None,
+        }
+    }
+
     /// The song playing has run out.
     pub fn ended(&self) -> Step {
         if self.repeat == Repeat::One && self.current().is_some() {

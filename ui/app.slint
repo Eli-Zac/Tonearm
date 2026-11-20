@@ -228,6 +228,8 @@ export struct SyllableData {
     start: int,
     end: int,
     space: bool,
+    // When the word it is part of starts, which a click on it plays from.
+    word-start: int,
 }
 
 export struct LyricRow {
@@ -4364,6 +4366,26 @@ component SyllableView inherits Rectangle {
     }
 }
 
+// Where a syllable sits, as SyllableView lays it out, to be clicked. Draws
+// nothing.
+component SyllableHit inherits Rectangle {
+    in property <SyllableData> syllable;
+    in property <length> font-size: 24px;
+    callback clicked;
+    width: measure.preferred-width + (syllable.space ? root.font-size * 0.3 : 0px);
+    measure := Text {
+        text: syllable.text;
+        color: transparent;
+        font-size: root.font-size;
+        font-family: "Figtree";
+        font-weight: 700;
+    }
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
 // A line of text that can be drawn out of focus. Slint cannot blur, so Rust
 // draws the line blurred, a little (`soft`) and a lot (`softer`), and the
 // images are faded over the text by `level`: 0 sharp, 1 soft, 2 softer.
@@ -8269,6 +8291,21 @@ export component AppWindow inherits Window {
                     y: -lyric-row.shift;
                     mouse-cursor: pointer;
                     clicked => { root.lyrics-seek(row.start); }
+                }
+                // Over the line, a click on a word plays from that word. Laid
+                // out as the sung line's words are, so each lands on its word
+                // whether the line is drawn word by word or blurred whole.
+                if row.kind == 0 && root.lyrics-synced && row.syllables.length > 0: HorizontalLayout {
+                    y: -lyric-row.shift;
+                    height: parent.height;
+                    alignment: lyric-row.lay;
+                    padding-left: 20px;
+                    padding-right: 20px;
+                    for syllable in row.syllables: SyllableHit {
+                        syllable: syllable;
+                        font-size: root.lyrics-font * lyric-row.grow;
+                        clicked => { root.lyrics-seek(syllable.word-start); }
+                    }
                 }
             }
             if root.lyrics-state == 2: Text {

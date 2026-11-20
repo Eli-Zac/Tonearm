@@ -21,6 +21,11 @@ mod motion;
 mod update;
 mod wheel;
 
+use tonearm_core::settings::{
+    cover_choices as load_cover_choices, crossfade as load_crossfade, levelling as load_levelling,
+    translate as load_translate, CROSSFADE_CHOICES, PANEL_ANIMATED, PANEL_CANVAS, TRANSLATE_CHOICES,
+    WIDE_ANIMATED,
+};
 use tonearm_core::{
     analysis, animated_art, audio, cast, decode, history, home, innertube, library, lyrics, mix,
     offline, pool, quick_access, releases, resolver, services, session, spotify, spotify_token,
@@ -253,17 +258,6 @@ struct LyricsState {
     translated_to: &'static str,
 }
 
-/// How much of the current track has really played. Drives scrobbling.
-#[derive(Default)]
-struct Listen {
-    generation: u64,
-    played: Duration,
-    last: Option<Instant>,
-    scrobbled: bool,
-    /// Whether this play has counted as a listen in the history yet.
-    counted: bool,
-    was_playing: bool,
-}
 
 /// A song opened ahead so the playing one can crossfade into it.
 struct FadeNext {
@@ -289,21 +283,9 @@ struct Planned {
     plan: mix::Transition,
 }
 
-/// Volume levelling choices in Settings: the loudness each aims for, in
-/// LKFS, and how far it may lift a quiet song, in dB. Off is first.
-const LEVELLING: [(f32, f32); 4] = [(0.0, 0.0), (-19.0, 0.0), (-14.0, 0.0), (-11.0, 4.0)];
-
-/// The volume levelling choice saved in Settings. Normal when none is.
 /// Whether closing the window keeps Tonearm playing in the tray.
 fn load_close_to_tray() -> bool {
     store::load("close-to-tray").map_or(true, |text| text.trim() != "0")
-}
-
-fn load_levelling() -> i32 {
-    store::load("levelling")
-        .and_then(|text| text.trim().parse().ok())
-        .filter(|choice: &i32| (0..LEVELLING.len() as i32).contains(choice))
-        .unwrap_or(2)
 }
 
 /// Sleep timer choices, in minutes, after Off. The last is the end of
@@ -327,8 +309,6 @@ const SMART_EVERY: usize = 3;
 /// And no more than this many at a time.
 const SMART_MOST: usize = 12;
 
-/// Crossfade lengths offered in Settings, in seconds. Zero is off.
-const CROSSFADE_CHOICES: [u32; 9] = [0, 1, 2, 3, 4, 6, 8, 10, 12];
 /// How long before the fade the next song starts opening. Its link and
 /// first bytes can take a while to come.
 const PREPARE_AHEAD: f32 = 30.0;
@@ -364,28 +344,6 @@ const SYNC_SOON: Duration = Duration::from_secs(2);
 /// How long mixes last in a playlist's mix mode when crossfade is off.
 const MIX_MODE_SECONDS: f32 = 8.0;
 
-/// The crossfade length saved in Settings. Off when none is saved.
-fn load_crossfade() -> u32 {
-    store::load("crossfade")
-        .and_then(|text| text.trim().parse().ok())
-        .filter(|seconds| CROSSFADE_CHOICES.contains(seconds))
-        .unwrap_or(0)
-}
-
-/// Languages lyrics can be translated into in Settings, as the tag Google
-/// Translate takes. The first, empty, is off. Names match the dropdown.
-const TRANSLATE_CHOICES: [&str; 13] = [
-    "", "en", "es", "fr", "de", "it", "pt", "ru", "ja", "ko", "zh-CN", "zh-TW", "id",
-];
-
-/// The language saved in Settings to translate lyrics into, as an index
-/// into `TRANSLATE_CHOICES`. Off when none is saved.
-fn load_translate() -> usize {
-    store::load("translate")
-        .and_then(|tag| TRANSLATE_CHOICES.iter().position(|&t| t == tag.trim()))
-        .unwrap_or(0)
-}
-
 struct Cover {
     generation: u64,
     frames: Vec<motion::Frame>,
@@ -403,22 +361,6 @@ struct Motion {
     panel: bool,
     /// Shows in expanded Now playing.
     wide: bool,
-}
-
-/// What the Now playing panel shows for the cover, as chosen in Settings.
-const PANEL_CANVAS: i32 = 0;
-const PANEL_ANIMATED: i32 = 1;
-/// What expanded Now playing shows for the cover.
-const WIDE_ANIMATED: i32 = 0;
-
-/// The cover choices in Settings, for the panel and the expanded view.
-/// The moving album cover in both when none are saved.
-fn load_cover_choices() -> (i32, i32) {
-    let text = store::load("cover-choices").unwrap_or_default();
-    let mut parts = text.trim().split(',').map(|p| p.parse::<i32>().ok());
-    let panel = parts.next().flatten().filter(|c| (0..3).contains(c)).unwrap_or(PANEL_ANIMATED);
-    let wide = parts.next().flatten().filter(|c| (0..2).contains(c)).unwrap_or(WIDE_ANIMATED);
-    (panel, wide)
 }
 
 /// The song going out during a crossfade. Its moving cover or Canvas keeps
@@ -565,7 +507,7 @@ struct App {
     services: services::Services,
     settings: RefCell<services::Settings>,
     lastfm_token: RefCell<String>,
-    listen: RefCell<Listen>,
+    listen: RefCell<tonearm_core::listen::Listen>,
     toast_timer: Timer,
     /// What the toast's button does, while it shows one.
     toast_action: RefCell<Option<Box<dyn Fn(&Rc<App>)>>>,
@@ -659,15 +601,7 @@ fn credits(item: &Item) -> (String, f32) {
 /// artist on its own, so a duo like "Simon & Garfunkel" stays whole. With
 /// no links, the credit line is cut at the first ", " or " & ".
 fn lead_artist(item: &Item, artist: &str) -> String {
-    if let Some((name, _)) = item.artists.iter().find(|(name, _)| !name.trim().is_empty()) {
-        return name.trim().to_string();
-    }
-    let cut = [", ", " & "]
-        .iter()
-        .filter_map(|sep| artist.find(sep))
-        .min()
-        .unwrap_or(artist.len());
-    artist[..cut].trim().to_string()
+    tonearm_core::listen::lead_artist(&item.artists, artist)
 }
 
 /// As `credits`, with the album in the middle. The album is empty when the
@@ -3360,10 +3294,10 @@ impl App {
     // ------------------------------------------------------ levelling
 
     fn set_levelling(&self, choice: i32) {
-        let choice = choice.clamp(0, LEVELLING.len() as i32 - 1);
+        let choice = choice.clamp(0, tonearm_core::settings::LEVELLING.len() as i32 - 1);
         self.levelling.set(choice);
         self.disk.run(move || {
-            let _ = store::save("levelling", &choice.to_string());
+            tonearm_core::settings::set_levelling(choice);
         });
         let generation = self.player.borrow().generation;
         self.apply_gain(generation);
@@ -3372,15 +3306,8 @@ impl App {
     /// The gain that brings `video_id` to the chosen loudness. One while
     /// levelling is off or its loudness is not known yet.
     fn gain_for(&self, video_id: &str) -> f32 {
-        let choice = self.levelling.get();
-        let Some(&(target, lift)) = LEVELLING.get(choice as usize).filter(|_| choice > 0) else {
-            return 1.0;
-        };
-        let Some(lkfs) = self.loudness.borrow().get(video_id).copied() else {
-            return 1.0;
-        };
-        let db = (target - lkfs).clamp(-20.0, lift);
-        10f32.powf(db / 20.0)
+        let lkfs = self.loudness.borrow().get(video_id).copied();
+        tonearm_core::settings::levelling_gain(self.levelling.get(), lkfs)
     }
 
     /// Sends the playing song's levelling gain to the engine, and looks its
@@ -3432,7 +3359,7 @@ impl App {
             .unwrap_or(0);
         self.crossfade.set(seconds);
         self.disk.run(move || {
-            let _ = store::save("crossfade", &seconds.to_string());
+            tonearm_core::settings::set_crossfade_choice(choice);
         });
         self.forget_plan();
     }
@@ -4025,7 +3952,7 @@ impl App {
         }
         self.cover_choices.set(choices);
         self.disk.run(move || {
-            let _ = store::save("cover-choices", &format!("{},{}", choices.0, choices.1));
+            tonearm_core::settings::save_cover_choices(choices);
         });
         self.stop_canvas();
         let (title, artist, generation) = {
@@ -4247,9 +4174,8 @@ impl App {
     fn set_translate_choice(&self, choice: i32) {
         let index = (choice.max(0) as usize).min(TRANSLATE_CHOICES.len() - 1);
         self.translate.set(index);
-        let tag = TRANSLATE_CHOICES[index];
         self.disk.run(move || {
-            let _ = store::save("translate", tag);
+            tonearm_core::settings::set_translate(index as i32);
         });
         self.translate_lyrics();
     }
@@ -4269,40 +4195,19 @@ impl App {
             state.translated_to = target;
             (state.generation, found)
         };
-        if target.is_empty() {
-            for line in &mut found.lines {
-                line.translation.clear();
-            }
-            self.show_lyrics(generation, Some(found));
-            return;
-        }
         // Lines with a translation of their own in the language use it. Any
         // older translation goes while the rest come.
-        let mut missing: Vec<usize> = Vec::new();
-        for (index, line) in found.lines.iter_mut().enumerate() {
-            let official = line
-                .official
-                .iter()
-                .find(|(lang, _)| lyrics::same_language(lang, target))
-                .map(|(_, text)| text.clone());
-            line.translation = match official {
-                Some(text) if text != line.text => text,
-                Some(_) => String::new(),
-                None => {
-                    missing.push(index);
-                    String::new()
-                }
-            };
-        }
+        let missing = lyrics::official_translations(&mut found.lines, target);
         self.show_lyrics(generation, Some(found.clone()));
-        if missing.is_empty() {
+        if target.is_empty() || missing.is_empty() {
             return;
         }
-        let texts: Vec<String> = missing.iter().map(|&i| found.lines[i].text.clone()).collect();
         std::thread::spawn(move || {
-            let Some(translated) = lyrics::translate(&texts, target) else {
+            let mut lines = found.lines;
+            if !lyrics::translate_missing(&mut lines, &missing, target) {
                 return;
-            };
+            }
+            let translated: Vec<String> = missing.iter().map(|&i| lines[i].translation.clone()).collect();
             on_ui(move |app| {
                 let found = {
                     let state = app.lyrics.borrow();
@@ -4376,14 +4281,23 @@ impl App {
                 // No space after a row's last word, so it lines up with the
                 // rows' edge as the rest do.
                 let last = syllables.len().saturating_sub(1);
+                // A word runs from a syllable after a space to the next one
+                // ending in a space.
+                let mut word_start = syllables.first().map_or(0, |s| s.start as i32);
                 let data: Vec<SyllableData> = syllables
                     .iter()
                     .enumerate()
-                    .map(|(n, s)| SyllableData {
-                        text: s.text.trim_end().into(),
-                        start: s.start as i32,
-                        end: s.end as i32,
-                        space: s.text.ends_with(' ') && n < last,
+                    .map(|(n, s)| {
+                        if n > 0 && syllables[n - 1].text.ends_with(' ') {
+                            word_start = s.start as i32;
+                        }
+                        SyllableData {
+                            text: s.text.trim_end().into(),
+                            start: s.start as i32,
+                            end: s.end as i32,
+                            space: s.text.ends_with(' ') && n < last,
+                            word_start,
+                        }
                     })
                     .collect();
                 ModelRc::new(VecModel::from(data))
@@ -4831,79 +4745,56 @@ impl App {
     /// it has played for half its length or four minutes, as Last.fm asks.
     fn track_listening(self: &Rc<Self>, generation: u64, playing: bool, duration: f32) {
         use services::Event;
-        let mut listen = self.listen.borrow_mut();
-        let now = Instant::now();
-        if listen.generation != generation {
-            if !playing {
-                return;
-            }
-            // It plays, so a later failure deserves a retry again.
-            self.retried.borrow_mut().take();
-            *listen = Listen {
-                generation,
-                was_playing: true,
-                last: Some(now),
-                ..Listen::default()
-            };
-            let player = self.player.borrow();
-            if let Some(item) = player.queue.get(player.index) {
-                self.remember(item, 0.25);
-                let (artist, album, seconds) = credits_with_album(item);
-                let seconds = if duration > 0.0 { duration } else { seconds };
-                let lead_artist = lead_artist(item, &artist);
-                self.services.send(Event::Started(services::Track {
-                    title: item.title.clone(),
-                    lead_artist,
-                    artist,
-                    album,
-                    seconds,
-                    art: item.thumb.clone(),
-                }));
-            }
-            return;
-        }
-        if playing {
-            if let Some(last) = listen.last {
-                listen.played += now.duration_since(last).min(Duration::from_secs(1));
-            }
-            let needed = (duration / 2.0).min(240.0);
-            if !listen.scrobbled && duration > 30.0 && listen.played.as_secs_f32() >= needed {
-                listen.scrobbled = true;
-                self.services.send(Event::Scrobble);
-            }
-            // Half a minute in, or half of a short song, a play counts as a
-            // listen. Skips only leave the small mark from the start.
-            if !listen.counted && listen.played.as_secs_f32() >= needed.min(30.0).max(5.0) {
-                listen.counted = true;
-                let item = {
+        use tonearm_core::listen::Moment;
+        let moments = self.listen.borrow_mut().tick(generation, playing, duration);
+        for moment in moments {
+            match moment {
+                Moment::Started => {
+                    // It plays, so a later failure deserves a retry again.
+                    self.retried.borrow_mut().take();
                     let player = self.player.borrow();
-                    player.queue.get(player.index).cloned()
-                };
-                if let Some(item) = item {
-                    self.remember(&item, 0.75);
-                    // And in the account's YouTube Music history, as a play
-                    // in YouTube Music's own player would be.
-                    if let Some(video_id) = item.video_id.clone().filter(|_| self.client.signed_in()) {
-                        let client = self.client.clone();
-                        self.api.run(move || {
-                            if let Err(message) = client.add_to_history(&video_id) {
-                                eprintln!("history: {message}");
-                            }
-                        });
+                    if let Some(item) = player.queue.get(player.index) {
+                        self.remember(item, 0.25);
+                        let (artist, album, seconds) = credits_with_album(item);
+                        let seconds = if duration > 0.0 { duration } else { seconds };
+                        let lead_artist = lead_artist(item, &artist);
+                        self.services.send(Event::Started(services::Track {
+                            title: item.title.clone(),
+                            lead_artist,
+                            artist,
+                            album,
+                            seconds,
+                            art: item.thumb.clone(),
+                        }));
                     }
+                }
+                Moment::Scrobble => self.services.send(Event::Scrobble),
+                Moment::Counted => {
+                    let item = {
+                        let player = self.player.borrow();
+                        player.queue.get(player.index).cloned()
+                    };
+                    if let Some(item) = item {
+                        self.remember(&item, 0.75);
+                        // And in the account's YouTube Music history, as a
+                        // play in YouTube Music's own player would be.
+                        if let Some(video_id) = item.video_id.clone().filter(|_| self.client.signed_in()) {
+                            let client = self.client.clone();
+                            self.api.run(move || {
+                                if let Err(message) = client.add_to_history(&video_id) {
+                                    eprintln!("history: {message}");
+                                }
+                            });
+                        }
+                    }
+                }
+                Moment::Paused => self.services.send(Event::Paused),
+                Moment::Resumed => {
+                    let position = self.audio.status.position_ms.load(Ordering::SeqCst) as f32 / 1000.0;
+                    self.services.send(Event::Resumed { position });
                 }
             }
         }
-        if playing != listen.was_playing {
-            listen.was_playing = playing;
-            let position = self.audio.status.position_ms.load(Ordering::SeqCst) as f32 / 1000.0;
-            self.services.send(if playing {
-                Event::Resumed { position }
-            } else {
-                Event::Paused
-            });
-        }
-        listen.last = playing.then_some(now);
     }
 
     // ------------------------------------------------------------ services

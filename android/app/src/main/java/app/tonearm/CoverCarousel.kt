@@ -214,9 +214,13 @@ private fun CoverFace(song: CoverSong, core: Core, moving: Boolean, modifier: Mo
             contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize(),
         )
+        // Settings > Customization can keep the still cover.
         if (moving) {
-            val clip by produceState<String?>(null, song.id) {
-                value = withContext(Dispatchers.IO) { runCatching { core.animatedCover(song.id) }.getOrNull() }
+            val clip by produceState<String?>(null, song.id, Prefs.version) {
+                value = withContext(Dispatchers.IO) {
+                    if (!core.animatedCovers()) null
+                    else runCatching { core.animatedCover(song.id) }.getOrNull()
+                }
             }
             clip?.let { MotionCover(it, Modifier.fillMaxSize()) }
         }

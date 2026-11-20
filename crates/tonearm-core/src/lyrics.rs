@@ -313,6 +313,53 @@ pub fn same_language(a: &str, b: &str) -> bool {
     a.split('-').next() == b.split('-').next()
 }
 
+/// Puts each line's own translation into `target` under it, as both apps
+/// show them: the lyrics' official translation in that language when they
+/// have one, and nothing where it is the line itself. Gives the lines that
+/// have none, for `translate` to fill. An empty `target` takes every
+/// translation away.
+pub fn official_translations(lines: &mut [Line], target: &str) -> Vec<usize> {
+    let mut missing = Vec::new();
+    for (index, line) in lines.iter_mut().enumerate() {
+        if target.is_empty() {
+            line.translation.clear();
+            continue;
+        }
+        let official = line
+            .official
+            .iter()
+            .find(|(lang, _)| same_language(lang, target))
+            .map(|(_, text)| text.clone());
+        line.translation = match official {
+            Some(text) if text != line.text => text,
+            Some(_) => String::new(),
+            None => {
+                missing.push(index);
+                String::new()
+            }
+        };
+    }
+    missing
+}
+
+/// Fills the lines `missing` (from `official_translations`) with machine
+/// translations into `target`. False when none could be had. Blocks.
+pub fn translate_missing(lines: &mut [Line], missing: &[usize], target: &str) -> bool {
+    let texts: Vec<String> = missing.iter().filter_map(|&i| lines.get(i)).map(|l| l.text.clone()).collect();
+    if texts.is_empty() {
+        return false;
+    }
+    let Some(translated) = translate(&texts, target) else {
+        return false;
+    };
+    for (&index, text) in missing.iter().zip(translated) {
+        if let Some(line) = lines.get_mut(index) {
+            line.translation = text;
+        }
+    }
+    true
+}
+
 /// Machine translations of `lines` into the language `target`, one per
 /// line, from the Google Translate endpoint Chrome's translate extension
 /// uses. (The better known `translate_a/single?client=gtx` one turns a

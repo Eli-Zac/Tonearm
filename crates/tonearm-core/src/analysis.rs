@@ -334,8 +334,16 @@ fn worker() -> std::sync::MutexGuard<'static, Worker> {
         .unwrap_or_else(|e| e.into_inner())
 }
 
+/// Whether songs are analyzed at all. An app that never beat matches (the
+/// phone's) turns it off, to spare the battery.
+static ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_enabled(on: bool) {
+    ENABLED.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 fn queue(video_id: &str, audio: impl FnOnce() -> Option<Audio>) {
-    if crate::library::has_analysis(video_id) {
+    if !ENABLED.load(std::sync::atomic::Ordering::Relaxed) || crate::library::has_analysis(video_id) {
         return;
     }
     let mut worker = worker();

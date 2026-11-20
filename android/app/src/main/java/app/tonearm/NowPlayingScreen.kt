@@ -81,16 +81,27 @@ fun NowPlayingScreen(
     // when the button is pressed. The core keeps those found.
     val title = now.meta?.title?.toString() ?: ""
     val artist = now.meta?.artist?.toString() ?: ""
-    val lyrics by produceState<LyricsState>(LyricsState.Loading, now.id) {
-        value = LyricsState.Loading
+    var shownLyricsFor by remember { mutableStateOf<String?>(null) }
+    // Looked up again when Settings change the translation. The lyrics'
+    // own translation comes with them; Google Translate's for the rest of
+    // the lines follows when it has come, as on the desktop.
+    val lyrics by produceState<LyricsState>(LyricsState.Loading, now.id, Prefs.version) {
         val id = now.id
+        val shown = value
+        // Same song, a new translation: the lines stay up meanwhile.
+        if (shown !is LyricsState.Found || shownLyricsFor != id) value = LyricsState.Loading
         val found = if (id == null) null else withContext(Dispatchers.IO) {
             runCatching { core.lyrics(id, title, artist, 0f) }.getOrNull()
         }
+        shownLyricsFor = id
         value = found?.let { LyricsState.Found(it) } ?: LyricsState.None
+        if (found != null && id != null) {
+            withContext(Dispatchers.IO) { runCatching { core.translatedLyrics(id) }.getOrNull() }
+                ?.let { value = LyricsState.Found(it) }
+        }
     }
     // The time into the song, every frame, for the lyrics.
-    val time = rememberSongTime(controller, now.playing)
+    val time = rememberSongTime(controller, now.playing, now.id ?: "")
     var dragged by remember { mutableFloatStateOf(0f) }
     Box(
         Modifier
@@ -227,7 +238,7 @@ private fun LyricsSkeleton(height: androidx.compose.ui.unit.Dp) {
  *  will be. The pulse runs in the draw phase only, so it costs no
  *  recomposition. */
 @Composable
-private fun TextSkeleton(width: Float, height: androidx.compose.ui.unit.Dp) {
+internal fun TextSkeleton(width: Float, height: androidx.compose.ui.unit.Dp) {
     val pulse = rememberInfiniteTransition(label = "skeleton")
     val alpha by pulse.animateFloat(
         initialValue = 0.06f,

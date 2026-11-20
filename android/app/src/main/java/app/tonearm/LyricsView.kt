@@ -118,14 +118,29 @@ private fun lineAt(lyrics: Lyrics, t: Long): Int {
  * over; a seek jumps.
  */
 @Composable
-fun rememberSongTime(controller: MediaController, playing: Boolean): LongState {
+fun rememberSongTime(controller: MediaController, playing: Boolean, song: String): LongState {
     val time = remember { mutableLongStateOf(controller.currentPosition) }
+    // A new song starts from the top. For a moment its readings can still
+    // be the last song's place, so those are passed over until one from
+    // near the start comes, or a couple of seconds go by (a song resumed
+    // part way through).
+    var fresh by remember { mutableStateOf<Pair<String, Long>?>(null) }
+    var seen by remember { mutableStateOf(song) }
+    if (seen != song) {
+        seen = song
+        fresh = song to System.nanoTime()
+        time.longValue = 0
+    }
     LaunchedEffect(controller, playing) {
         var raw = controller.currentPosition
         var stamp = -1L
         while (true) {
             withFrameNanos { frame ->
-                val reading = controller.currentPosition
+                var reading = controller.currentPosition
+                fresh?.let { (_, since) ->
+                    val waited = (System.nanoTime() - since) / 1_000_000
+                    if (reading < 1500 || waited > 2500) fresh = null else reading = 0
+                }
                 if (reading != raw || stamp < 0) {
                     raw = reading
                     stamp = frame
@@ -150,13 +165,28 @@ fun rememberSongTime(controller: MediaController, playing: Boolean): LongState {
 @Composable
 fun LyricsPane(state: LyricsState, controller: MediaController, time: LongState, modifier: Modifier = Modifier) {
     when (state) {
-        LyricsState.Loading -> Loading(modifier)
+        LyricsState.Loading -> LyricsSkeletonLines(modifier)
         LyricsState.None -> Box(modifier, contentAlignment = Alignment.Center) {
             Dim("No lyrics for this track", 16.sp)
         }
         is LyricsState.Found ->
             if (state.lyrics.synced) SyncedLyrics(state.lyrics, controller, time, modifier)
             else PlainLyrics(state.lyrics, modifier)
+    }
+}
+
+/** While the lyrics are looked for: faint pulsing bars where the lines
+ *  will be, starting where the sung line sits, the size of a line each. */
+@Composable
+private fun LyricsSkeletonLines(modifier: Modifier) {
+    BoxWithConstraints(modifier.fadeEdges()) {
+        Column(Modifier.fillMaxWidth().padding(top = maxHeight * 0.2f)) {
+            listOf(0.82f, 0.64f, 0.9f, 0.56f, 0.74f, 0.86f, 0.5f, 0.7f).forEach { width ->
+                Box(Modifier.padding(vertical = 9.dp + 4.dp)) {
+                    TextSkeleton(width, 26.dp)
+                }
+            }
+        }
     }
 }
 
@@ -307,8 +337,10 @@ private fun SyncedLyrics(lyrics: Lyrics, controller: MediaController, time: Long
                         free = free,
                         time = time,
                         modifier = ripple,
-                    ) {
-                        controller.seekTo(row.text.start.toLong())
+                    ) { at ->
+                        // A word tapped plays from that word, anywhere else
+                        // on the line from the line's start.
+                        controller.seekTo(at)
                         free = false
                     }
                 }
@@ -342,7 +374,7 @@ private fun Line(
     free: Boolean,
     time: LongState,
     modifier: Modifier,
-    onTap: () -> Unit,
+    onTap: (Long) -> Unit,
 ) {
     // Lines fade with distance from the one being sung.
     val fade by animateFloatAsState(
@@ -374,7 +406,7 @@ private fun Line(
     Column(
         modifier
             .fillMaxWidth()
-            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onTap)
+            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { onTap(line.start.toLong()) }
             .padding(vertical = 9.dp),
         horizontalAlignment = horizontal,
     ) {
@@ -392,7 +424,7 @@ private fun Line(
                 .blur(blurOf(blur), BlurredEdgeTreatment.Unbounded),
         ) {
             if (line.syllables.isNotEmpty()) {
-                Words(line.syllables, align, lineFont, active, time)
+                Words(line.syllables, align, lineFont, active, time, onTap)
             } else {
                 Text(line.text, style = lyricStyle(lineFont, align), modifier = Modifier.fillMaxWidth())
             }
@@ -412,7 +444,7 @@ private fun Line(
             ) {
                 Box(Modifier.padding(top = 4.dp).graphicsLayer { alpha = 0.85f }) {
                     if (line.background.isNotEmpty()) {
-                        Words(line.background, align, lineFont * 0.6f, active, time)
+                        Words(line.background, align, lineFont * 0.6f, active, time, onTap)
                     } else {
                         Text(line.backgroundText, style = lyricStyle(lineFont * 0.6f, align), modifier = Modifier.fillMaxWidth())
                     }
@@ -446,7 +478,14 @@ private fun lyricStyle(size: TextUnit, align: Int, color: Color = Color.White) =
  *  rows, each filling left to right as it is sung. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun Words(syllables: List<Syllable>, align: Int, size: TextUnit, active: Boolean, time: LongState) {
+private fun Words(
+    syllables: List<Syllable>,
+    align: Int,
+    size: TextUnit,
+    active: Boolean,
+    time: LongState,
+    onWord: ((Long) -> Unit)? = null,
+) {
     val words = remember(syllables) {
         val words = mutableListOf<MutableList<Syllable>>(mutableListOf())
         for (syllable in syllables) {
@@ -465,7 +504,13 @@ private fun Words(syllables: List<Syllable>, align: Int, size: TextUnit, active:
         },
     ) {
         for (word in words) {
-            Row {
+            // A tap on a word plays from where it is sung.
+            val tap = onWord?.let { seek ->
+                Modifier.clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {
+                    seek(word.first().start.toLong())
+                }
+            } ?: Modifier
+            Row(tap) {
                 for (syllable in word) SyllableText(syllable, size, active, time)
             }
         }

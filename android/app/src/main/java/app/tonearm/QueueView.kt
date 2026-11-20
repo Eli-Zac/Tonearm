@@ -196,7 +196,10 @@ fun QueuePane(core: Core, onMenu: (Song) -> Unit, modifier: Modifier = Modifier)
                         // The row picked up leaves a gap; its raised copy
                         // is drawn over the list.
                         modifier = Modifier.graphicsLayer {
-                            translationY = shift
+                            // Off at once when the drag ends: the animated
+                            // value lags a frame behind, which drew the
+                            // rows a row out of place over the new order.
+                            translationY = if (from < 0) 0f else shift
                             alpha = if (lifted) 0f else 1f
                         },
                         onClick = {
