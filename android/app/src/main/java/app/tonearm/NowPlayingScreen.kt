@@ -48,6 +48,7 @@ import androidx.media3.session.MediaController
 import coil3.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uniffi.tonearm_android.Item
 import uniffi.tonearm_android.Tonearm as Core
@@ -104,17 +105,43 @@ fun NowPlayingScreen(
     }
     // The time into the song, every frame, for the lyrics.
     val time = rememberSongTime(controller, now.playing, now.id ?: "")
-    var dragged by remember { mutableFloatStateOf(0f) }
+    // Swiped down, the screen follows the finger. Let go past a quarter of
+    // the way, or with a downward flick, it slides the rest of the way off;
+    // otherwise it springs back.
+    val pulled = remember { Animatable(0f) }
+    val scope = rememberCoroutineScope()
+    var height by remember { mutableIntStateOf(0) }
+    val flick = with(LocalDensity.current) { 1000.dp.toPx() }
     Box(
         Modifier
             .fillMaxSize()
-            .background(Tonearm.bg)
+            .onSizeChanged { height = it.height }
+            // Before the layer moves, so the finger is measured on the
+            // screen, not on the sliding page.
             .pointerInput(Unit) {
+                val tracker = androidx.compose.ui.input.pointer.util.VelocityTracker()
+                val settle = {
+                    val speed = tracker.calculateVelocity().y
+                    tracker.resetTracking()
+                    scope.launch {
+                        if (pulled.value > height / 4f || speed > flick) {
+                            pulled.animateTo(height.toFloat(), tween(220, easing = FastOutSlowInEasing), speed)
+                            onClose()
+                        } else {
+                            pulled.animateTo(0f, spring(stiffness = 600f), speed)
+                        }
+                    }
+                }
                 detectVerticalDragGestures(
-                    onDragEnd = { if (dragged > 200f) onClose(); dragged = 0f },
-                    onDragCancel = { dragged = 0f },
-                ) { _, amount -> dragged = (dragged + amount).coerceAtLeast(0f) }
-            },
+                    onDragEnd = { settle() },
+                    onDragCancel = { settle() },
+                ) { change, amount ->
+                    tracker.addPosition(change.uptimeMillis, change.position)
+                    scope.launch { pulled.snapTo((pulled.value + amount).coerceAtLeast(0f)) }
+                }
+            }
+            .graphicsLayer { translationY = pulled.value }
+            .background(Tonearm.bg),
     ) {
         // The desktop's expanded Now playing background, flowing.
         FlowingBackdrop(cover, Modifier.fillMaxSize())
