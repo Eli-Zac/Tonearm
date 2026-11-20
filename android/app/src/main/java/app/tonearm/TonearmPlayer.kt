@@ -50,8 +50,8 @@ class TonearmPlayer(private val context: Context, private val core: Tonearm) :
 
     private var playback: Playback = core.playback()
     private var queue: List<Song> = core.queue()
-    /** Whether the person wants music: play pressed, and not paused since. */
-    private var wanted = false
+    /** Held while we play, so other apps and calls know to ask. */
+    private var hasFocus = false
     /** Paused for a call or another app's sound, to carry on after. */
     private var pausedForFocus = false
 
@@ -72,7 +72,11 @@ class TonearmPlayer(private val context: Context, private val core: Tonearm) :
         val before = playback
         playback = now
         if (now.version != before.version) queue = core.queue()
-        if (now.state == PlayState.ENDED || now.state == PlayState.FAILED) wanted = false
+        // Songs also start from the app's own screens, straight through
+        // the core. Whoever started it, playing means holding focus.
+        if (now.state == PlayState.PLAYING && !hasFocus && !focus()) {
+            core.pause()
+        }
         if (now.state != before.state || now.version != before.version ||
             now.durationMs != before.durationMs || now.repeat != before.repeat ||
             now.error != before.error
@@ -111,7 +115,7 @@ class TonearmPlayer(private val context: Context, private val core: Tonearm) :
             .setPlaylist(playlist)
             .setPlaybackState(state)
             .setPlayWhenReady(
-                wanted && p.state != PlayState.PAUSED,
+                p.state == PlayState.PLAYING || p.state == PlayState.LOADING,
                 PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST,
             )
             .setRepeatMode(
@@ -130,10 +134,9 @@ class TonearmPlayer(private val context: Context, private val core: Tonearm) :
     }
 
     override fun handleSetPlayWhenReady(playWhenReady: Boolean): ListenableFuture<*> {
-        wanted = playWhenReady
         pausedForFocus = false
         if (playWhenReady) {
-            if (focus()) core.resume() else wanted = false
+            if (focus()) core.resume()
         } else {
             core.pause()
         }
@@ -147,7 +150,6 @@ class TonearmPlayer(private val context: Context, private val core: Tonearm) :
     ): ListenableFuture<*> {
         val songs = mediaItems.map(::song)
         val start = if (startIndex == C.INDEX_UNSET) 0 else startIndex
-        wanted = true
         focus()
         return work { core.setQueue(songs, start.toUInt()) }
     }
@@ -179,7 +181,6 @@ class TonearmPlayer(private val context: Context, private val core: Tonearm) :
     }
 
     override fun handleStop(): ListenableFuture<*> {
-        wanted = false
         core.pause()
         return later { refresh() }
     }
@@ -218,7 +219,7 @@ class TonearmPlayer(private val context: Context, private val core: Tonearm) :
             AudioManager.AUDIOFOCUS_LOSS -> {
                 // Another app is playing now. Stay paused.
                 pausedForFocus = false
-                wanted = false
+                hasFocus = false
                 core.pause()
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
@@ -250,11 +251,14 @@ class TonearmPlayer(private val context: Context, private val core: Tonearm) :
         .build()
 
     /** Asks to be the app playing. False during a phone call. */
-    private fun focus(): Boolean =
-        audio.requestAudioFocus(focusRequest) != AudioManager.AUDIOFOCUS_REQUEST_FAILED
+    private fun focus(): Boolean {
+        hasFocus = audio.requestAudioFocus(focusRequest) != AudioManager.AUDIOFOCUS_REQUEST_FAILED
+        return hasFocus
+    }
 
     private fun abandonFocus() {
         audio.abandonAudioFocusRequest(focusRequest)
+        hasFocus = false
     }
 
     // ------------------------------------------------ headphones unplugged
@@ -262,7 +266,6 @@ class TonearmPlayer(private val context: Context, private val core: Tonearm) :
     private val unplugged = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             // Headphones out or Bluetooth gone: never on to the speaker.
-            wanted = false
             core.pause()
             refresh()
         }

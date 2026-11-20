@@ -62,6 +62,12 @@ impl<T> Queue<T> {
         self.items.get(self.index)
     }
 
+    /// Adds `items` at the end, as a radio does once it is found. The song
+    /// playing stays where it is.
+    pub fn extend(&mut self, items: impl IntoIterator<Item = T>) {
+        self.items.extend(items);
+    }
+
     /// Makes `index` the song playing. Ignored past the end.
     pub fn go(&mut self, index: usize) {
         if index < self.items.len() {

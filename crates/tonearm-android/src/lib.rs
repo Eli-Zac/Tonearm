@@ -12,9 +12,12 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
-use tonearm_core::innertube::model::Kind;
+use tonearm_core::innertube::model::{self, Kind};
 use tonearm_core::queue::{Queue, Repeat, Step};
 use tonearm_core::{audio, innertube, resolver, store};
+
+mod pages;
+pub use pages::{Chip, Header, Item, ItemKind, Page, Shelf, ShelfLayout};
 
 uniffi::setup_scaffolding!();
 
@@ -167,6 +170,102 @@ impl Tonearm {
             .filter(|item| item.kind == Kind::Song)
             .filter_map(song)
             .collect())
+    }
+
+    // ---------------------------------------------------------------- pages
+
+    pub fn home(&self) -> Result<Page, TonearmError> {
+        self.browse("FEmusic_home".into(), None)
+    }
+
+    /// The signed-in user's library: playlists, albums, artists.
+    pub fn library(&self) -> Result<Page, TonearmError> {
+        self.browse("FEmusic_library_landing".into(), None)
+    }
+
+    /// Any page by its browse id: an album, artist, playlist, a mood.
+    pub fn browse(&self, id: String, params: Option<String>) -> Result<Page, TonearmError> {
+        Ok(pages::page(&self.client.browse(&id, params.as_deref())?))
+    }
+
+    /// The shelves after a page's `continuation`, as it is scrolled.
+    pub fn more(&self, continuation: String) -> Result<Page, TonearmError> {
+        Ok(pages::page(&self.client.more(&continuation)?))
+    }
+
+    /// Everything a search finds: the top result, songs, albums, artists,
+    /// playlists, in YouTube Music's shelves.
+    pub fn search_page(&self, query: String) -> Result<Page, TonearmError> {
+        Ok(pages::page(&self.client.search(&query)?))
+    }
+
+    // ------------------------------------------------- playing, as on desktop
+
+    /// A song tapped in a list (an album's tracks, a playlist, search's
+    /// songs): plays the list's songs, from that one.
+    pub fn play_list(&self, items: Vec<Item>, index: u32) -> Result<(), TonearmError> {
+        let index = index as usize;
+        let start = items.iter().take(index).filter(|i| i.video_id.is_some()).count();
+        let songs: Vec<Song> = items
+            .iter()
+            .map(pages::core_item)
+            .filter_map(|i| song(&i))
+            .collect();
+        self.set_queue(songs, start as u32)
+    }
+
+    /// A song card tapped: plays the song, then its radio. A music video
+    /// plays the album track it is of, so its radio is songs.
+    pub fn play_radio(&self, item: Item) -> Result<(), TonearmError> {
+        let core = pages::core_item(&item);
+        let core = self.client.song_for(&core).unwrap_or(core);
+        let Some(first) = song(&core) else {
+            return Err("Nothing to play".to_string().into());
+        };
+        let id = first.video_id.clone();
+        self.set_queue(vec![first], 0)?;
+        // The radio comes after the song has started.
+        let (items, _) = self.client.queue(Some(&id), None)?;
+        let more: Vec<Song> = items.iter().filter_map(song).filter(|s| s.video_id != id).collect();
+        let mut queue = self.queue.lock().unwrap();
+        if queue.items().len() == 1 && queue.current().is_some_and(|s| s.video_id == id) {
+            queue.extend(more);
+            drop(queue);
+            self.changed();
+        }
+        Ok(())
+    }
+
+    /// A card's play button: an album, playlist or mix plays from its
+    /// start, an artist plays the songs on their page, a song its radio.
+    pub fn play_item(&self, item: Item) -> Result<(), TonearmError> {
+        if item.video_id.is_some() {
+            return self.play_radio(item);
+        }
+        let items = match (&item.playlist_id, &item.browse_id) {
+            (Some(playlist), _) => self.client.queue(None, Some(playlist))?.0,
+            (None, Some(browse)) => songs_of(&self.client.browse(browse, item.params.as_deref())?),
+            (None, None) => Vec::new(),
+        };
+        let songs: Vec<Song> = items.iter().filter_map(song).collect();
+        if songs.is_empty() {
+            return Err("Nothing to play".to_string().into());
+        }
+        self.set_queue(songs, 0)
+    }
+
+    /// An artist's shuffle or radio button, as YouTube Music starts them.
+    pub fn play_watch(&self, item: Item) -> Result<(), TonearmError> {
+        let (items, _) = self.client.queue_with(
+            item.video_id.as_deref(),
+            item.playlist_id.as_deref(),
+            item.params.as_deref(),
+        )?;
+        let songs: Vec<Song> = items.iter().filter_map(song).collect();
+        if songs.is_empty() {
+            return Err("Nothing to play".to_string().into());
+        }
+        self.set_queue(songs, 0)
     }
 
     /// Plays `songs` from `index`, in place of the queue.
@@ -366,6 +465,18 @@ fn watch(tonearm: Weak<Tonearm>) {
             }
         })
         .expect("cannot start the queue thread");
+}
+
+/// The songs listed down a page, not those in its carousels: an album's
+/// tracks, an artist's top songs. As the desktop's `songs_of`.
+fn songs_of(page: &model::Page) -> Vec<model::Item> {
+    page.shelves
+        .iter()
+        .filter(|shelf| !shelf.carousel)
+        .flat_map(|shelf| &shelf.items)
+        .filter(|item| item.video_id.is_some())
+        .cloned()
+        .collect()
 }
 
 fn song(item: &innertube::model::Item) -> Option<Song> {

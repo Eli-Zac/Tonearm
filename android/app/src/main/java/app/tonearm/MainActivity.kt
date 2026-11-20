@@ -10,25 +10,12 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.media3.common.MediaMetadata
@@ -36,14 +23,9 @@ import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
-import coil3.compose.AsyncImage
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.MoreExecutors
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import uniffi.tonearm_android.Song
 
 @UnstableApi
 class MainActivity : ComponentActivity() {
@@ -61,12 +43,7 @@ class MainActivity : ComponentActivity() {
         )
         setContent {
             TonearmTheme {
-                Box(Modifier.fillMaxSize().background(Tonearm.bg)) {
-                    Screen(
-                        search = { query -> withContext(Dispatchers.IO) { core.search(query) } },
-                        controller = controller,
-                    )
-                }
+                App(core, controller)
             }
         }
     }
@@ -130,165 +107,26 @@ fun rememberNowPlaying(controller: MediaController?): NowPlaying? {
     return now
 }
 
+/** The song playing, in an island above the tabs, as on the desktop.
+ *  Tapping it opens Now Playing. */
 @Composable
-fun Screen(search: suspend (String) -> List<Song>, controller: MediaController?) {
-    val scope = rememberCoroutineScope()
-    val focus = LocalFocusManager.current
-    var query by remember { mutableStateOf("") }
-    var songs by remember { mutableStateOf<List<Song>>(emptyList()) }
-    var searching by remember { mutableStateOf(false) }
-    var message by remember { mutableStateOf<String?>(null) }
-    val now = rememberNowPlaying(controller)
-
-    fun runSearch() {
-        val words = query.trim()
-        if (words.isEmpty()) return
-        focus.clearFocus()
-        searching = true
-        message = null
-        scope.launch {
-            try {
-                songs = search(words)
-                if (songs.isEmpty()) message = "No songs found"
-            } catch (e: Exception) {
-                message = e.message ?: "Search failed"
-            } finally {
-                searching = false
-            }
-        }
-    }
-
-    fun play(index: Int) {
-        val c = controller ?: return
-        c.setMediaItems(songs.map(TonearmPlayer::mediaItem), index, 0)
-        c.play()
-    }
-
-    Column(Modifier.fillMaxSize().systemBarsPadding()) {
-        SearchBox(query, { query = it }, ::runSearch)
-        if (searching) {
-            LinearProgressIndicator(
-                Modifier.fillMaxWidth().padding(horizontal = 16.dp).height(2.dp),
-                color = Tonearm.accent,
-                trackColor = Tonearm.line,
-            )
-        }
-        val shown = message ?: now?.error
-        shown?.let {
-            Text(it, color = Tonearm.dim, fontFamily = Tonearm.font, fontSize = 14.sp,
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
-        }
-        val playingId = now?.meta?.let { controller?.currentMediaItem?.mediaId }
-        LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(vertical = 4.dp)) {
-            itemsIndexed(songs, key = { i, s -> s.videoId + i }) { i, song ->
-                SongRow(song, playing = song.videoId == playingId) { play(i) }
-            }
-        }
-        if (now != null && controller != null) MiniPlayer(now, controller)
-    }
-}
-
-@Composable
-fun SearchBox(query: String, onChange: (String) -> Unit, onSearch: () -> Unit) {
-    Row(
-        Modifier
-            .padding(horizontal = 16.dp, vertical = 12.dp)
-            .fillMaxWidth()
-            .height(48.dp)
-            .clip(RoundedCornerShape(Tonearm.radius))
-            .background(Tonearm.island)
-            .padding(horizontal = 14.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(Icons.search, color = Tonearm.dim, size = 20.sp)
-        Spacer(Modifier.width(12.dp))
-        Box(Modifier.weight(1f)) {
-            if (query.isEmpty()) {
-                Text("Search songs", color = Tonearm.faint, fontFamily = Tonearm.font, fontSize = 16.sp)
-            }
-            BasicTextField(
-                value = query,
-                onValueChange = onChange,
-                singleLine = true,
-                textStyle = TextStyle(color = Tonearm.text, fontFamily = Tonearm.font, fontSize = 16.sp),
-                cursorBrush = SolidColor(Tonearm.accent),
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                keyboardActions = KeyboardActions(onSearch = { onSearch() }),
-                modifier = Modifier.fillMaxWidth(),
-            )
-        }
-    }
-}
-
-@Composable
-fun SongRow(song: Song, playing: Boolean, onClick: () -> Unit) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 7.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        AsyncImage(
-            model = song.cover,
-            contentDescription = null,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier.size(50.dp).clip(RoundedCornerShape(8.dp)).background(Tonearm.raised),
-        )
-        Column(Modifier.weight(1f).padding(start = 14.dp)) {
-            Text(
-                song.title,
-                color = if (playing) Tonearm.accent else Tonearm.text,
-                fontFamily = Tonearm.font,
-                fontWeight = FontWeight.SemiBold,
-                fontSize = 16.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                listOf(song.artist, song.album).filter { it.isNotEmpty() }.joinToString(" • "),
-                color = Tonearm.dim,
-                fontFamily = Tonearm.font,
-                fontSize = 14.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        if (song.duration.isNotEmpty()) {
-            Text(song.duration, color = Tonearm.dim, fontFamily = Tonearm.font, fontSize = 13.sp,
-                modifier = Modifier.padding(start = 8.dp))
-        }
-    }
-}
-
-/** The song playing, in an island along the bottom, as on the desktop. */
-@Composable
-fun MiniPlayer(now: NowPlaying, controller: MediaController) {
+fun MiniPlayer(now: NowPlaying, controller: MediaController, onOpen: () -> Unit) {
     val progress = if (now.duration > 0) (now.position.toFloat() / now.duration).coerceIn(0f, 1f) else 0f
     Column(
         Modifier
             .padding(horizontal = 8.dp, vertical = 6.dp)
             .fillMaxWidth()
             .clip(RoundedCornerShape(Tonearm.radius))
-            .background(Tonearm.island),
+            .background(Tonearm.island)
+            .clickable(onClick = onOpen),
     ) {
         Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
-            AsyncImage(
-                model = now.meta?.artworkUri,
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.size(44.dp).clip(RoundedCornerShape(8.dp)).background(Tonearm.raised),
-            )
+            Art(now.meta?.artworkUri?.toString(), 44.dp)
             Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                Text(
-                    now.meta?.title?.toString() ?: "",
-                    color = Tonearm.text, fontFamily = Tonearm.font, fontWeight = FontWeight.SemiBold,
-                    fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    if (now.loading) "Loading…" else now.meta?.artist?.toString() ?: "",
-                    color = Tonearm.dim, fontFamily = Tonearm.font, fontSize = 13.sp,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                Title(now.meta?.title?.toString() ?: "", size = 15.sp)
+                Dim(
+                    if (now.loading) "Loading…" else now.error ?: now.meta?.artist?.toString() ?: "",
+                    13.sp,
                 )
             }
             IconButton(Icons.prev) { controller.seekToPrevious() }
