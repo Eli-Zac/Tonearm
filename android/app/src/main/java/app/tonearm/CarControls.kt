@@ -4,6 +4,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.CommandButton
 import androidx.media3.session.MediaSession
@@ -81,7 +82,21 @@ class CarControls(private val core: Core, private val work: ListeningExecutorSer
         } else {
             null
         }
-        return listOfNotNull(heart, shuffleButton, repeatButton)
+        // Skip back and forward named in their own slots. Left out, Media3
+        // fills those slots with the first buttons here for controllers
+        // that read its older custom layout, such as a Galaxy Watch, which
+        // then showed the heart and shuffle where skip goes.
+        val previous = CommandButton.Builder(CommandButton.ICON_PREVIOUS)
+            .setDisplayName("Previous")
+            .setPlayerCommand(Player.COMMAND_SEEK_TO_PREVIOUS)
+            .setSlots(CommandButton.SLOT_BACK)
+            .build()
+        val next = CommandButton.Builder(CommandButton.ICON_NEXT)
+            .setDisplayName("Next")
+            .setPlayerCommand(Player.COMMAND_SEEK_TO_NEXT)
+            .setSlots(CommandButton.SLOT_FORWARD)
+            .build()
+        return listOfNotNull(previous, next, heart, shuffleButton, repeatButton)
     }
 
     /** A button pressed in the car (or the notification). */
