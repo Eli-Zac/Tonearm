@@ -354,7 +354,13 @@ fun PageView(
     load: suspend () -> Page,
     more: suspend (String) -> Page,
     actions: Actions,
-    top: (@Composable (Page) -> Unit)? = null,
+    /** Above the shelves. Given null while the page loads, when
+     *  `topWhileLoading`: Home and Library keep their heading (and Home its
+     *  chips) up then, with only what is under them loading. */
+    top: (@Composable (Page?) -> Unit)? = null,
+    topWhileLoading: Boolean = false,
+    /** What stands in for the page while it loads, as on the desktop. */
+    skeleton: PageSkeleton = PageSkeleton.Shelves,
 ) {
     var page by remember(key) { mutableStateOf<Page?>(null) }
     var error by remember(key) { mutableStateOf<String?>(null) }
@@ -369,7 +375,10 @@ fun PageView(
     val shown = page
     when {
         error != null && shown == null -> Message(error!!)
-        shown == null -> Loading()
+        shown == null -> Column(Modifier.fillMaxSize()) {
+            if (topWhileLoading) top?.invoke(null)
+            PageSkeletonView(skeleton)
+        }
         else -> {
             val state = rememberLazyListState()
             // Near the end: the next shelves.
@@ -397,7 +406,9 @@ fun PageView(
                 top?.let { t -> item(contentType = "top") { t(shown) } }
                 shown.header?.let { h -> item(contentType = "header") { PageHeader(h, shown.songs(), actions) } }
                 shown.shelves.forEach { shelf(it, actions) }
-                if (loadingMore) item { Loading(Modifier.height(64.dp)) }
+                // The next shelves on their way: rows of bones, as the
+                // desktop shows under a list still loading.
+                if (loadingMore) items(3) { RowSkeleton(it + 5) }
             }
         }
     }

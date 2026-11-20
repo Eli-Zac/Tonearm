@@ -373,7 +373,11 @@ fun Toast(text: String, modifier: Modifier = Modifier) {
 fun HomeScreen(core: Core, actions: Actions, onSettings: () -> Unit) {
     // A mood chip shows Home again, picked for that mood.
     var chip by remember { mutableStateOf<Pair<String, String?>?>(null) }
+    // The chips last shown: they stay up while a chip's page loads, with
+    // only the shelves under them loading.
+    var lastChips by remember { mutableStateOf<List<uniffi.tonearm_android.Chip>>(emptyList()) }
     PageView(
+        topWhileLoading = true,
         key = chip ?: "home",
         load = {
             withContext(Dispatchers.IO) {
@@ -398,13 +402,19 @@ fun HomeScreen(core: Core, actions: Actions, onSettings: () -> Unit) {
                         Icon(Icons.settings, size = 24.sp, color = Tonearm.text)
                     }
                 }
-                if (page.chips.isNotEmpty()) {
+                val chips = page?.chips ?: lastChips
+                if (page != null && page.chips.isNotEmpty()) SideEffect { lastChips = page.chips }
+                // None yet at all: their bones, as the desktop's Home.
+                if (page == null && chips.isEmpty()) ChipsSkeleton()
+                if (chips.isNotEmpty()) {
                     LazyRow(
                         contentPadding = PaddingValues(horizontal = 16.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        items(page.chips) { c ->
-                            val on = c.selected
+                        items(chips) { c ->
+                            // While a page loads, the chip just tapped is the
+                            // one lit (or none, going back to Home).
+                            val on = if (page != null) c.selected else chip == (c.browseId to c.params)
                             Box(
                                 Modifier.height(34.dp).clip(RoundedCornerShape(17.dp))
                                     .background(if (on) Tonearm.text else Tonearm.raised)
@@ -432,6 +442,7 @@ fun LibraryScreen(core: Core, actions: Actions, epoch: Int) {
         load = { withContext(Dispatchers.IO) { core.library() } },
         more = { token -> withContext(Dispatchers.IO) { core.more(token) } },
         actions = actions,
+        topWhileLoading = true,
         top = {
             Title("Library", size = 28.sp, weight = FontWeight.ExtraBold,
                 modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 4.dp))
@@ -535,6 +546,7 @@ fun SearchScreen(core: Core, actions: Actions) {
                 load = { withContext(Dispatchers.IO) { core.searchPage(words) } },
                 more = { token -> withContext(Dispatchers.IO) { core.more(token) } },
                 actions = tapped,
+                skeleton = PageSkeleton.Rows,
             )
         }
     }
@@ -584,11 +596,20 @@ fun PageScreen(route: Route, core: Core, actions: Actions, libraryEpoch: Int, on
             load = { withContext(Dispatchers.IO) { core.browse(route.id, route.params) } },
             more = { token -> withContext(Dispatchers.IO) { core.more(token) } },
             actions = actions,
+            // What kind of page it is shows in its id, so the skeleton fits
+            // before anything has loaded; the rest keep their title up.
+            skeleton = when {
+                route.id.startsWith("UC") || route.id.startsWith("MPLAUC") -> PageSkeleton.Artist
+                route.id.startsWith("MPREb") || route.id.startsWith("VL") || route.id.startsWith("OLAK") -> PageSkeleton.Detail
+                else -> PageSkeleton.Shelves
+            },
+            topWhileLoading = !(route.id.startsWith("UC") || route.id.startsWith("MPLAUC") ||
+                route.id.startsWith("MPREb") || route.id.startsWith("VL") || route.id.startsWith("OLAK")),
             top = { page ->
                 // Pages without a header (a mood, "Show all") get a title,
                 // clear of the status bar and the back button.
-                if (page.header == null) {
-                    Title(page.title.ifEmpty { route.title }, size = 26.sp, weight = FontWeight.ExtraBold, lines = 2,
+                if (page?.header == null) {
+                    Title(page?.title?.ifEmpty { null } ?: route.title, size = 26.sp, weight = FontWeight.ExtraBold, lines = 2,
                         modifier = Modifier.statusBarsPadding()
                             .padding(start = 16.dp, end = 16.dp, top = 56.dp, bottom = 4.dp))
                 }
