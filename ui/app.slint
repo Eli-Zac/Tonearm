@@ -3913,6 +3913,9 @@ component DetailHeader inherits Rectangle {
     in property <PageHeader> data;
     in property <color> tint: #2b2440;
     in property <bool> compact;
+    // An album's moving cover, faded in over the still art once it plays.
+    in property <image> motion;
+    in property <bool> motion-on;
     callback play();
     callback shuffle();
     callback mix();
@@ -3993,6 +3996,18 @@ component DetailHeader inherits Rectangle {
             source: root.data.art;
             has: root.data.has-art;
             round: root.data.round;
+        }
+        if !root.data.icon-tile && !root.data.round: Rectangle {
+            border-radius: 10px;
+            clip: true;
+            opacity: root.motion-on ? 1 : 0;
+            animate opacity { duration: 450ms; }
+            Image {
+                width: 100%;
+                height: 100%;
+                source: root.motion;
+                image-fit: cover;
+            }
         }
         if root.data.icon-tile: Rectangle {
             border-radius: 10px;
@@ -4953,6 +4968,9 @@ export component AppWindow inherits Window {
     // panel's: the panel can show a Canvas, and this only Apple's cover.
     in property <image> wide-motion;
     in property <bool> wide-motion-on;
+    // An album page's moving cover, over the hero's square art.
+    in property <image> page-motion;
+    in property <bool> page-motion-on;
     // A heavy blur of the still cover, waved slowly from the app while
     // the expanded view is open. Its background.
     in property <image> track-backdrop;
@@ -5882,6 +5900,8 @@ export component AppWindow inherits Window {
                                 data: root.header;
                                 tint: root.shown-page-tint;
                                 compact: root.compact;
+                                motion: root.page-motion;
+                                motion-on: root.page-motion-on;
                                 play => { root.play-page(false); }
                                 shuffle => { root.play-page(true); }
                                 mix => { root.toggle-mix(); }

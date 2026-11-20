@@ -23,6 +23,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
@@ -33,6 +34,8 @@ import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import uniffi.tonearm_android.Header
 import uniffi.tonearm_android.Item
 import uniffi.tonearm_android.ItemKind
@@ -57,6 +60,9 @@ interface Actions {
     fun menu(item: Item)
     /** The video id playing, to mark its row. */
     val playing: String?
+    /** An album's moving cover as a local file, when it has one and
+     *  Settings shows moving covers. Blocks. */
+    fun albumMotion(album: String, artist: String, firstSong: String): String? = null
 }
 
 /** A tap on a card or row that isn't a song in a list. */
@@ -111,9 +117,9 @@ fun Art(url: String?, size: Dp, shape: Shape = RoundedCornerShape(8.dp), modifie
 
 /** What a row says under its title: the artist and album for a song,
  *  YouTube Music's own line for the rest. */
-fun Item.line(): String =
+fun Item.line(showAlbum: Boolean = true): String =
     if (kind == ItemKind.SONG && artist.isNotEmpty()) {
-        listOf(artist, album).filter { it.isNotEmpty() }.joinToString(" • ")
+        listOf(artist, if (showAlbum) album else "").filter { it.isNotEmpty() }.joinToString(" • ")
     } else {
         subtitle
     }
@@ -124,7 +130,7 @@ fun Item.round(): Boolean = kind == ItemKind.ARTIST
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun ItemRow(item: Item, playing: Boolean, onClick: () -> Unit, onPlay: (() -> Unit)? = null, rank: Int = 0) {
+fun ItemRow(item: Item, playing: Boolean, onClick: () -> Unit, onPlay: (() -> Unit)? = null, rank: Int = 0, showAlbum: Boolean = true) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -138,7 +144,7 @@ fun ItemRow(item: Item, playing: Boolean, onClick: () -> Unit, onPlay: (() -> Un
             Title(item.title, color = if (playing) Tonearm.accent else Tonearm.text)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (item.explicit) Explicit()
-                Dim(item.line())
+                Dim(item.line(showAlbum))
             }
         }
         if (item.duration.isNotEmpty()) Dim(item.duration, 13.sp, modifier = Modifier.padding(start = 8.dp))
@@ -241,7 +247,7 @@ fun ItemCard(item: Item, width: Dp, wide: Boolean, actions: Actions) {
 
 // ---------------------------------------------------------------- shelves
 
-fun LazyListScope.shelf(shelf: Shelf, actions: Actions) {
+fun LazyListScope.shelf(shelf: Shelf, actions: Actions, onAlbum: Boolean = false) {
     if (shelf.title.isNotEmpty()) {
         item(contentType = "title") {
             Row(
@@ -272,6 +278,8 @@ fun LazyListScope.shelf(shelf: Shelf, actions: Actions) {
                 // A long press: its menu.
                 onPlay = { actions.menu(item) },
                 rank = if (shelf.ranked) i + 1 else 0,
+                // An album's own page needs no album name on every row.
+                showAlbum = !onAlbum,
             )
         }
         // Pages to open and nothing to show for them, such as Explore's
@@ -327,31 +335,23 @@ fun LazyListScope.shelf(shelf: Shelf, actions: Actions) {
 @Composable
 fun PageHeader(header: Header, songs: List<Item>, actions: Actions) {
     Column(Modifier.fillMaxWidth()) {
-        if (header.banner) {
-            // An artist: their banner across the top, fading into the page.
-            Box(Modifier.fillMaxWidth().aspectRatio(1.25f)) {
-                AsyncImage(
-                    model = header.thumb.ifEmpty { null },
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize(),
-                )
-                Box(
-                    Modifier.fillMaxSize().background(
-                        Brush.verticalGradient(0.45f to Color.Transparent, 1f to Tonearm.bg),
-                    ),
-                )
-                Title(header.title, size = 40.sp, weight = FontWeight.ExtraBold, lines = 2,
-                    modifier = Modifier.align(Alignment.BottomStart).padding(horizontal = 16.dp))
+        // Every page's art fills the top, up under the status bar, fading
+        // into the page with the title over it: an artist's wide banner,
+        // or an album or playlist's square cover, whole.
+        // An album's moving cover, where Apple Music has one and Settings
+        // allows it, plays over the still once its first frame is drawn.
+        val album = !header.banner && header.label in setOf("Album", "EP", "Single")
+        var motion by remember(header.title, header.byline) { mutableStateOf<String?>(null) }
+        if (album) {
+            LaunchedEffect(header.title, header.byline) {
+                motion = withContext(Dispatchers.IO) {
+                    runCatching { actions.albumMotion(header.title, header.byline, songs.firstOrNull()?.title ?: "") }.getOrNull()
+                }
             }
-        } else {
-            // Square art sits below the status bar and the back button.
-            Box(Modifier.fillMaxWidth().statusBarsPadding().padding(top = 48.dp), contentAlignment = Alignment.Center) {
-                Art(header.thumb, 240.dp, RoundedCornerShape(Tonearm.radius))
-            }
-            Spacer(Modifier.height(18.dp))
-            Title(header.title, size = 26.sp, weight = FontWeight.ExtraBold, lines = 3,
-                modifier = Modifier.padding(horizontal = 16.dp))
+        }
+        HeaderArt(header.thumb, header.banner, motion) {
+            Title(header.title, size = if (header.banner) 40.sp else 32.sp, weight = FontWeight.ExtraBold, lines = 2,
+                modifier = Modifier.align(Alignment.BottomStart).padding(horizontal = 16.dp))
         }
         Column(Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
             if (header.byline.isNotEmpty()) {
@@ -365,24 +365,85 @@ fun PageHeader(header: Header, songs: List<Item>, actions: Actions) {
             val meta = listOf(header.label, header.meta).filter { it.isNotEmpty() }.joinToString(" • ")
             if (meta.isNotEmpty()) Dim(meta, 13.sp, lines = 2, modifier = Modifier.padding(top = 2.dp))
         }
-        Row(
-            Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            val play: (() -> Unit)? = when {
-                header.shuffle != null && header.banner -> null
-                header.playlistId != null -> { { actions.playItem(playlistItem(header.playlistId!!, header.title)) } }
-                songs.isNotEmpty() -> { { actions.playList(songs, 0) } }
-                else -> null
+        // The desktop's row: the big round play button, then icons alone.
+        // An artist's play button plays their shuffle, as YouTube Music's.
+        val play: (() -> Unit)? = when {
+            header.shuffle != null && header.banner -> { { actions.playWatch(header.shuffle!!) } }
+            header.playlistId != null -> { { actions.playItem(playlistItem(header.playlistId!!, header.title)) } }
+            songs.isNotEmpty() -> { { actions.playList(songs, 0) } }
+            else -> null
+        }
+        val shuffle: (() -> Unit)? = when {
+            header.banner -> null
+            header.shuffle != null -> { { actions.playWatch(header.shuffle!!) } }
+            songs.size > 1 -> { { actions.playList(songs.shuffled(), 0) } }
+            else -> null
+        }
+        val radio: (() -> Unit)? = header.radio?.let { r -> { actions.playWatch(r) } }
+        if (play != null || shuffle != null || radio != null) {
+            Row(
+                Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                play?.let {
+                    RoundButton(Icons.play, accent = true, size = 56.dp, onClick = it)
+                    Spacer(Modifier.width(8.dp))
+                }
+                shuffle?.let { HeroIcon(Icons.shuffle, onClick = it) }
+                radio?.let { HeroIcon(Icons.radio, onClick = it) }
             }
-            play?.let { RoundButton(Icons.play, accent = true, onClick = it) }
-            header.shuffle?.let { s -> PillButton(Icons.shuffle, "Shuffle") { actions.playWatch(s) } }
-            header.radio?.let { r -> PillButton(Icons.radio, "Radio") { actions.playWatch(r) } }
         }
         if (header.about.isNotEmpty() && header.banner) {
             Dim(header.about, 13.sp, lines = 3, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
         }
+    }
+}
+
+/** An icon on its own in the row under a page's title, as the desktop's
+ *  `HeroIcon`: soft white, 28 tall, in a 48dp touch target. */
+@Composable
+fun HeroIcon(glyph: String, onClick: () -> Unit) {
+    Box(
+        Modifier.size(48.dp).clip(CircleShape).clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(glyph, size = 28.sp, color = Color(0xB3FFFFFF))
+    }
+}
+
+/** How a page header's art is shaped: an artist's banner is wider than tall. */
+fun headerRatio(banner: Boolean) = if (banner) 1.25f else 1f
+
+/**
+ * A page's art across the full width, from the top edge, fading into the
+ * page from part way down; a bone sweeps there until it arrives. `over` is
+ * drawn on top (the title, at the bottom).
+ */
+@Composable
+fun HeaderArt(url: String, banner: Boolean, motion: String? = null, over: @Composable BoxScope.() -> Unit = {}) {
+    Box(Modifier.fillMaxWidth().aspectRatio(headerRatio(banner))) {
+        var loaded by remember(url) { mutableStateOf(false) }
+        if (!loaded) Bone(Modifier.fillMaxSize(), RectangleShape)
+        AsyncImage(
+            model = url.ifEmpty { null },
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            onSuccess = { loaded = true },
+            modifier = Modifier.fillMaxSize(),
+        )
+        // The moving cover, faded in over the still once it draws.
+        motion?.let { MotionCover(it, Modifier.fillMaxSize()) }
+        // A square cover keeps more of itself clear before the fade.
+        Box(
+            Modifier.fillMaxSize().background(
+                Brush.verticalGradient(
+                    (if (banner) 0.45f else 0.6f) to Color.Transparent,
+                    1f to Tonearm.bg,
+                ),
+            ),
+        )
+        over()
     }
 }
 
@@ -485,7 +546,8 @@ fun PageView(
             LazyColumn(state = state, contentPadding = PaddingValues(bottom = 24.dp)) {
                 top?.let { t -> item(contentType = "top") { t(shown) } }
                 shown.header?.let { h -> item(contentType = "header") { PageHeader(h, shown.songs(), actions) } }
-                shown.shelves.forEach { shelf(it, actions) }
+                val onAlbum = shown.header?.label in setOf("Album", "EP", "Single")
+                shown.shelves.forEach { shelf(it, actions, onAlbum) }
                 // The next shelves on their way: rows of bones, as the
                 // desktop shows under a list still loading.
                 if (loadingMore) items(3) { RowSkeleton(it + 5) }

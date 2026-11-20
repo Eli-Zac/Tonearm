@@ -440,6 +440,8 @@ struct App {
     wide: RefCell<Option<Motion>>,
     /// Counts clips, for `Motion::id`.
     clips: Cell<u64>,
+    /// An album page's moving cover, playing over its hero art.
+    page_motion: RefCell<Option<canvas::Clip>>,
     /// The cover choices in Settings: the panel's and the expanded view's.
     cover_choices: Cell<(i32, i32)>,
     outgoing: RefCell<Option<Outgoing>>,
@@ -972,6 +974,9 @@ impl App {
             self.ui.set_sort_descending(false);
             page.generation
         };
+        // The last album's moving cover stops with its page.
+        self.page_motion.borrow_mut().take();
+        self.ui.set_page_motion_on(false);
         // A search keeps its title while it loads, so the tabs under it
         // stay put when another one is picked.
         let title = match &route {
@@ -1695,7 +1700,17 @@ impl App {
                 // Only the first page of a detail page has the header.
                 if first {
                     match page.header.take() {
-                        Some(header) => self.show_header(generation, header),
+                        Some(header) => {
+                            // The first song helps find the album's moving cover.
+                            let first_song = page
+                                .shelves
+                                .iter()
+                                .flat_map(|s| &s.items)
+                                .find(|i| i.video_id.is_some())
+                                .map(|i| i.title.clone())
+                                .unwrap_or_default();
+                            self.show_header(generation, header, first_song)
+                        }
                         None => self.ui.set_header(PageHeader::default()),
                     }
                 }
@@ -1722,7 +1737,14 @@ impl App {
     }
 
     /// Puts a detail page's hero on screen and starts loading its art.
-    fn show_header(self: &Rc<Self>, generation: u64, header: Header) {
+    fn show_header(self: &Rc<Self>, generation: u64, header: Header, first_song: String) {
+        // An album's moving cover, when Settings show moving covers.
+        let (panel, wide) = self.cover_choices.get();
+        if matches!(header.kind, PageKind::Album | PageKind::Single)
+            && (panel == PANEL_ANIMATED || wide == WIDE_ANIMATED)
+        {
+            self.load_page_motion(generation, header.title.clone(), header.byline.clone(), first_song);
+        }
         let mut data = detail::header_data(&header, self.client.signed_in());
         if let Some(Route::Browse { id, .. }) = self.history.borrow().last() {
             data.service = service_of(Some(id), header.kind == PageKind::Playlist);
@@ -1741,6 +1763,46 @@ impl App {
         if let Some(image) = art {
             self.set_hero_art(image);
         }
+    }
+
+    /// Finds an album page's moving cover and plays it over the hero's art
+    /// while that page is up. Leaving the page stops it.
+    fn load_page_motion(self: &Rc<Self>, generation: u64, album: String, artist: String, first_song: String) {
+        let http = self.http.clone();
+        self.api.run(move || {
+            let path = animated_art::fetch(&http, &album, &first_song, &artist).unwrap_or_else(|message| {
+                eprintln!("album motion: {message}");
+                None
+            });
+            let Some(path) = path else { return };
+            on_ui(move |app| {
+                if app.page.borrow().generation != generation {
+                    return;
+                }
+                let clip = canvas::Clip::play_at(
+                    path,
+                    animated_art::WIDTH,
+                    move |pixels, _blur| {
+                        on_ui(move |app| {
+                            if app.page.borrow().generation == generation && app.page_motion.borrow().is_some() {
+                                app.ui.set_page_motion(Image::from_rgba8(pixels));
+                                app.ui.set_page_motion_on(true);
+                            }
+                        })
+                    },
+                    move |message| {
+                        eprintln!("album motion: {message}");
+                        on_ui(move |app| {
+                            if app.page.borrow().generation == generation {
+                                app.page_motion.borrow_mut().take();
+                                app.ui.set_page_motion_on(false);
+                            }
+                        });
+                    },
+                );
+                *app.page_motion.borrow_mut() = Some(clip);
+            });
+        });
     }
 
     fn set_hero_art(&self, image: Image) {
@@ -5945,6 +6007,7 @@ fn main() -> Result<(), slint::PlatformError> {
         canvas: RefCell::new(None),
         wide: RefCell::new(None),
         clips: Cell::new(0),
+        page_motion: RefCell::new(None),
         cover_choices: Cell::new(load_cover_choices()),
         outgoing: RefCell::new(None),
         clock: Cell::new((0, Instant::now())),

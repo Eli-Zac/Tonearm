@@ -171,6 +171,8 @@ fun App(core: Core, controller: MediaController?) {
             menuItem = MenuRequest(item, inLibrary)
         }
         override val playing: String? get() = playingId
+        override fun albumMotion(album: String, artist: String, firstSong: String): String? =
+            if (core.animatedCovers()) core.albumMotion(album, artist, firstSong) else null
     }
 
     // What a song's menu does, through the app.
@@ -690,12 +692,28 @@ fun PageScreen(route: Route, core: Core, actions: Actions, libraryEpoch: Int, on
             topWhileLoading = !(route.id.startsWith("UC") || route.id.startsWith("MPLAUC") ||
                 route.id.startsWith("MPREb") || route.id.startsWith("VL") || route.id.startsWith("OLAK")),
             top = { page ->
-                // Pages without a header (a mood, "Show all") get a title,
-                // clear of the status bar and the back button.
+                // Pages without a header (a mood, a genre, "Show all") get
+                // a title beside the back button, as Settings' pages: on
+                // its line (the button is 40 tall, 8 below the status bar),
+                // one line always, shrinking to 20sp before an ellipsis.
                 if (page?.header == null) {
-                    Title(page?.title?.ifEmpty { null } ?: route.title, size = 26.sp, weight = FontWeight.ExtraBold, lines = 2,
-                        modifier = Modifier.statusBarsPadding()
-                            .padding(start = 16.dp, end = 16.dp, top = 56.dp, bottom = 4.dp))
+                    Box(
+                        Modifier.statusBarsPadding().padding(start = 60.dp, end = 16.dp, top = 8.dp, bottom = 4.dp)
+                            .heightIn(min = 40.dp),
+                        contentAlignment = Alignment.CenterStart,
+                    ) {
+                        androidx.compose.foundation.text.BasicText(
+                            page?.title?.ifEmpty { null } ?: route.title,
+                            style = androidx.compose.ui.text.TextStyle(
+                                color = Tonearm.text, fontFamily = Tonearm.font, fontWeight = FontWeight.ExtraBold,
+                            ),
+                            maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                            autoSize = androidx.compose.foundation.text.TextAutoSize.StepBased(
+                                minFontSize = 20.sp, maxFontSize = 28.sp, stepSize = 1.sp,
+                            ),
+                        )
+                    }
                 }
             },
         )

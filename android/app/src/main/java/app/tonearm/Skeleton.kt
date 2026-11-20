@@ -106,20 +106,22 @@ fun PageSkeletonView(kind: PageSkeleton, modifier: Modifier = Modifier) {
                 repeat(10) { RowSkeleton(it + 2) }
             }
             PageSkeleton.Detail, PageSkeleton.Artist -> {
-                // As PageHeader: the cover centred under the status bar,
-                // the title, the byline and the buttons, then the songs.
-                Box(Modifier.fillMaxWidth().statusBarsPadding().padding(top = 48.dp), contentAlignment = Alignment.Center) {
-                    Bone(
-                        Modifier.size(240.dp),
-                        if (kind == PageSkeleton.Artist) CircleShape else RoundedCornerShape(Tonearm.radius),
-                    )
-                }
-                Bone(Modifier.padding(start = 16.dp, top = 18.dp).fillMaxWidth(0.62f).height(30.dp), RoundedCornerShape(8.dp))
-                Bone(Modifier.padding(start = 16.dp, top = 12.dp).width(110.dp).height(14.dp))
+                // As PageHeader: the art across the top, from the edge, the
+                // byline and the buttons under it, then the songs.
+                Bone(
+                    Modifier.fillMaxWidth().aspectRatio(headerRatio(kind == PageSkeleton.Artist)),
+                    androidx.compose.ui.graphics.RectangleShape,
+                )
+                Bone(Modifier.padding(start = 16.dp, top = 10.dp).width(110.dp).height(14.dp))
                 Bone(Modifier.padding(start = 16.dp, top = 8.dp).width(170.dp).height(12.dp))
-                Row(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Bone(Modifier.size(48.dp), CircleShape)
-                    Bone(Modifier.width(110.dp).height(48.dp), RoundedCornerShape(24.dp))
+                Row(
+                    Modifier.padding(start = 16.dp, top = 8.dp, bottom = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                ) {
+                    Bone(Modifier.size(56.dp), CircleShape)
+                    Bone(Modifier.size(28.dp), RoundedCornerShape(8.dp))
+                    Bone(Modifier.size(28.dp), RoundedCornerShape(8.dp))
                 }
                 repeat(8) { RowSkeleton(it + 2) }
             }

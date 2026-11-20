@@ -248,7 +248,7 @@ pub fn page(p: &model::Page) -> Page {
             byline_id: h.byline_browse_id.clone(),
             meta: h.meta.clone(),
             about: h.about.clone(),
-            thumb: art(&h.thumb, if h.banner { 1080 } else { 720 }),
+            thumb: art(&h.thumb, 1080),
             banner: h.banner,
             shuffle: h.shuffle.as_ref().map(item),
             radio: h.radio.as_ref().map(item),

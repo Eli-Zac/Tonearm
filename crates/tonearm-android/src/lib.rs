@@ -355,6 +355,19 @@ impl Tonearm {
         }
     }
 
+    /// An album page's moving cover as a local MP4 path; None when the
+    /// album has none. `first_song` helps find the right album. Blocks.
+    pub fn album_motion(&self, album: String, artist: String, first_song: String) -> Option<String> {
+        let http = innertube::agent(Duration::from_secs(20));
+        match tonearm_core::animated_art::fetch(&http, &album, &first_song, &artist) {
+            Ok(path) => path.map(|p| p.to_string_lossy().into_owned()),
+            Err(message) => {
+                eprintln!("tonearm: album motion: {message}");
+                None
+            }
+        }
+    }
+
     // ------------------------------------------------- playing, as on desktop
 
     /// A song tapped in a list (an album's tracks, a playlist, search's
