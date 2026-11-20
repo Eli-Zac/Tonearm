@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -225,7 +226,11 @@ fun App(core: Core, controller: MediaController?) {
                         // Home runs up under the status bar, so its glows
                         // reach the top edge rather than stopping short.
                         Tab.Home -> Box {
-                            HomeScreen(core, actions) { stack.add(Route(SettingsPages.root, null, "Settings")) }
+                            HomeScreen(
+                                core, actions,
+                                onSettings = { stack.add(Route(SettingsPages.root, null, "Settings")) },
+                                onAccount = { stack.add(Route(SettingsPages.account, null, "YouTube Music account")) },
+                            )
                             StatusFade()
                         }
                         Tab.Search -> Box(Modifier.statusBarsPadding()) { SearchScreen(core, actions) }
@@ -370,7 +375,8 @@ fun Toast(text: String, modifier: Modifier = Modifier) {
 // ------------------------------------------------------------------- tabs
 
 @Composable
-fun HomeScreen(core: Core, actions: Actions, onSettings: () -> Unit) {
+fun HomeScreen(core: Core, actions: Actions, onSettings: () -> Unit, onAccount: () -> Unit) {
+    val account = rememberAccount(core)
     // A mood chip shows Home again, picked for that mood.
     var chip by remember { mutableStateOf<Pair<String, String?>?>(null) }
     // The chips last shown: they stay up while a chip's page loads, with
@@ -400,6 +406,14 @@ fun HomeScreen(core: Core, actions: Actions, onSettings: () -> Unit) {
                         contentAlignment = Alignment.Center,
                     ) {
                         Icon(Icons.settings, size = 24.sp, color = Tonearm.text)
+                    }
+                    // The account's picture right of the gear, as the
+                    // desktop's account box; opens the account page.
+                    Box(
+                        Modifier.size(44.dp).clip(CircleShape).clickable(onClick = onAccount),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        AccountPhoto(account, 32.dp)
                     }
                 }
                 val chips = page?.chips ?: lastChips

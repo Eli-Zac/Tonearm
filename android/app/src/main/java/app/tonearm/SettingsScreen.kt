@@ -196,15 +196,32 @@ private fun RootPage(core: Core, onOpen: (String) -> Unit) {
     }
 }
 
-private sealed interface AccountState {
+internal sealed interface AccountState {
     data object Loading : AccountState
     data object SignedOut : AccountState
     data class SignedIn(val account: Account) : AccountState
 }
 
+/**
+ * The account's picture: a sweeping bone while the account is asked for
+ * (and while the picture itself loads, through [Art]); a faint circle with
+ * a person when signed out or there is no picture.
+ */
+@Composable
+internal fun AccountPhoto(account: AccountState, size: androidx.compose.ui.unit.Dp) {
+    val a = (account as? AccountState.SignedIn)?.account
+    when {
+        account is AccountState.Loading -> Bone(Modifier.size(size), CircleShape)
+        a != null && a.photo.isNotEmpty() -> Art(a.photo, size, CircleShape)
+        else -> Box(Modifier.size(size).clip(CircleShape).background(Color(0x14FFFFFF)), contentAlignment = Alignment.Center) {
+            Icon(Icons.artist, size = (size.value * 0.43f).sp, color = Tonearm.dim)
+        }
+    }
+}
+
 /** Who is signed in. Asked again when the sign in changes. */
 @Composable
-private fun rememberAccount(core: Core): AccountState {
+internal fun rememberAccount(core: Core): AccountState {
     val state by produceState<AccountState>(AccountState.Loading, Prefs.version) {
         value = withContext(Dispatchers.IO) {
             if (!core.signedIn()) AccountState.SignedOut
@@ -235,13 +252,7 @@ private fun AccountPage(core: Core, onOpen: (String) -> Unit) {
         if (account !is AccountState.SignedOut) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 val a = (account as? AccountState.SignedIn)?.account
-                if (a != null && a.photo.isNotEmpty()) {
-                    Art(a.photo, 56.dp, CircleShape)
-                } else {
-                    Box(Modifier.size(56.dp).clip(CircleShape).background(Color(0x14FFFFFF)), contentAlignment = Alignment.Center) {
-                        if (a != null) Icon(Icons.artist, size = 24.sp, color = Tonearm.dim)
-                    }
-                }
+                AccountPhoto(account, 56.dp)
                 Column(Modifier.padding(start = 14.dp).weight(1f).height(46.dp), verticalArrangement = Arrangement.Center) {
                     if (a == null) {
                         TextSkeleton(0.6f, 18.dp)
