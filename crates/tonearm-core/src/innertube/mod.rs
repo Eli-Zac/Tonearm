@@ -43,9 +43,14 @@ pub struct Client {
 }
 
 pub fn agent(read_timeout: Duration) -> ureq::Agent {
-    let tls = native_tls::TlsConnector::new().expect("system TLS is unavailable");
-    ureq::AgentBuilder::new()
-        .tls_connector(Arc::new(tls))
+    let builder = ureq::AgentBuilder::new();
+    // The computer's own TLS. Android has rustls built in, with Mozilla's
+    // roots.
+    #[cfg(not(target_os = "android"))]
+    let builder = builder.tls_connector(Arc::new(
+        native_tls::TlsConnector::new().expect("system TLS is unavailable"),
+    ));
+    builder
         .timeout_connect(Duration::from_secs(10))
         .timeout_read(read_timeout)
         .try_proxy_from_env(true)

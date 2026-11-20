@@ -31,8 +31,84 @@ pub struct Message {
     pub payload: Value,
 }
 
+#[cfg(not(target_os = "android"))]
+type Tls = native_tls::TlsStream<TcpStream>;
+#[cfg(target_os = "android")]
+type Tls = rustls::StreamOwned<rustls::ClientConnection, TcpStream>;
+
+#[cfg(not(target_os = "android"))]
+fn secure(addr: SocketAddr, tcp: TcpStream) -> Result<Tls, String> {
+    let connector = native_tls::TlsConnector::builder()
+        .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_hostnames(true)
+        .build()
+        .map_err(|e| e.to_string())?;
+    connector
+        .connect(&addr.ip().to_string(), tcp)
+        .map_err(|e| format!("the device refused a secure connection ({e})"))
+}
+
+/// On Android, rustls. The handshake happens on the first message.
+#[cfg(target_os = "android")]
+fn secure(addr: SocketAddr, tcp: TcpStream) -> Result<Tls, String> {
+    use std::sync::Arc;
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .map_err(|e| e.to_string())?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AnyCertificate(provider)))
+        .with_no_client_auth();
+    let name = rustls::pki_types::ServerName::IpAddress(addr.ip().into());
+    let connection = rustls::ClientConnection::new(Arc::new(config), name)
+        .map_err(|e| format!("the device refused a secure connection ({e})"))?;
+    Ok(rustls::StreamOwned::new(connection, tcp))
+}
+
+/// Takes the device's self-signed certificate, but still checks that the
+/// device holds its key.
+#[cfg(target_os = "android")]
+#[derive(Debug)]
+struct AnyCertificate(std::sync::Arc<rustls::crypto::CryptoProvider>);
+
+#[cfg(target_os = "android")]
+impl rustls::client::danger::ServerCertVerifier for AnyCertificate {
+    fn verify_server_cert(
+        &self,
+        _: &rustls::pki_types::CertificateDer<'_>,
+        _: &[rustls::pki_types::CertificateDer<'_>],
+        _: &rustls::pki_types::ServerName<'_>,
+        _: &[u8],
+        _: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.0.signature_verification_algorithms.supported_schemes()
+    }
+}
+
 pub struct Channel {
-    tls: native_tls::TlsStream<TcpStream>,
+    tls: Tls,
     /// Bytes read but not yet a whole message.
     pending: Vec<u8>,
     /// This computer's address on the device's network, for the stream link.
@@ -46,14 +122,7 @@ impl Channel {
         let local_ip = tcp.local_addr().map_err(|e| e.to_string())?.ip();
         tcp.set_nodelay(true).ok();
         tcp.set_read_timeout(Some(Duration::from_secs(5))).ok();
-        let connector = native_tls::TlsConnector::builder()
-            .danger_accept_invalid_certs(true)
-            .danger_accept_invalid_hostnames(true)
-            .build()
-            .map_err(|e| e.to_string())?;
-        let tls = connector
-            .connect(&addr.ip().to_string(), tcp)
-            .map_err(|e| format!("the device refused a secure connection ({e})"))?;
+        let tls = secure(addr, tcp)?;
         // From here reads wait only briefly, so one thread can both listen
         // and send. A read that times out keeps what it had buffered.
         tls.get_ref()

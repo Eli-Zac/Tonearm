@@ -1,0 +1,26 @@
+[package]
+name = "tonearm-android"
+version = "0.10.0"
+edition = "2021"
+description = "Tonearm's core for the Android app, through UniFFI."
+license = "GPL-3.0-only"
+repository = "https://github.com/Eli-Zac/tonearm"
+publish = false
+
+[lib]
+name = "tonearm_android"
+crate-type = ["cdylib", "lib"]
+
+# Writes the Kotlin side: `cargo run -p tonearm-android --bin uniffi-bindgen
+# -- generate --library <libtonearm_android.so> --language kotlin --out-dir <dir>`
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+
+[dependencies]
+tonearm-core = { path = "../tonearm-core" }
+uniffi = { version = "0.32", features = ["cli"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+ndk-context = "0.1"
