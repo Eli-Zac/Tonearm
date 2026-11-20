@@ -56,7 +56,7 @@ class PlaybackService : MediaLibraryService() {
         controls = car
         session = MediaLibrarySession.Builder(this, player, Callback(core, player, AutoLibrary(core), car, work))
             .setSessionActivity(open)
-            .setMediaButtonPreferences(car.buttons())
+            .setMediaButtonPreferences(car.buttons(full = false))
             // Skip keeps its place on every controller: a Galaxy Watch
             // otherwise puts the like and shuffle buttons where skip goes.
             .setSessionExtras(
@@ -120,7 +120,7 @@ class PlaybackService : MediaLibraryService() {
                 .build()
             return MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller)
                 .setAvailableSessionCommands(commands)
-                .setMediaButtonPreferences(car.buttons())
+                .setMediaButtonPreferences(car.buttons(car.wantsFull(session, controller)))
                 .build()
         }
 
