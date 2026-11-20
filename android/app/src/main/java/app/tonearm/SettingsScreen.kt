@@ -36,8 +36,7 @@ import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Popup
-import androidx.compose.ui.window.PopupProperties
+import androidx.compose.ui.window.Dialog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -283,7 +282,7 @@ private fun PlaybackPage(core: Core) {
             "As a song ends, the next one fades in while it fades out. Skipping a song still switches at once.",
             Modifier.padding(20.dp),
         ) {
-            Dropdown(remember { core.crossfadeChoices() }) { core.setCrossfade(it.toUInt()) }
+            Dropdown(remember { core.crossfadeChoices() }, "Crossfade") { core.setCrossfade(it.toUInt()) }
         }
     }
     Card {
@@ -292,7 +291,7 @@ private fun PlaybackPage(core: Core) {
             "Plays every song at about the same loudness, using YouTube's own measure of each one. Loud also lifts quiet songs a little.",
             Modifier.padding(20.dp),
         ) {
-            Dropdown(remember { core.levellingChoices() }) { core.setLevelling(it.toUInt()) }
+            Dropdown(remember { core.levellingChoices() }, "Volume levelling") { core.setLevelling(it.toUInt()) }
         }
     }
 }
@@ -305,7 +304,7 @@ private fun CustomizationPage(core: Core) {
             "What Now playing shows for the cover. Animated cover is the album's moving cover from Apple Music, when it has one. Without a clip, the still cover shows.",
             Modifier.padding(20.dp),
         ) {
-            Dropdown(remember { core.coverChoices() }) {
+            Dropdown(remember { core.coverChoices() }, "Now playing cover") {
                 core.setCover(it.toUInt())
                 Prefs.changed()
             }
@@ -317,7 +316,7 @@ private fun CustomizationPage(core: Core) {
             "Shows a translation under each line of lyrics. The lyrics' own translation is used when they have one, and Google Translate otherwise.",
             Modifier.padding(20.dp),
         ) {
-            Dropdown(remember { core.translateChoices() }, menuMin = 200) {
+            Dropdown(remember { core.translateChoices() }, "Translate lyrics") {
                 core.setTranslate(it.toUInt())
                 Prefs.changed()
             }
@@ -340,7 +339,7 @@ private fun StoragePage(core: Core, onToast: (String) -> Unit) {
                 "Song cache",
                 "Songs you play are kept so they start at once next time. The least recently played go first when it fills up.",
             ) {
-                Dropdown(remember { core.cacheChoices() }) {
+                Dropdown(remember { core.cacheChoices() }, "Song cache") {
                     scope.launch {
                         withContext(Dispatchers.IO) { core.setCache(it.toUInt()) }
                         epoch++
@@ -685,7 +684,7 @@ private fun Field(value: String, onChange: (String) -> Unit, placeholder: String
 /** The desktop's dropdown: the choice and a chevron on a pill; a tap opens
  *  the list under it, the picked one bold with a dot beside it. */
 @Composable
-private fun Dropdown(choices: Choices, menuMin: Int = 160, onPick: (Int) -> Unit) {
+private fun Dropdown(choices: Choices, title: String, onPick: (Int) -> Unit) {
     var selected by remember { mutableIntStateOf(choices.selected.toInt()) }
     var open by remember { mutableStateOf(false) }
     val press = remember { MutableInteractionSource() }
@@ -712,39 +711,40 @@ private fun Dropdown(choices: Choices, menuMin: Int = 160, onPick: (Int) -> Unit
             Spacer(Modifier.width(10.dp))
             Icon(Icons.down, size = 14.sp, color = Tonearm.dim)
         }
+        // On a phone the choices open in a dialog over the page, the
+        // setting's name on top, rather than a list dropping from the pill.
         if (open) {
-            val width = with(density) { maxOf(buttonWidth.toDp(), menuMin.dp) }
-            val shift = with(density) { (buttonWidth - width.roundToPx()) }
-            Popup(
-                offset = IntOffset(shift, with(density) { (34.dp + 6.dp).roundToPx() }),
-                onDismissRequest = { open = false },
-                properties = PopupProperties(focusable = true),
-            ) {
+            Dialog(onDismissRequest = { open = false }) {
                 Column(
-                    Modifier.width(width).clip(RoundedCornerShape(12.dp)).background(Tonearm.raised)
-                        .border(1.dp, Tonearm.line, RoundedCornerShape(12.dp))
-                        .heightIn(max = 420.dp).verticalScroll(rememberScrollState())
-                        .padding(5.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Tonearm.raised)
+                        .border(1.dp, Tonearm.line, RoundedCornerShape(16.dp))
+                        .padding(vertical = 12.dp),
                 ) {
-                    choices.names.forEachIndexed { i, name ->
-                        val on = i == selected
-                        Row(
-                            Modifier.fillMaxWidth().height(36.dp).clip(RoundedCornerShape(8.dp))
-                                .clickable {
-                                    selected = i
-                                    open = false
-                                    onPick(i)
-                                }
-                                .padding(horizontal = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                name, color = if (on) Tonearm.text else Tonearm.dim, fontFamily = Tonearm.font,
-                                fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal, fontSize = 14.sp,
-                                modifier = Modifier.weight(1f),
-                            )
-                            if (on) Box(Modifier.size(6.dp).clip(CircleShape).background(Tonearm.accent))
+                    Title(title, size = 18.sp, weight = FontWeight.Bold,
+                        modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 6.dp, bottom = 8.dp))
+                    Column(
+                        Modifier.heightIn(max = 480.dp).verticalScroll(rememberScrollState()).padding(horizontal = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        choices.names.forEachIndexed { i, name ->
+                            val on = i == selected
+                            Row(
+                                Modifier.fillMaxWidth().height(48.dp).clip(RoundedCornerShape(10.dp))
+                                    .clickable {
+                                        selected = i
+                                        open = false
+                                        onPick(i)
+                                    }
+                                    .padding(horizontal = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    name, color = if (on) Tonearm.text else Tonearm.dim, fontFamily = Tonearm.font,
+                                    fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal, fontSize = 16.sp,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                if (on) Box(Modifier.size(8.dp).clip(CircleShape).background(Tonearm.accent))
+                            }
                         }
                     }
                 }
