@@ -80,12 +80,29 @@ fun Dim(text: String, size: TextUnit = 14.sp, lines: Int = 1, modifier: Modifier
 
 @Composable
 fun Art(url: String?, size: Dp, shape: Shape = RoundedCornerShape(8.dp), modifier: Modifier = Modifier) {
-    AsyncImage(
-        model = url?.ifEmpty { null },
-        contentDescription = null,
-        contentScale = ContentScale.Crop,
-        modifier = modifier.size(size).clip(shape).background(Tonearm.raised),
-    )
+    // A bone sweeps where the cover is coming, as the desktop's
+    // `ArtPending`; one that never comes stops it after a while, so an
+    // idle screen stays idle.
+    val model = url?.ifEmpty { null }
+    var loading by remember(model) { mutableStateOf(model != null) }
+    LaunchedEffect(model) {
+        kotlinx.coroutines.delay(8000)
+        loading = false
+    }
+    Box(modifier.size(size).clip(shape).background(Tonearm.raised)) {
+        if (loading) Bone(Modifier.matchParentSize(), androidx.compose.ui.graphics.RectangleShape)
+        AsyncImage(
+            model = model,
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            onState = {
+                if (it is coil3.compose.AsyncImagePainter.State.Success || it is coil3.compose.AsyncImagePainter.State.Error) {
+                    loading = false
+                }
+            },
+            modifier = Modifier.matchParentSize(),
+        )
+    }
 }
 
 /** What a row says under its title: the artist and album for a song,

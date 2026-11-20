@@ -120,24 +120,16 @@ private fun SuggestItemRow(item: Item, onClick: () -> Unit, onLongClick: () -> U
     }
 }
 
-/** Stands in for a result row: a square and two bars, gently pulsing. The
- *  bars' lengths vary by `seed` so a stack doesn't look stamped out, as
- *  the desktop's `SkeletonRow`. The pulse runs in drawing only. */
+/** Stands in for a result row: a square and two bars, built from bones.
+ *  The bars' lengths vary by `seed` so a stack doesn't look stamped out,
+ *  as the desktop's `SkeletonRow`. */
 @Composable
 private fun SkeletonRow(seed: Int) {
-    val pulse = rememberInfiniteTransition(label = "skeleton")
-    val alpha by pulse.animateFloat(
-        initialValue = 0.06f,
-        targetValue = 0.14f,
-        animationSpec = infiniteRepeatable(tween(900, easing = FastOutSlowInEasing), RepeatMode.Reverse),
-        label = "alpha",
-    )
-    val bone = Modifier.drawBehind { drawRect(Color.White.copy(alpha = alpha)) }
     Row(Modifier.fillMaxWidth().height(60.dp).padding(start = 8.dp, end = 14.dp), verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.size(44.dp).clip(RoundedCornerShape(6.dp)).then(bone))
+        Bone(Modifier.size(44.dp))
         Column(Modifier.weight(1f).padding(start = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Box(Modifier.fillMaxWidth(0.62f - (seed * 7 % 5) * 0.055f).height(11.dp).clip(RoundedCornerShape(4.dp)).then(bone))
-            Box(Modifier.fillMaxWidth(0.34f - (seed * 3 % 4) * 0.035f).height(9.dp).clip(RoundedCornerShape(4.dp)).then(bone))
+            Bone(Modifier.fillMaxWidth(0.62f - (seed * 7 % 5) * 0.055f).height(11.dp), RoundedCornerShape(4.dp))
+            Bone(Modifier.fillMaxWidth(0.34f - (seed * 3 % 4) * 0.035f).height(9.dp), RoundedCornerShape(4.dp))
         }
     }
 }

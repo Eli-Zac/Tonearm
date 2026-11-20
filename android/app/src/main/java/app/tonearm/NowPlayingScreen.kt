@@ -301,22 +301,10 @@ private fun LyricsSkeleton(height: androidx.compose.ui.unit.Dp) {
     }
 }
 
-/** A faint bar, gently pulsing, `width` of the room across, where text
- *  will be. The pulse runs in the draw phase only, so it costs no
- *  recomposition. */
+/** A bone, `width` of the room across, where text will be. */
 @Composable
 internal fun TextSkeleton(width: Float, height: androidx.compose.ui.unit.Dp) {
-    val pulse = rememberInfiniteTransition(label = "skeleton")
-    val alpha by pulse.animateFloat(
-        initialValue = 0.06f,
-        targetValue = 0.14f,
-        animationSpec = infiniteRepeatable(tween(900, easing = FastOutSlowInEasing), RepeatMode.Reverse),
-        label = "alpha",
-    )
-    Box(
-        Modifier.fillMaxWidth(width).height(height).clip(RoundedCornerShape(6.dp))
-            .drawBehind { drawRect(Color.White.copy(alpha = alpha)) },
-    )
+    Bone(Modifier.fillMaxWidth(width).height(height))
 }
 
 /** The song's artists, each name opening their page where YouTube Music
