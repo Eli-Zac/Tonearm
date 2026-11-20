@@ -533,7 +533,18 @@ fun SearchScreen(core: Core, actions: Actions) {
                 found = found,
                 loading = finding,
                 onSearch = ::search,
-                onItem = { putAway(); tapped.tap(it) },
+                // A song just plays: the list stays as it was under Now
+                // Playing, rather than giving way to a search behind it.
+                // Anything else opens its page, so the list goes.
+                onItem = {
+                    if (it.videoId != null) {
+                        keyboard?.hide()
+                        actions.tap(it)
+                    } else {
+                        putAway()
+                        tapped.tap(it)
+                    }
+                },
                 onItemMenu = { tapped.menu(it) },
             )
         } else if (words == null) {
