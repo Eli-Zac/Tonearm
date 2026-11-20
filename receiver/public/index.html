@@ -60,13 +60,16 @@
     to { transform: translate(0.6vw, 0.6vh); }
   }
 
-  .song { display: flex; align-items: center; gap: 6vw; min-width: 0; flex: 1; }
+  /* The cover and words sit as one group in the middle of the screen,
+     rather than stretching to the right edge. */
+  .stage { justify-content: center; }
+  .song { display: flex; align-items: center; gap: 6vw; min-width: 0; flex: 0 1 auto; }
   .cover {
     flex: none; width: 46vh; height: 46vh; border-radius: 1.6vh;
     background: #222 center / cover no-repeat;
     box-shadow: 0 3vh 8vh rgba(0, 0, 0, 0.55);
   }
-  .text { min-width: 0; flex: 1; }
+  .text { min-width: 0; flex: 0 1 auto; width: 76vh; }
   .title {
     font-size: 6.4vh; font-weight: 700; line-height: 1.12;
     display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
@@ -101,13 +104,13 @@
   /* A song with synced lyrics: the song in a column on the left, its
      lyrics on the right. */
   .lyrics { display: none; }
-  .lyrical .stage { gap: 7vw; padding: 0 6vw 0 8vw; }
+  .lyrical .stage { gap: 7vw; padding: 0 6vw; }
   .lyrical .song {
     flex: none; width: 44vh;
     flex-direction: column; align-items: stretch; gap: 0;
   }
   .lyrical .cover { width: 44vh; height: 44vh; }
-  .lyrical .text { margin-top: 4.4vh; }
+  .lyrical .text { margin-top: 4.4vh; width: auto; }
   .lyrical .title { font-size: 4.4vh; }
   .lyrical .artist { font-size: 2.9vh; margin-top: 1vh; }
   .lyrical .album { font-size: 2.4vh; margin-top: 0.6vh; }
@@ -115,7 +118,7 @@
   .lyrical .times { font-size: 2.1vh; margin-top: 1.1vh; }
 
   .lyrical .lyrics {
-    display: block; position: relative; flex: 1; min-width: 0; height: 100%;
+    display: block; position: relative; flex: 0 1 92vh; min-width: 0; height: 100%;
     overflow: hidden;
     -webkit-mask-image: linear-gradient(transparent 0, #000 22%, #000 72%, transparent 100%);
     mask-image: linear-gradient(transparent 0, #000 22%, #000 72%, transparent 100%);
