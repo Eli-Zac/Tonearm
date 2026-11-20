@@ -413,6 +413,25 @@ fn first_artist(artist: &str) -> &str {
 
 /// The square video's stream for the first of the albums that has one.
 fn video_url(http: &ureq::Agent, ids: &[String]) -> Result<Option<String>, String> {
+    let albums = album_videos(http, ids)?;
+    // Apple answers in its own order. Keep ours, best match first.
+    for id in ids {
+        let Some((_, videos)) = albums.iter().find(|(found, _)| found == id) else {
+            continue;
+        };
+        let url = ["motionSquareVideo1x1", "motionDetailSquare"].iter().find_map(|kind| {
+            videos.get(*kind)?.get("video")?.as_str().map(str::to_string)
+        });
+        if url.is_some() {
+            return Ok(url);
+        }
+    }
+    Ok(None)
+}
+
+/// Each of the albums Apple found, by id, with its `editorialVideo`: the
+/// moving covers it has, by kind.
+fn album_videos(http: &ureq::Agent, ids: &[String]) -> Result<Vec<(String, serde_json::Map<String, Value>)>, String> {
     for attempt in 0..2 {
         let token = token(http)?;
         let result = http
@@ -434,21 +453,18 @@ fn video_url(http: &ureq::Agent, ids: &[String]) -> Result<Option<String>, Strin
             Err(e) => return Err(format!("Apple Music catalogue: {e}")),
         };
         let albums = response.get("data").and_then(Value::as_array).cloned().unwrap_or_default();
-        // Apple answers in its own order. Keep ours, best match first.
-        for id in ids {
-            let Some(found) = albums.iter().find(|a| a.get("id").and_then(Value::as_str) == Some(id))
-            else {
-                continue;
-            };
-            let videos = found.pointer("/attributes/editorialVideo");
-            let url = ["motionSquareVideo1x1", "motionDetailSquare"].iter().find_map(|kind| {
-                videos?.get(kind)?.get("video")?.as_str().map(str::to_string)
-            });
-            if url.is_some() {
-                return Ok(url);
-            }
-        }
-        return Ok(None);
+        return Ok(albums
+            .iter()
+            .filter_map(|album| {
+                let id = album.get("id")?.as_str()?.to_string();
+                let videos = album
+                    .pointer("/attributes/editorialVideo")
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                Some((id, videos))
+            })
+            .collect());
     }
     Err("Apple Music refused its own token".into())
 }
@@ -789,6 +805,14 @@ pub fn probe(album: &str, artist: &str) {
         Err(message) => return println!("search: {message}"),
     };
     println!("albums {ids:?}");
+    match album_videos(&http, &ids) {
+        Ok(albums) => {
+            for (id, kinds) in albums {
+                println!("album {id} has {:?}", kinds.keys().collect::<Vec<_>>());
+            }
+        }
+        Err(message) => return println!("catalogue: {message}"),
+    }
     let master = match video_url(&http, &ids) {
         Ok(Some(url)) => url,
         Ok(None) => return println!("no moving cover"),

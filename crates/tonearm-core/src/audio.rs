@@ -124,6 +124,38 @@ impl SeekHold {
     }
 }
 
+/// Whether play or pause was last asked for, for what is shown. The engine
+/// takes the command on its own thread, so for a moment after a tap it
+/// still reports the old state, and a button drawn from that report flips
+/// back before it flips over. Shown instead is the state asked for, until
+/// the engine reports it (or stops on its own: loading, ended, failed), or
+/// two seconds pass.
+#[derive(Default)]
+pub struct PlayHold {
+    held: Mutex<Option<(bool, Instant)>>,
+}
+
+impl PlayHold {
+    /// Play (`true`) or pause asked for.
+    pub fn set(&self, playing: bool) {
+        *self.held.lock().unwrap() = Some((playing, Instant::now()));
+    }
+
+    /// The engine's `state` to show: `PLAYING` or `PAUSED` as asked while
+    /// held, anything else as it is.
+    pub fn apply(&self, state: u32) -> u32 {
+        let mut held = self.held.lock().unwrap();
+        let Some((playing, since)) = *held else { return state };
+        let wanted = if playing { PLAYING } else { PAUSED };
+        let settled = state == wanted || !matches!(state, PLAYING | PAUSED);
+        if settled || since.elapsed() > Duration::from_secs(2) {
+            *held = None;
+            return state;
+        }
+        wanted
+    }
+}
+
 pub struct Audio {
     tx: Sender<Command>,
     pub status: Arc<Status>,

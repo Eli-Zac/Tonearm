@@ -1,6 +1,12 @@
 package app.tonearm
 
 import android.graphics.Bitmap
+import android.graphics.BitmapShader
+import android.graphics.RuntimeShader
+import android.graphics.Shader
+import android.os.Build
+import androidx.annotation.RequiresApi
+import androidx.compose.ui.graphics.ShaderBrush
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
@@ -97,9 +103,17 @@ fun FlowingBackdrop(cover: String?, modifier: Modifier = Modifier) {
         }
     }
 
+    val smooth = remember(frame, from) {
+        if (Build.VERSION.SDK_INT >= 33) SmoothStretch(frame, from) else null
+    }
+
     Canvas(modifier) {
         if (drawn == 0 || base == null) {
             drawRect(Tonearm.island)
+            drawRect(Brush.verticalGradient(0f to Color(0x38000000), 1f to Color(0x70000000)))
+        } else if (smooth != null) {
+            // Read here, in drawing, so the fade only redraws.
+            drawRect(smooth.brush(size.width, size.height, fade.value))
         } else {
             // Fills the screen as the desktop's `image-fit: cover` does:
             // the frame's middle, cut to the screen's shape.
@@ -125,8 +139,89 @@ fun FlowingBackdrop(cover: String?, modifier: Modifier = Modifier) {
                 alpha = t,
                 filterQuality = FilterQuality.Low,
             )
+            // Darkened a little, so the cover and words stand out on it.
+            drawRect(Brush.verticalGradient(0f to Color(0x38000000), 1f to Color(0x70000000)))
         }
-        // Darkened a little, so the cover and words stand out on it.
-        drawRect(Brush.verticalGradient(0f to Color(0x38000000), 1f to Color(0x70000000)))
+    }
+}
+
+/**
+ * Stretches the small frame over the screen without the faint lines a
+ * plain stretch leaves. Straight-line blending between pixels 37 screen
+ * pixels apart shows a seam at every one of them, and the slow colour
+ * changes break into visible steps; this blends along smooth curves
+ * (a cubic B-spline, from four of the GPU's own blended reads) and
+ * scatters each pixel by under one level of colour so no steps show. The
+ * shade the desktop lays over it is worked in too, so it is one pass.
+ */
+@RequiresApi(33)
+private class SmoothStretch(frame: Bitmap, from: Bitmap) {
+    private val shader = RuntimeShader(SHADER).apply {
+        setInputShader("frame", BitmapShader(frame, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP).smooth())
+        setInputShader("from", BitmapShader(from, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP).smooth())
+    }
+    private val brush = ShaderBrush(shader)
+
+    fun brush(width: Float, height: Float, fade: Float): Brush {
+        // Fills the screen as the desktop's `image-fit: cover` does: the
+        // frame's middle, cut to the screen's shape.
+        val scale = FRAME / minOf(width, height)
+        shader.setFloatUniform("scale", scale)
+        shader.setFloatUniform("origin", (FRAME - width * scale) / 2f, (FRAME - height * scale) / 2f)
+        shader.setFloatUniform("height", height)
+        shader.setFloatUniform("fade", fade)
+        return brush
+    }
+
+    private fun BitmapShader.smooth() = apply {
+        filterMode = BitmapShader.FILTER_MODE_LINEAR
+    }
+
+    private companion object {
+        const val SHADER = """
+            uniform shader frame;
+            uniform shader from;
+            uniform float scale;
+            uniform float2 origin;
+            uniform float height;
+            uniform float fade;
+
+            // The cubic B-spline's four weights, and where to read so the
+            // GPU's blending does the weighing, along one axis.
+            float4 spline(float f) {
+                float f2 = f * f;
+                float f3 = f2 * f;
+                float w0 = (1.0 - 3.0 * f + 3.0 * f2 - f3) / 6.0;
+                float w1 = (4.0 - 6.0 * f2 + 3.0 * f3) / 6.0;
+                float w2 = (1.0 + 3.0 * f + 3.0 * f2 - 3.0 * f3) / 6.0;
+                float w3 = f3 / 6.0;
+                float g0 = w0 + w1;
+                float g1 = w2 + w3;
+                return float4(g0, g1, -1.0 + w1 / g0, 1.0 + w3 / g1);
+            }
+
+            half4 main(float2 p) {
+                float2 t = origin + p * scale - 0.5;
+                float2 i = floor(t);
+                float2 f = t - i;
+                float4 sx = spline(f.x);
+                float4 sy = spline(f.y);
+                float2 a = i + float2(sx.z, sy.z) + 0.5;
+                float2 b = i + float2(sx.w, sy.w) + 0.5;
+                half3 c = sy.x * (sx.x * frame.eval(a).rgb + sx.y * frame.eval(float2(b.x, a.y)).rgb)
+                        + sy.y * (sx.x * frame.eval(float2(a.x, b.y)).rgb + sx.y * frame.eval(b).rgb);
+                if (fade < 1.0) {
+                    half3 o = sy.x * (sx.x * from.eval(a).rgb + sx.y * from.eval(float2(b.x, a.y)).rgb)
+                            + sy.y * (sx.x * from.eval(float2(a.x, b.y)).rgb + sx.y * from.eval(b).rgb);
+                    c = mix(o, c, half(fade));
+                }
+                // The shade: black from 0x38 at the top to 0x70 at the foot.
+                c *= 1.0 - mix(56.0, 112.0, clamp(p.y / height, 0.0, 1.0)) / 255.0;
+                // Under a level of scatter, so smooth changes show no steps.
+                float n = fract(52.9829189 * fract(dot(p, float2(0.06711056, 0.00583715))));
+                c += (n - 0.5) / 255.0;
+                return half4(c, 1.0);
+            }
+        """
     }
 }

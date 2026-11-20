@@ -535,6 +535,9 @@ struct App {
     /// Where a seek sent the song, shown until the audio's report catches
     /// up, so the timeline doesn't jump back.
     seek_hold: audio::SeekHold,
+    /// Play or pause just pressed, shown until the audio takes it, so the
+    /// button doesn't flick back.
+    play_hold: audio::PlayHold,
     /// Seconds a song crossfades into the next one over. Zero is off.
     crossfade: Cell<u32>,
     /// Songs' analyses read from the library, by video id.
@@ -4238,9 +4241,16 @@ impl App {
     }
 
     fn toggle_play(self: &Rc<Self>) {
-        match self.audio.status.state.load(Ordering::SeqCst) {
-            audio::PLAYING => self.audio.pause(),
-            audio::PAUSED => self.audio.play(),
+        // Toggles what is shown, so a quick second press undoes the first.
+        match self.play_hold.apply(self.audio.status.state.load(Ordering::SeqCst)) {
+            audio::PLAYING => {
+                self.play_hold.set(false);
+                self.audio.pause();
+            }
+            audio::PAUSED => {
+                self.play_hold.set(true);
+                self.audio.play();
+            }
             audio::LOADING => {}
             _ => {
                 let index = self.player.borrow().index;
@@ -4666,7 +4676,7 @@ impl App {
             self.followed(followed);
         }
         let status = &self.audio.status;
-        let state = status.state.load(Ordering::SeqCst);
+        let state = self.play_hold.apply(status.state.load(Ordering::SeqCst));
         // The Canvas only shows in Now playing. It holds its frame while the
         // music is paused or no one can see it, and decodes nothing meanwhile.
         let seen = !self.minimized.get() && !self.hidden.get();
@@ -6274,6 +6284,7 @@ fn main() -> Result<(), slint::PlatformError> {
         outgoing: RefCell::new(None),
         clock: Cell::new((0, Instant::now())),
         seek_hold: audio::SeekHold::default(),
+        play_hold: audio::PlayHold::default(),
         crossfade: Cell::new(load_crossfade()),
         analyses: RefCell::new(HashMap::new()),
         unanalyzed: RefCell::new(HashSet::new()),

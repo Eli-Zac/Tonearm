@@ -14,7 +14,12 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
+import androidx.media3.common.PlaybackException
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.mediacodec.MediaCodecDecoderException
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
+import androidx.media3.exoplayer.mediacodec.MediaCodecUtil
 import androidx.media3.ui.compose.PlayerSurface
 import androidx.media3.ui.compose.SURFACE_TYPE_TEXTURE_VIEW
 import java.io.File
@@ -28,12 +33,22 @@ import java.io.File
  * Its own small player, apart from the music's: audio is switched off, so
  * it never decodes sound or asks for audio focus. It is let go when the
  * cover leaves the screen and pauses while the app is out of sight.
+ *
+ * Some devices' video decoders turn the clip down after taking it (the
+ * emulator's hardware H.264 decoder fails on its first buffer), which left
+ * the cover still. A decoder that fails is remembered and passed over, and
+ * the clip starts again on the next one, usually the software decoder.
  */
 @Composable
 fun MotionCover(path: String, modifier: Modifier = Modifier) {
     val context = LocalContext.current
-    val player = remember(path) {
-        ExoPlayer.Builder(context).build().apply {
+    // Bumped when a decoder fails, to build the player again without it.
+    var attempt by remember(path) { mutableStateOf(0) }
+    val player = remember(path, attempt) {
+        val renderers = DefaultRenderersFactory(context)
+            .setEnableDecoderFallback(true)
+            .setMediaCodecSelector(WorkingDecoders)
+        ExoPlayer.Builder(context, renderers).build().apply {
             trackSelectionParameters = trackSelectionParameters.buildUpon()
                 .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true)
                 .build()
@@ -49,6 +64,14 @@ fun MotionCover(path: String, modifier: Modifier = Modifier) {
         val listener = object : Player.Listener {
             override fun onRenderedFirstFrame() {
                 shown = true
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                var cause: Throwable? = error
+                while (cause != null && cause !is MediaCodecDecoderException) cause = cause.cause
+                val name = (cause as? MediaCodecDecoderException)?.codecInfo?.name ?: return
+                // Only try again while there is another decoder to try.
+                if (WorkingDecoders.broken.add(name)) attempt++
             }
         }
         player.addListener(listener)
@@ -81,4 +104,12 @@ fun MotionCover(path: String, modifier: Modifier = Modifier) {
         modifier = modifier.graphicsLayer { this.alpha = alpha },
         surfaceType = SURFACE_TYPE_TEXTURE_VIEW,
     )
+}
+
+/** The device's decoders, less any that have failed on a clip before. */
+private object WorkingDecoders : MediaCodecSelector {
+    val broken: MutableSet<String> = java.util.Collections.synchronizedSet(mutableSetOf())
+
+    override fun getDecoderInfos(mimeType: String, secure: Boolean, tunneling: Boolean) =
+        MediaCodecUtil.getDecoderInfos(mimeType, secure, tunneling).filter { it.name !in broken }
 }

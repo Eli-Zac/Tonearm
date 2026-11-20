@@ -130,6 +130,8 @@ pub struct Tonearm {
     liked: Mutex<HashMap<String, bool>>,
     /// Where a seek sent the song, reported until the engine catches up.
     seek_hold: audio::SeekHold,
+    /// Play or pause just asked for, reported until the engine takes it.
+    play_hold: audio::PlayHold,
 }
 
 #[uniffi::export]
@@ -155,6 +157,7 @@ impl Tonearm {
             lyrics: Mutex::new(HashMap::new()),
             liked: Mutex::new(HashMap::new()),
             seek_hold: audio::SeekHold::default(),
+            play_hold: audio::PlayHold::default(),
         });
         // Signed in as last time, as the desktop app starts.
         if let Some(cookie) = store::load("session") {
@@ -534,10 +537,12 @@ impl Tonearm {
     }
 
     pub fn pause(&self) {
+        self.play_hold.set(false);
         self.audio.pause();
     }
 
     pub fn resume(&self) {
+        self.play_hold.set(true);
         self.audio.play();
     }
 
@@ -554,7 +559,7 @@ impl Tonearm {
         } else if !note.is_empty() {
             PlayState::Failed
         } else {
-            match status.state.load(Ordering::SeqCst) {
+            match self.play_hold.apply(status.state.load(Ordering::SeqCst)) {
                 audio::LOADING => PlayState::Loading,
                 audio::PLAYING => PlayState::Playing,
                 audio::PAUSED => PlayState::Paused,
@@ -569,12 +574,18 @@ impl Tonearm {
             note
         };
         let queue = self.queue.lock().unwrap();
+        // While the next song's stream is found, the engine still holds the
+        // last song's place; the new one starts from the top.
+        let loading = state == PlayState::Loading;
         Playback {
             state,
-            position_ms: self
-                .seek_hold
-                .apply(status.position_ms.load(Ordering::SeqCst), state == PlayState::Playing),
-            duration_ms: status.duration_ms.load(Ordering::SeqCst),
+            position_ms: if loading {
+                0
+            } else {
+                self.seek_hold
+                    .apply(status.position_ms.load(Ordering::SeqCst), state == PlayState::Playing)
+            },
+            duration_ms: if loading { 0 } else { status.duration_ms.load(Ordering::SeqCst) },
             error,
             index: queue.index() as u32,
             version: self.version.load(Ordering::SeqCst),
