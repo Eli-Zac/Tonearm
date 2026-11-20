@@ -54,6 +54,9 @@ struct Casting {
     generation: u64,
     /// The lyrics the device has, by video id and line count.
     lyrics_sent: Option<String>,
+    /// The song whose lyrics the cast last asked for itself, so each is
+    /// asked for once.
+    lyrics_asked: Option<String>,
     /// When the device was last told the song playing.
     told: Option<Instant>,
     /// Said once, then taken by the app as a toast.
@@ -169,6 +172,7 @@ impl Tonearm {
             c.connecting = true;
             c.volume = 1.0;
             c.lyrics_sent = None;
+            c.lyrics_asked = None;
             c.told = None;
         });
     }
@@ -258,7 +262,7 @@ impl Tonearm {
 
     /// Tells Tonearm's own receiver the song playing, about once a second,
     /// and its synced lyrics once found. From the queue thread's tick.
-    pub(crate) fn cast_now_playing(&self) {
+    pub(crate) fn cast_now_playing(self: &Arc<Self>) {
         let shows = with(|c| {
             c.session.as_ref().is_some_and(|s| s.shows_songs())
                 && c.told.is_none_or(|t| t.elapsed() >= Duration::from_secs(1))
@@ -267,6 +271,25 @@ impl Tonearm {
             return;
         }
         let Some(song) = self.now_playing() else { return };
+        // The app finds lyrics only while its screen is open. With the
+        // phone locked or the app in the background the cast asks for
+        // them itself, once a song, so the device still shows them.
+        let known = self.lyrics.lock().unwrap().contains_key(&song.video_id);
+        let ask = !known
+            && with(|c| {
+                let new = c.lyrics_asked.as_deref() != Some(song.video_id.as_str());
+                if new {
+                    c.lyrics_asked = Some(song.video_id.clone());
+                }
+                new
+            });
+        if ask {
+            let me = self.clone();
+            let (id, title, artist) = (song.video_id.clone(), song.title.clone(), song.artist.clone());
+            std::thread::spawn(move || {
+                me.core_lyrics(id, title, artist, 0.0);
+            });
+        }
         let status = &self.audio.status;
         let position = status.position_ms.load(Ordering::SeqCst).saturating_sub(status.lag_ms.load(Ordering::SeqCst));
         let playing = status.state.load(Ordering::SeqCst) == tonearm_core::audio::PLAYING;
