@@ -63,7 +63,8 @@ class AutoLibrary(private val core: Core) {
             return TABS.map { (tab, title) ->
                 nodes[TAB + tab] = TabNode(tab)
                 // Albums and playlists show as tiles, songs as rows.
-                folder(TAB + tab, title, "", null, hint = GRID)
+                // Each tab carries the phone tab bar's icon, from the same font.
+                folder(TAB + tab, title, "", null, hint = GRID, icon = android.net.Uri.parse("android.resource://app.tonearm/drawable/ic_tab_$tab"))
             }
         }
         if (id == RECENT) {
@@ -171,6 +172,8 @@ class AutoLibrary(private val core: Core) {
         hint: Int,
         group: String? = null,
         single: Int? = null,
+        /** A tab's icon, in place of art. */
+        icon: android.net.Uri? = null,
     ): MediaItem {
         val extras = Bundle().apply {
             // How what is inside shows: albums as tiles or rows, songs as rows.
@@ -184,7 +187,7 @@ class AutoLibrary(private val core: Core) {
                 .setTitle(title)
                 .setSubtitle(subtitle.ifEmpty { null })
                 .setArtist(subtitle.ifEmpty { null })
-                .setArtworkUri(art?.let(ArtProvider::uri))
+                .setArtworkUri(icon ?: art?.let(ArtProvider::uri))
                 .setIsPlayable(false)
                 .setIsBrowsable(true)
                 .setMediaType(MediaMetadata.MEDIA_TYPE_FOLDER_MIXED)
