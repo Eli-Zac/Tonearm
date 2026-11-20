@@ -42,6 +42,9 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.11.1")
     implementation("androidx.core:core-ktx:1.19.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
+    // The media session: notification, lock screen, headphone buttons.
+    implementation("androidx.media3:media3-session:1.11.1")
+    implementation("androidx.media3:media3-common:1.11.1")
     // UniFFI's Kotlin calls into Rust through JNA.
     implementation("net.java.dev.jna:jna:5.19.1@aar")
     implementation("io.coil-kt.coil3:coil-compose:3.6.3")

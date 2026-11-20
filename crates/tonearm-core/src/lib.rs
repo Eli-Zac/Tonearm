@@ -19,6 +19,7 @@ pub mod lyrics;
 pub mod mix;
 pub mod offline;
 pub mod pool;
+pub mod queue;
 pub mod quick_access;
 pub mod releases;
 pub mod resolver;

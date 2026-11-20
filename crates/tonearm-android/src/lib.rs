@@ -1,20 +1,25 @@
 //! Tonearm's core for the Android app. UniFFI writes the Kotlin side from
 //! what is exported here: one `Tonearm` object that searches YouTube Music
-//! and plays songs through the core's own engine.
+//! and plays a queue of songs through the core's own engine.
 //!
 //! Calls that reach the network block, so the app makes them off its main
 //! thread. Before anything plays, the app calls `TonearmNative.init` with
 //! its context (see `android`), which Android's audio needs.
+//!
+//! The queue moves on by itself when a song ends. The app reads where
+//! things stand with `playback`, a few times a second.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 use tonearm_core::innertube::model::Kind;
+use tonearm_core::queue::{Queue, Repeat, Step};
 use tonearm_core::{audio, innertube, resolver, store};
 
 uniffi::setup_scaffolding!();
 
 /// A song found, as the app lists it.
-#[derive(uniffi::Record)]
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
 pub struct Song {
     pub video_id: String,
     pub title: String,
@@ -29,12 +34,22 @@ pub struct Song {
 
 #[derive(uniffi::Enum, Clone, Copy, PartialEq, Debug)]
 pub enum PlayState {
+    /// Nothing loaded yet.
     Idle,
+    /// Finding the song's stream, or the engine opening it.
     Loading,
     Playing,
     Paused,
+    /// The queue played out.
     Ended,
     Failed,
+}
+
+#[derive(uniffi::Enum, Clone, Copy, PartialEq, Debug)]
+pub enum RepeatMode {
+    Off,
+    All,
+    One,
 }
 
 /// Where playback stands, for the app to poll.
@@ -45,6 +60,12 @@ pub struct Playback {
     pub duration_ms: u64,
     /// Why it failed, when it did.
     pub error: String,
+    /// The song playing's place in the queue.
+    pub index: u32,
+    /// Changes whenever the queue or the song playing does, so the app
+    /// knows to read them again.
+    pub version: u64,
+    pub repeat: RepeatMode,
 }
 
 /// In Kotlin, a `TonearmException` whose message says what went wrong.
@@ -75,8 +96,18 @@ pub struct Tonearm {
     client: innertube::Client,
     resolver: Box<dyn resolver::Resolver>,
     audio: audio::Audio,
+    queue: Mutex<Queue<Song>>,
     /// Counts songs loaded, so the engine can tell them apart.
     generation: AtomicU64,
+    /// Counts requests to play a song. A request that finds a newer one
+    /// when its stream arrives lets it be.
+    request: AtomicU64,
+    /// A stream is being found.
+    loading: AtomicBool,
+    /// Why the last song couldn't start. Cleared by the next.
+    note: Mutex<String>,
+    /// Bumped when the queue or the song playing changes.
+    version: AtomicU64,
 }
 
 #[uniffi::export]
@@ -87,17 +118,23 @@ impl Tonearm {
     pub fn new(home: String) -> Result<Arc<Self>, TonearmError> {
         store::set_home(home.into());
         let resolver = resolver::default().ok_or_else(|| "no way to find song links".to_string())?;
-        let tonearm = Tonearm {
+        let tonearm = Arc::new(Tonearm {
             client: innertube::Client::new(),
             resolver,
             audio: audio::Audio::new(),
+            queue: Mutex::new(Queue::default()),
             generation: AtomicU64::new(0),
-        };
+            request: AtomicU64::new(0),
+            loading: AtomicBool::new(false),
+            note: Mutex::new(String::new()),
+            version: AtomicU64::new(0),
+        });
         // Signed in as last time, as the desktop app starts.
         if let Some(cookie) = store::load("session") {
             tonearm.apply(&cookie);
         }
-        Ok(Arc::new(tonearm))
+        watch(Arc::downgrade(&tonearm));
+        Ok(tonearm)
     }
 
     /// Signs in with a YouTube Music `Cookie:` header and keeps it for next
@@ -132,19 +169,45 @@ impl Tonearm {
             .collect())
     }
 
-    /// Finds the song's stream and plays it, in place of whatever played.
-    pub fn play(&self, video_id: String) -> Result<(), TonearmError> {
-        let stream = self.resolver.resolve(&video_id)?;
-        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        self.audio.load(
-            audio::Input::Http {
-                url: stream.url,
-                headers: stream.headers,
-                cache_as: None,
-            },
-            generation,
-        );
-        Ok(())
+    /// Plays `songs` from `index`, in place of the queue.
+    pub fn set_queue(&self, songs: Vec<Song>, index: u32) -> Result<(), TonearmError> {
+        self.queue.lock().unwrap().set(songs, index as usize);
+        self.changed();
+        self.play_current()
+    }
+
+    /// Plays the song at `index` in the queue.
+    pub fn skip_to(&self, index: u32) -> Result<(), TonearmError> {
+        self.step(Step::Play(index as usize))
+    }
+
+    pub fn next(&self) -> Result<(), TonearmError> {
+        let step = self.queue.lock().unwrap().next();
+        self.step(step)
+    }
+
+    pub fn previous(&self) -> Result<(), TonearmError> {
+        let position = self.audio.status.position_ms.load(Ordering::SeqCst);
+        let step = self.queue.lock().unwrap().previous(position);
+        self.step(step)
+    }
+
+    pub fn queue(&self) -> Vec<Song> {
+        self.queue.lock().unwrap().items().to_vec()
+    }
+
+    /// The song playing, or the one the queue is on.
+    pub fn now_playing(&self) -> Option<Song> {
+        self.queue.lock().unwrap().current().cloned()
+    }
+
+    pub fn set_repeat(&self, mode: RepeatMode) {
+        self.queue.lock().unwrap().repeat = match mode {
+            RepeatMode::Off => Repeat::Off,
+            RepeatMode::All => Repeat::All,
+            RepeatMode::One => Repeat::One,
+        };
+        self.changed();
     }
 
     pub fn pause(&self) {
@@ -161,19 +224,39 @@ impl Tonearm {
 
     pub fn playback(&self) -> Playback {
         let status = &self.audio.status;
-        let state = match status.state.load(Ordering::SeqCst) {
-            audio::LOADING => PlayState::Loading,
-            audio::PLAYING => PlayState::Playing,
-            audio::PAUSED => PlayState::Paused,
-            audio::ENDED => PlayState::Ended,
-            audio::FAILED => PlayState::Failed,
-            _ => PlayState::Idle,
+        let note = self.note.lock().unwrap().clone();
+        let state = if self.loading.load(Ordering::SeqCst) {
+            PlayState::Loading
+        } else if !note.is_empty() {
+            PlayState::Failed
+        } else {
+            match status.state.load(Ordering::SeqCst) {
+                audio::LOADING => PlayState::Loading,
+                audio::PLAYING => PlayState::Playing,
+                audio::PAUSED => PlayState::Paused,
+                audio::ENDED => PlayState::Ended,
+                audio::FAILED => PlayState::Failed,
+                _ => PlayState::Idle,
+            }
         };
+        let error = if note.is_empty() {
+            status.error.lock().map(|e| e.clone()).unwrap_or_default()
+        } else {
+            note
+        };
+        let queue = self.queue.lock().unwrap();
         Playback {
             state,
             position_ms: status.position_ms.load(Ordering::SeqCst),
             duration_ms: status.duration_ms.load(Ordering::SeqCst),
-            error: status.error.lock().map(|e| e.clone()).unwrap_or_default(),
+            error,
+            index: queue.index() as u32,
+            version: self.version.load(Ordering::SeqCst),
+            repeat: match queue.repeat {
+                Repeat::Off => RepeatMode::Off,
+                Repeat::All => RepeatMode::All,
+                Repeat::One => RepeatMode::One,
+            },
         }
     }
 }
@@ -188,6 +271,101 @@ impl Tonearm {
         }
         ok
     }
+
+    fn changed(&self) {
+        self.version.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn step(&self, step: Step) -> Result<(), TonearmError> {
+        match step {
+            Step::Play(index) => {
+                self.queue.lock().unwrap().go(index);
+                self.changed();
+                self.play_current()
+            }
+            Step::Restart => {
+                self.audio.seek(0.0);
+                self.audio.play();
+                Ok(())
+            }
+            Step::Stop => Ok(()),
+        }
+    }
+
+    /// Finds the stream of the queue's song and plays it. A newer request
+    /// made meanwhile wins.
+    fn play_current(&self) -> Result<(), TonearmError> {
+        let Some(song) = self.queue.lock().unwrap().current().cloned() else {
+            return Ok(());
+        };
+        let request = self.request.fetch_add(1, Ordering::SeqCst) + 1;
+        self.note.lock().unwrap().clear();
+        self.loading.store(true, Ordering::SeqCst);
+        let found = self.resolver.resolve(&song.video_id);
+        if self.request.load(Ordering::SeqCst) != request {
+            return Ok(());
+        }
+        let stream = match found {
+            Ok(stream) => stream,
+            Err(message) => {
+                *self.note.lock().unwrap() = message.clone();
+                self.loading.store(false, Ordering::SeqCst);
+                return Err(message.into());
+            }
+        };
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        self.audio.load(
+            audio::Input::Http {
+                url: stream.url,
+                headers: stream.headers,
+                cache_as: None,
+            },
+            generation,
+        );
+        self.loading.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// The song playing has run out: what the queue says comes next.
+    fn song_ended(&self) {
+        let step = self.queue.lock().unwrap().ended();
+        let result = match step {
+            // The engine has let go of an ended song, so it loads again.
+            Step::Restart => self.play_current(),
+            step => self.step(step),
+        };
+        if let Err(e) = result {
+            eprintln!("tonearm: the next song didn't start: {e}");
+        }
+    }
+}
+
+/// Moves the queue on when a song ends, for as long as the app holds the
+/// core.
+fn watch(tonearm: Weak<Tonearm>) {
+    std::thread::Builder::new()
+        .name("queue".into())
+        .spawn(move || {
+            // Only a song seen playing can end: a song just loaded can
+            // still show the last one's state for a moment.
+            let mut played = 0;
+            let mut handled = 0;
+            loop {
+                std::thread::sleep(Duration::from_millis(250));
+                let Some(tonearm) = tonearm.upgrade() else { return };
+                let status = &tonearm.audio.status;
+                let generation = status.generation.load(Ordering::SeqCst);
+                match status.state.load(Ordering::SeqCst) {
+                    audio::PLAYING | audio::PAUSED => played = generation,
+                    audio::ENDED if generation == played && generation != handled => {
+                        handled = generation;
+                        tonearm.song_ended();
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .expect("cannot start the queue thread");
 }
 
 fn song(item: &innertube::model::Item) -> Option<Song> {
