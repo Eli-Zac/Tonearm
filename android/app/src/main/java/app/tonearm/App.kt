@@ -23,6 +23,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -206,9 +207,14 @@ fun App(core: Core, controller: MediaController?) {
         }
     }
 
+    // Height of the mini-player and tabs under the pages, in pixels.
+    var below by remember { mutableIntStateOf(0) }
     Box(Modifier.fillMaxSize().background(Tonearm.bg)) {
         Column(Modifier.fillMaxSize()) {
-            Box(Modifier.weight(1f)) {
+            // The pages end above the mini-player and tabs, so a page that
+            // makes room for the keyboard counts only the part of it that
+            // reaches higher than they do.
+            Box(Modifier.weight(1f).consumeWindowInsets(PaddingValues(bottom = with(LocalDensity.current) { below.toDp() }))) {
                 val top = stack.lastOrNull()
                 if (top != null && SettingsPages.isSettings(top.id)) {
                     SettingsScreen(
@@ -238,12 +244,14 @@ fun App(core: Core, controller: MediaController?) {
                     }
                 }
             }
-            if (now != null && controller != null) {
-                MiniPlayer(now, controller) { nowPlayingOpen = true }
-            }
-            TabBar(tab) { picked ->
-                // The tab already open goes back to its top.
-                if (picked == tab) stacks.getValue(picked).clear() else tab = picked
+            Column(Modifier.onSizeChanged { below = it.height }) {
+                if (now != null && controller != null) {
+                    MiniPlayer(now, controller) { nowPlayingOpen = true }
+                }
+                TabBar(tab) { picked ->
+                    // The tab already open goes back to its top.
+                    if (picked == tab) stacks.getValue(picked).clear() else tab = picked
+                }
             }
         }
         AnimatedVisibility(

@@ -94,6 +94,13 @@ fun SettingsScreen(
     onBack: () -> Unit,
     onToast: (String) -> Unit,
 ) {
+    // Notes from linking and saving float up as a toast over the page,
+    // rather than a line on top that pushes the cards down.
+    LaunchedEffect(Prefs.servicesNote, Prefs.accountNote) {
+        for (note in listOf(Prefs.servicesNote, Prefs.accountNote)) if (note.isNotEmpty()) onToast(note)
+        Prefs.servicesNote = ""
+        Prefs.accountNote = ""
+    }
     when (page) {
         SettingsPages.signIn -> YouTubeSignIn(core, onBack, onToast)
         SettingsPages.spotifySignIn -> SpotifySignIn(core, onBack, onToast)
@@ -126,7 +133,7 @@ fun SettingsScreen(
 private fun SettingsPage(title: String, onBack: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
     Box(Modifier.fillMaxSize()) {
         Column(
-            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).statusBarsPadding()
+            Modifier.fillMaxSize().imePadding().verticalScroll(rememberScrollState()).statusBarsPadding()
                 .padding(start = 16.dp, end = 16.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
@@ -250,7 +257,6 @@ private fun AccountPage(core: Core, onOpen: (String) -> Unit) {
     val scope = rememberCoroutineScope()
     val account = rememberAccount(core)
     val signedIn = account is AccountState.SignedIn
-    if (Prefs.accountNote.isNotEmpty()) Note(Prefs.accountNote)
     Section(
         title = "YouTube Music",
         logo = R.drawable.logo_youtubemusic,
@@ -414,7 +420,6 @@ private fun ConnectionsPage(core: Core, onOpen: (String) -> Unit) {
     var lastfmSecret by remember { mutableStateOf(c.lastfmSecret) }
     var spotifyId by remember { mutableStateOf(c.spotifyId) }
     var spotifySecret by remember { mutableStateOf(c.spotifySecret) }
-    if (Prefs.servicesNote.isNotEmpty()) Note(Prefs.servicesNote)
     Section(
         title = "Last.fm",
         logo = R.drawable.logo_lastfm,
@@ -526,11 +531,6 @@ private fun linkLastfm(core: Core, context: android.content.Context, key: String
 @Composable
 private fun Card(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
     Box(modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(card)) { content() }
-}
-
-@Composable
-private fun Note(text: String) {
-    Text(text, color = Tonearm.accent, fontFamily = Tonearm.font, fontSize = 14.sp, lineHeight = 18.sp)
 }
 
 /** A row that opens a sub page: an icon tile (or a logo on its brand
