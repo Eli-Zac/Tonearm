@@ -98,6 +98,7 @@ impl rustls::client::danger::ServerCertVerifier for AnyCertificate {
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
         rustls::crypto::verify_tls12_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+            .or_else(unreadable_certificate)
     }
 
     fn verify_tls13_signature(
@@ -107,10 +108,27 @@ impl rustls::client::danger::ServerCertVerifier for AnyCertificate {
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
         rustls::crypto::verify_tls13_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+            .or_else(unreadable_certificate)
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
         self.0.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+/// Some devices' certificates are ones webpki cannot read (the LG TV's
+/// fails with "Unsupported…"), so their signature can't be checked either.
+/// The certificate is taken unchecked anyway, as native-tls on the desktop
+/// takes it, so such a device is let in rather than refused. A signature
+/// that was read and is wrong still fails.
+#[cfg(target_os = "android")]
+fn unreadable_certificate(
+    e: rustls::Error,
+) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+    match e {
+        rustls::Error::InvalidCertificate(rustls::CertificateError::BadSignature) => Err(e),
+        rustls::Error::InvalidCertificate(_) => Ok(rustls::client::danger::HandshakeSignatureValid::assertion()),
+        e => Err(e),
     }
 }
 
