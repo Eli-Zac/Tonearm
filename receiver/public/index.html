@@ -79,10 +79,10 @@
   }
   .paused .fill { opacity: 0.5; }
 
-  .brand {
-    position: absolute; right: 5vw; bottom: 5vh;
-    font-size: 2.4vh; font-weight: 700; letter-spacing: 0.04em; color: var(--soft);
-  }
+  /* The Cast framework adds its own player bar to the page (title, progress,
+     LIVE, skip buttons) and shows it on pause. This page draws all of that
+     itself, so the framework's never shows. */
+  cast-media-player, touch-controls { display: none !important; }
 
   /* Before the first song arrives. */
   .waiting .stage { justify-content: center; }
@@ -105,7 +105,6 @@
   .lyrical .album { font-size: 2.4vh; margin-top: 0.6vh; }
   .lyrical .progress { margin-top: 3.6vh; max-width: none; }
   .lyrical .times { font-size: 2.1vh; margin-top: 1.1vh; }
-  .lyrical .brand { right: auto; left: 8vw; }
 
   .lyrical .lyrics {
     display: block; position: relative; flex: 1; min-width: 0; height: 100%;
@@ -185,7 +184,6 @@
   </div>
   <div class="lyrics" id="lyrics"><div class="lines" id="lines"></div></div>
 </div>
-<div class="brand">Tonearm</div>
 <audio id="sink"></audio>
 
 <script>
