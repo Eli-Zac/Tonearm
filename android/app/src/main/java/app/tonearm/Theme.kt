@@ -72,6 +72,7 @@ object Icons {
     const val open = ""
     const val trash = ""
     const val download = ""
+    const val recent = ""
 }
 
 @Composable

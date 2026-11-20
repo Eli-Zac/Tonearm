@@ -24,7 +24,7 @@ mod wheel;
 use tonearm_core::{
     analysis, animated_art, audio, cast, decode, history, home, innertube, library, lyrics, mix,
     offline, pool, quick_access, releases, resolver, services, session, spotify, spotify_token,
-    store, syncing, transition,
+    store, suggest, syncing, transition,
 };
 
 slint::include_modules!();
@@ -123,38 +123,8 @@ struct Suggest {
     /// Each holds the suggested searches and the real search results, so
     /// the list shows the same items as the results page, and pressing
     /// Enter can open that page without asking again.
-    cache: HashMap<String, Suggested>,
+    cache: suggest::Cache,
 }
-
-#[derive(Clone)]
-struct Suggested {
-    queries: Vec<String>,
-    page: Page,
-    at: Instant,
-}
-
-/// Where recent searches are kept, and how many.
-const RECENT_SEARCHES: &str = "searches";
-const RECENT_SEARCHES_KEPT: usize = 8;
-
-/// The recent searches saved on this computer, newest first.
-fn load_recent_searches() -> Vec<String> {
-    store::load(RECENT_SEARCHES)
-        .map(|text| {
-            text.lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .take(RECENT_SEARCHES_KEPT)
-                .map(String::from)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// How long typing has to pause before we ask for suggestions.
-const SUGGEST_DELAY: Duration = Duration::from_millis(140);
-/// How long fetched results stay good enough to show again.
-const SUGGEST_FRESH: Duration = Duration::from_secs(300);
 
 /// A Spotify playlist's songs being matched to YouTube Music, a few at a
 /// time in the background.
@@ -746,61 +716,6 @@ fn credits_with_album(item: &Item) -> (String, String, f32) {
     (artist, album, seconds)
 }
 
-/// Splits a suggested search into the part that matches what was typed,
-/// shown in bold, and the rest. When it does not start with the typed
-/// text, nothing is bold.
-fn split_typed(suggestion: &str, typed: &str) -> (String, String) {
-    let mut end = 0;
-    let mut typed_chars = typed.chars();
-    for (index, c) in suggestion.char_indices() {
-        match typed_chars.next() {
-            Some(t) if t.to_lowercase().eq(c.to_lowercase()) => end = index + c.len_utf8(),
-            Some(_) => return (String::new(), suggestion.to_string()),
-            None => break,
-        }
-    }
-    if typed_chars.next().is_some() {
-        return (String::new(), suggestion.to_string());
-    }
-    (suggestion[..end].to_string(), suggestion[end..].to_string())
-}
-
-/// "Artist", "Song • Journey", "Album • Daft Punk": what an item is and
-/// who made it, without the play counts YouTube Music adds.
-fn suggestion_subtitle(item: &Item) -> String {
-    if item.kind == Kind::Artist {
-        return "Artist".into();
-    }
-    let labels = [
-        "Song", "Video", "Single", "Album", "EP", "Playlist", "Episode", "Podcast", "Profile",
-    ];
-    let counts = [" views", " plays", " likes", " audience", " subscribers", " songs"];
-    let parts: Vec<&str> = item
-        .subtitle
-        .split(" • ")
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .collect();
-    let label = parts
-        .first()
-        .filter(|p| labels.contains(p))
-        .copied()
-        .unwrap_or(match item.kind {
-            Kind::Song => "Song",
-            Kind::Album => "Album",
-            Kind::Playlist => "Playlist",
-            _ => "",
-        });
-    let by = parts
-        .iter()
-        .find(|p| !labels.contains(p) && !counts.iter().any(|c| p.ends_with(c)));
-    match by {
-        Some(by) if !label.is_empty() => format!("{label} • {by}"),
-        Some(by) => by.to_string(),
-        None => label.to_string(),
-    }
-}
-
 impl App {
     fn toast(self: &Rc<Self>, message: impl Into<SharedString>) {
         self.show_toast(message.into(), "", None, Duration::from_secs(5));
@@ -1165,8 +1080,8 @@ impl App {
         }
         // The search list already fetched these results while typing.
         if let Route::Search(query, 0) = &route {
-            let cached = self.suggest.borrow().cache.get(&query.to_lowercase()).cloned();
-            if let Some(found) = cached.filter(|c| c.at.elapsed() < SUGGEST_FRESH) {
+            let cached = self.suggest.borrow().cache.get(query);
+            if let Some(found) = cached {
                 if !found.page.shelves.is_empty() {
                     self.show(generation, Ok(found.page));
                     return;
@@ -2395,7 +2310,7 @@ impl App {
         self.disk.run(history::History::delete_file);
         self.recent_searches.borrow_mut().clear();
         self.disk.run(|| {
-            let _ = store::save(RECENT_SEARCHES, "");
+            suggest::save_recent("");
         });
         self.show_recent_searches();
         self.toast("Listening history cleared");
@@ -2456,18 +2371,17 @@ impl App {
     /// skeleton rows until a short pause in typing lets us ask for them.
     fn suggest_edited(self: &Rc<Self>, text: &str) {
         let query = text.trim().to_string();
-        let key = query.to_lowercase();
         let (generation, cached) = {
             let mut suggest = self.suggest.borrow_mut();
             suggest.generation += 1;
-            (suggest.generation, suggest.cache.get(&key).cloned())
+            (suggest.generation, suggest.cache.get(&query))
         };
         self.suggest_timer.stop();
         if query.is_empty() {
             self.show_recent_searches();
             return;
         }
-        if let Some(cached) = cached.filter(|c| c.at.elapsed() < SUGGEST_FRESH) {
+        if let Some(cached) = cached {
             self.show_suggestions(generation, &query, cached.queries, cached.page);
             return;
         }
@@ -2479,28 +2393,11 @@ impl App {
         self.ui.set_suggest_loading(true);
         let weak = Rc::downgrade(self);
         self.suggest_timer
-            .start(TimerMode::SingleShot, SUGGEST_DELAY, move || {
+            .start(TimerMode::SingleShot, suggest::DELAY, move || {
                 let Some(app) = weak.upgrade() else { return };
                 let (client, query) = (app.client.clone(), query.clone());
                 app.api.run(move || {
-                    // The suggested searches and the real results, asked
-                    // for side by side. The suggestion call's own items
-                    // are YouTube Music's guesses and often differ from
-                    // what the search returns, so they are not used.
-                    let (queries, page) = std::thread::scope(|scope| {
-                        let queries = scope.spawn(|| client.suggest(&query));
-                        let page = client.search(&query);
-                        let queries = queries.join().unwrap_or_else(|_| Err(String::new()));
-                        (queries, page)
-                    });
-                    let result = match (queries, page) {
-                        (Err(e), Err(_)) => Err(e),
-                        (queries, page) => Ok(Suggested {
-                            queries: queries.map(|(q, _)| q).unwrap_or_default(),
-                            page: page.unwrap_or_default(),
-                            at: Instant::now(),
-                        }),
-                    };
+                    let result = suggest::fetch(&client, &query);
                     on_ui(move |app| app.got_suggestions(generation, &query, result));
                 });
             });
@@ -2510,18 +2407,12 @@ impl App {
         self: &Rc<Self>,
         generation: u64,
         query: &str,
-        result: Result<Suggested, String>,
+        result: Result<suggest::Suggested, String>,
     ) {
         let current = self.suggest.borrow().generation == generation;
         match result {
             Ok(found) => {
-                {
-                    let mut suggest = self.suggest.borrow_mut();
-                    if suggest.cache.len() > 300 {
-                        suggest.cache.clear();
-                    }
-                    suggest.cache.insert(query.to_lowercase(), found.clone());
-                }
+                self.suggest.borrow_mut().cache.put(query, found.clone());
                 if current {
                     self.show_suggestions(generation, query, found.queries, found.page);
                 }
@@ -2541,8 +2432,8 @@ impl App {
     ) {
         let mut rows = Vec::new();
         let mut picks = Vec::new();
-        for query in queries.into_iter().take(5) {
-            let (head, tail) = split_typed(&query, typed);
+        for query in queries.into_iter().take(suggest::QUERIES) {
+            let (head, tail) = suggest::split_typed(&query, typed);
             rows.push(SuggestData {
                 kind: 0,
                 head: head.into(),
@@ -2554,17 +2445,10 @@ impl App {
         // The first results of the real search, tailored exactly as the
         // results page will be, so the list is a preview of that page.
         self.tailor_results(typed, &mut page, true);
-        let mut items: Vec<Item> = Vec::new();
-        for item in page.shelves.into_iter().flat_map(|s| s.items) {
-            let key = history::key_of(&item);
-            if key.is_some() && !items.iter().any(|i| history::key_of(i) == key) {
-                items.push(item);
-            }
-        }
-        for item in items.into_iter().take(4) {
+        for item in suggest::items(&page) {
             let row = rows.len();
             let mut data = self.item_data(&item, row, 64, Target::Suggest { generation, row });
-            let subtitle = suggestion_subtitle(&item);
+            let subtitle = suggest::subtitle(&item);
             // The artist named in the shorter line still links to its page.
             let (runs, _) = detail::link_runs(&subtitle, &item);
             data.subtitle = subtitle.into();
@@ -2606,16 +2490,8 @@ impl App {
 
     /// Keeps a search at the top of the recent ones.
     fn remember_search(&self, query: &str) {
-        let text = {
-            let mut recent = self.recent_searches.borrow_mut();
-            recent.retain(|q| !q.eq_ignore_ascii_case(query));
-            recent.insert(0, query.to_string());
-            recent.truncate(RECENT_SEARCHES_KEPT);
-            recent.join("\n")
-        };
-        self.disk.run(move || {
-            let _ = store::save(RECENT_SEARCHES, &text);
-        });
+        let text = suggest::remember(&mut self.recent_searches.borrow_mut(), query);
+        self.disk.run(move || suggest::save_recent(&text));
     }
 
     /// Lists the recent searches under an empty search box.
@@ -6316,7 +6192,7 @@ translate: Cell::new(load_translate()),
         release: RefCell::new(None),
         suggest: RefCell::default(),
         suggest_timer: Timer::default(),
-        recent_searches: RefCell::new(load_recent_searches()),
+        recent_searches: RefCell::new(suggest::load_recent()),
         menu: RefCell::default(),
         prompt: RefCell::default(),
         casting: RefCell::default(),

@@ -30,6 +30,7 @@ pub mod session;
 pub mod spotify;
 pub mod spotify_token;
 pub mod store;
+pub mod suggest;
 pub mod sync;
 pub mod syncing;
 pub mod transition;

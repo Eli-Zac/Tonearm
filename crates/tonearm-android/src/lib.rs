@@ -15,14 +15,16 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use tonearm_core::innertube::model::{self, Kind};
 use tonearm_core::queue::{Added, Queue, Repeat, Step};
-use tonearm_core::{audio, innertube, resolver, store};
+use tonearm_core::{audio, innertube, resolver, store, suggest};
 
 mod lyrics;
 mod menu;
 mod pages;
+mod search;
 pub use lyrics::{LyricLine, Lyrics, Syllable};
 pub use menu::{MenuAction, MenuIcon, MenuLine};
 pub use pages::{Chip, Header, Item, ItemKind, Link, Page, Shelf, ShelfLayout};
+pub use search::{SuggestedSearch, Suggestions};
 
 uniffi::setup_scaffolding!();
 
@@ -132,6 +134,10 @@ pub struct Tonearm {
     seek_hold: audio::SeekHold,
     /// Play or pause just asked for, reported until the engine takes it.
     play_hold: audio::PlayHold,
+    /// What the search box was offered, by what was typed.
+    suggest: Mutex<suggest::Cache>,
+    /// Recent searches, read from disk the first time they are wanted.
+    recent: Mutex<Option<Vec<String>>>,
 }
 
 #[uniffi::export]
@@ -158,6 +164,8 @@ impl Tonearm {
             liked: Mutex::new(HashMap::new()),
             seek_hold: audio::SeekHold::default(),
             play_hold: audio::PlayHold::default(),
+            suggest: Mutex::new(suggest::Cache::default()),
+            recent: Mutex::new(None),
         });
         // Signed in as last time, as the desktop app starts.
         if let Some(cookie) = store::load("session") {
@@ -218,12 +226,6 @@ impl Tonearm {
     /// The shelves after a page's `continuation`, as it is scrolled.
     pub fn more(&self, continuation: String) -> Result<Page, TonearmError> {
         Ok(pages::page(&self.client.more(&continuation)?))
-    }
-
-    /// Everything a search finds: the top result, songs, albums, artists,
-    /// playlists, in YouTube Music's shelves.
-    pub fn search_page(&self, query: String) -> Result<Page, TonearmError> {
-        Ok(pages::page(&self.client.search(&query)?))
     }
 
     // --------------------------------------------------------------- lyrics

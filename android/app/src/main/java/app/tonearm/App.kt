@@ -24,6 +24,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
@@ -39,6 +40,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uniffi.tonearm_android.Item
+import uniffi.tonearm_android.Suggestions
 import uniffi.tonearm_android.isLibraryPage
 import uniffi.tonearm_android.Tonearm as Core
 
@@ -380,13 +382,73 @@ fun SearchScreen(core: Core, actions: Actions) {
         override fun playItem(item: Item) { putAway(); actions.playItem(item) }
         override fun playWatch(item: Item) { putAway(); actions.playWatch(item) }
     }
-    Column(Modifier.fillMaxSize()) {
-        SearchBox(query, { query = it }) {
-            putAway()
-            searched = query.trim().ifEmpty { null }
+    val scope = rememberCoroutineScope()
+    var focused by remember { mutableStateOf(false) }
+    var recent by remember { mutableStateOf(emptyList<String>()) }
+    LaunchedEffect(Unit) { recent = withContext(Dispatchers.IO) { core.recentSearches() } }
+    // The list for what is typed: shown at once when fetched a moment ago,
+    // else asked for once typing pauses. A newer letter cancels the wait.
+    var found by remember { mutableStateOf<Suggestions?>(null) }
+    var finding by remember { mutableStateOf(false) }
+    LaunchedEffect(query) {
+        val typed = query.trim()
+        if (typed.isEmpty()) {
+            found = null
+            finding = false
+            return@LaunchedEffect
         }
+        core.cachedSuggestions(typed)?.let {
+            found = it
+            finding = false
+            return@LaunchedEffect
+        }
+        found = null
+        finding = true
+        delay(core.suggestDelayMs().toLong())
+        // A failed list isn't worth a message; Search still searches.
+        found = withContext(Dispatchers.IO) { runCatching { core.suggestions(typed) }.getOrNull() }
+        finding = false
+    }
+    fun search(text: String) {
+        val words = text.trim()
+        if (words.isEmpty()) return
+        putAway()
+        query = words
+        searched = words
+        scope.launch {
+            recent = withContext(Dispatchers.IO) {
+                core.rememberSearch(words)
+                core.recentSearches()
+            }
+        }
+    }
+    // The list shows while the box has the cursor, once there is something
+    // to list.
+    val listing = focused && (query.isNotBlank() || recent.isNotEmpty())
+    BackHandler(enabled = listing) { putAway() }
+    // Back first puts the keyboard away, before the app hears it. The list
+    // goes with the keyboard, as the box lets go of the cursor.
+    @OptIn(ExperimentalLayoutApi::class)
+    val keyboardUp = WindowInsets.isImeVisible
+    var keyboardWasUp by remember { mutableStateOf(false) }
+    LaunchedEffect(keyboardUp) {
+        if (keyboardWasUp && !keyboardUp) focus.clearFocus()
+        keyboardWasUp = keyboardUp
+    }
+    Column(Modifier.fillMaxSize()) {
+        SearchBox(query, { query = it }, { focused = it }) { search(query) }
         val words = searched
-        if (words == null) {
+        if (listing) {
+            SuggestList(
+                typed = query,
+                recent = recent,
+                found = found,
+                loading = finding,
+                onSearch = ::search,
+                onItem = { tapped.tap(it) },
+                onItemMenu = { tapped.menu(it) },
+            )
+        } else if (words == null) {
             Message("Search songs, albums, artists and playlists")
         } else {
             PageView(
@@ -400,7 +462,7 @@ fun SearchScreen(core: Core, actions: Actions) {
 }
 
 @Composable
-fun SearchBox(query: String, onChange: (String) -> Unit, onSearch: () -> Unit) {
+fun SearchBox(query: String, onChange: (String) -> Unit, onFocus: (Boolean) -> Unit, onSearch: () -> Unit) {
     Row(
         Modifier
             .padding(horizontal = 16.dp, vertical = 12.dp)
@@ -425,7 +487,7 @@ fun SearchBox(query: String, onChange: (String) -> Unit, onSearch: () -> Unit) {
                 cursorBrush = SolidColor(Tonearm.accent),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                 keyboardActions = KeyboardActions(onSearch = { onSearch() }),
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().onFocusChanged { onFocus(it.isFocused) },
             )
         }
     }
