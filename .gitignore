@@ -4,3 +4,4 @@
 /tonearm.exe
 __pycache__/
 /tonearm-setup.exe
+.wrangler/

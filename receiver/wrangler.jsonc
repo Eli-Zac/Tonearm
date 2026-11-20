@@ -1,0 +1,13 @@
+// Hosts Tonearm's Cast receiver page on Cloudflare, at the address the
+// Google Cast SDK Developer Console has for app 79497171. Deploy changes
+// from this folder with `npx wrangler deploy`.
+{
+  "name": "tonearm-cast",
+  "compatibility_date": "2026-11-18",
+  "assets": {
+    "directory": "./public"
+  },
+  "routes": [
+    { "pattern": "tonearm-cast.eli-zac.dev", "custom_domain": true }
+  ]
+}

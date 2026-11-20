@@ -228,6 +228,8 @@ export struct SyllableData {
     start: int,
     end: int,
     space: bool,
+    // When the word it is part of starts, which a click on it plays from.
+    word-start: int,
 }
 
 export struct LyricRow {
@@ -276,6 +278,9 @@ export global Icons {
     out property <string> pause: "\u{e39e}";
     out property <string> prev: "\u{e5a4}";
     out property <string> next: "\u{e5a6}";
+    // Filled only: two triangles each way, the transport's skip buttons.
+    out property <string> rewind: "\u{e6a8}";
+    out property <string> fast-forward: "\u{e6a6}";
     out property <string> shuffle: "\u{e422}";
     out property <string> repeat: "\u{e3f6}";
     out property <string> repeat-one: "\u{e3f8}";
@@ -3908,6 +3913,9 @@ component DetailHeader inherits Rectangle {
     in property <PageHeader> data;
     in property <color> tint: #2b2440;
     in property <bool> compact;
+    // An album's moving cover, faded in over the still art once it plays.
+    in property <image> motion;
+    in property <bool> motion-on;
     callback play();
     callback shuffle();
     callback mix();
@@ -3988,6 +3996,18 @@ component DetailHeader inherits Rectangle {
             source: root.data.art;
             has: root.data.has-art;
             round: root.data.round;
+        }
+        if !root.data.icon-tile && !root.data.round: Rectangle {
+            border-radius: 10px;
+            clip: true;
+            opacity: root.motion-on ? 1 : 0;
+            animate opacity { duration: 450ms; }
+            Image {
+                width: 100%;
+                height: 100%;
+                source: root.motion;
+                image-fit: cover;
+            }
         }
         if root.data.icon-tile: Rectangle {
             border-radius: 10px;
@@ -4358,6 +4378,26 @@ component SyllableView inherits Rectangle {
             font-weight: 700;
             vertical-alignment: center;
         }
+    }
+}
+
+// Where a syllable sits, as SyllableView lays it out, to be clicked. Draws
+// nothing.
+component SyllableHit inherits Rectangle {
+    in property <SyllableData> syllable;
+    in property <length> font-size: 24px;
+    callback clicked;
+    width: measure.preferred-width + (syllable.space ? root.font-size * 0.3 : 0px);
+    measure := Text {
+        text: syllable.text;
+        color: transparent;
+        font-size: root.font-size;
+        font-family: "Figtree";
+        font-weight: 700;
+    }
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
     }
 }
 
@@ -4928,6 +4968,9 @@ export component AppWindow inherits Window {
     // panel's: the panel can show a Canvas, and this only Apple's cover.
     in property <image> wide-motion;
     in property <bool> wide-motion-on;
+    // An album page's moving cover, over the hero's square art.
+    in property <image> page-motion;
+    in property <bool> page-motion-on;
     // A heavy blur of the still cover, waved slowly from the app while
     // the expanded view is open. Its background.
     in property <image> track-backdrop;
@@ -5857,6 +5900,8 @@ export component AppWindow inherits Window {
                                 data: root.header;
                                 tint: root.shown-page-tint;
                                 compact: root.compact;
+                                motion: root.page-motion;
+                                motion-on: root.page-motion-on;
                                 play => { root.play-page(false); }
                                 shuffle => { root.play-page(true); }
                                 mix => { root.toggle-mix(); }
@@ -8267,6 +8312,21 @@ export component AppWindow inherits Window {
                     mouse-cursor: pointer;
                     clicked => { root.lyrics-seek(row.start); }
                 }
+                // Over the line, a click on a word plays from that word. Laid
+                // out as the sung line's words are, so each lands on its word
+                // whether the line is drawn word by word or blurred whole.
+                if row.kind == 0 && root.lyrics-synced && row.syllables.length > 0: HorizontalLayout {
+                    y: -lyric-row.shift;
+                    height: parent.height;
+                    alignment: lyric-row.lay;
+                    padding-left: 20px;
+                    padding-right: 20px;
+                    for syllable in row.syllables: SyllableHit {
+                        syllable: syllable;
+                        font-size: root.lyrics-font * lyric-row.grow;
+                        clicked => { root.lyrics-seek(syllable.word-start); }
+                    }
+                }
             }
             if root.lyrics-state == 2: Text {
                 x: 20px;
@@ -8454,8 +8514,9 @@ export component AppWindow inherits Window {
             y: transport-y;
             width: 32px;
             height: 32px;
-            // Sharp edged, a triangle and a bar.
-            shape: "M 18 4 L 18 20 L 7 12 Z M 4 4 L 6.5 4 L 6.5 20 L 4 20 Z";
+            // Two filled triangles, as the phone has them too.
+            icon: Icons.rewind;
+            fill: true;
             size: 18px;
             tint: Theme.text;
             tip: "Previous";
@@ -8466,15 +8527,16 @@ export component AppWindow inherits Window {
             y: transport-y;
             width: 32px;
             height: 32px;
+            // Plain white, no disc behind it, between the two.
             icon: root.buffering ? "" : root.playing ? Icons.pause : Icons.play;
             fill: true;
-            size: 16px;
-            filled: true;
+            size: 22px;
+            tint: Theme.text;
             tip: root.playing ? "Pause" : "Play";
             clicked => { root.toggle-play(); }
             if root.buffering: Loader {
                 dot: 5px;
-                tint: #08080a;
+                tint: Theme.text;
             }
         }
         IconButton {
@@ -8482,7 +8544,8 @@ export component AppWindow inherits Window {
             y: transport-y;
             width: 32px;
             height: 32px;
-            shape: "M 6 4 L 6 20 L 17 12 Z M 17.5 4 L 20 4 L 20 20 L 17.5 20 Z";
+            icon: Icons.fast-forward;
+            fill: true;
             size: 18px;
             tint: Theme.text;
             tip: "Next";

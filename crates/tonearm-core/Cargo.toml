@@ -8,8 +8,6 @@ repository = "https://github.com/Eli-Zac/tonearm"
 publish = false
 
 [dependencies]
-ureq = { version = "2.12", default-features = false, features = ["json", "gzip", "native-tls", "proxy-from-env"] }
-native-tls = "0.2"
 serde_json = "1"
 sha1 = "0.10"
 sha2 = "0.10"
@@ -21,6 +19,19 @@ md5 = "0.7"
 rusqlite = { version = "0.43.0", features = ["bundled"] }
 # Runs YouTube's player script to solve stream link challenges.
 rquickjs = { version = "0.14", default-features = false }
+
+# Secure connections: the system's own on the computer, rustls on Android,
+# where the system's is Java's and OpenSSL would have to be built.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+ureq = { version = "2.12", default-features = false, features = ["json", "gzip", "native-tls", "proxy-from-env"] }
+native-tls = "0.2"
+
+[target.'cfg(target_os = "android")'.dependencies]
+ureq = { version = "2.12", default-features = false, features = ["json", "gzip", "tls", "proxy-from-env"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# QuickJS ships no ready-made bindings for Android, so they are generated
+# with the NDK's libclang (build-rust.ps1 sets LIBCLANG_PATH).
+rquickjs = { version = "0.14", default-features = false, features = ["bindgen"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Security", "Win32_Security_Cryptography", "Win32_Foundation", "Win32_System_Threading"] }

@@ -1,0 +1,9 @@
+# Gradle and the IDE
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+# Made by build-rust.ps1
+app/src/main/jniLibs/
+app/src/main/java/uniffi/

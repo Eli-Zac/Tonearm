@@ -68,6 +68,9 @@ enum Command {
     /// Plays into a Cast device's stream from now on, or with None, back
     /// on this computer.
     Route(Option<Arc<Pipe>>),
+    /// Opens the default output again and moves the song onto it: the
+    /// device under it changed in a way its name doesn't show.
+    Reopen,
     Stop,
 }
 
@@ -90,6 +93,70 @@ pub struct Status {
     /// are timed by. Only what is shown takes this off.
     pub lag_ms: AtomicU64,
     pub error: Mutex<String>,
+}
+
+/// Where a seek sent the song, for what is shown. The engine reports the
+/// old place for a moment after a seek, so a timeline drawn from its report
+/// jumps back before it catches up. Shown instead is the place picked, until
+/// the report comes within reach of it, or two seconds pass.
+#[derive(Default)]
+pub struct SeekHold {
+    held: Mutex<Option<(u64, Instant)>>,
+}
+
+impl SeekHold {
+    /// A seek to `ms`.
+    pub fn set(&self, ms: u64) {
+        *self.held.lock().unwrap() = Some((ms, Instant::now()));
+    }
+
+    pub fn clear(&self) {
+        *self.held.lock().unwrap() = None;
+    }
+
+    /// The position to show, from the engine's `reported` one: the place
+    /// picked while it is held, moving on with the time since if playing.
+    pub fn apply(&self, reported: u64, playing: bool) -> u64 {
+        let mut held = self.held.lock().unwrap();
+        let Some((target, since)) = *held else { return reported };
+        if reported.abs_diff(target) < 1500 || since.elapsed() > Duration::from_secs(2) {
+            *held = None;
+            return reported;
+        }
+        target + if playing { since.elapsed().as_millis() as u64 } else { 0 }
+    }
+}
+
+/// Whether play or pause was last asked for, for what is shown. The engine
+/// takes the command on its own thread, so for a moment after a tap it
+/// still reports the old state, and a button drawn from that report flips
+/// back before it flips over. Shown instead is the state asked for, until
+/// the engine reports it (or stops on its own: loading, ended, failed), or
+/// two seconds pass.
+#[derive(Default)]
+pub struct PlayHold {
+    held: Mutex<Option<(bool, Instant)>>,
+}
+
+impl PlayHold {
+    /// Play (`true`) or pause asked for.
+    pub fn set(&self, playing: bool) {
+        *self.held.lock().unwrap() = Some((playing, Instant::now()));
+    }
+
+    /// The engine's `state` to show: `PLAYING` or `PAUSED` as asked while
+    /// held, anything else as it is.
+    pub fn apply(&self, state: u32) -> u32 {
+        let mut held = self.held.lock().unwrap();
+        let Some((playing, since)) = *held else { return state };
+        let wanted = if playing { PLAYING } else { PAUSED };
+        let settled = state == wanted || !matches!(state, PLAYING | PAUSED);
+        if settled || since.elapsed() > Duration::from_secs(2) {
+            *held = None;
+            return state;
+        }
+        wanted
+    }
 }
 
 pub struct Audio {
@@ -157,6 +224,14 @@ impl Audio {
     }
     pub fn pause(&self) {
         let _ = self.tx.send(Command::Pause);
+    }
+    /// The system's outputs changed (headphones or a car connected or
+    /// gone): plays on through the default output as it is now. On Android
+    /// the default output keeps one name whatever it routes to, and a
+    /// stream on a device that left (Android Auto, say) goes silent rather
+    /// than following, so the app says when to move.
+    pub fn reopen_output(&self) {
+        let _ = self.tx.send(Command::Reopen);
     }
     pub fn seek(&self, seconds: f32) {
         let _ = self.tx.send(Command::Seek(seconds));
@@ -316,7 +391,23 @@ struct Mixer {
     mix: Mutex<mix::Mix>,
     /// The `Handoff` allowed to pull. Older ones end.
     owner: AtomicU64,
+    /// When a sink last pulled from it, in `clock_ms`. Stops moving when
+    /// the output underneath has died.
+    pulled_ms: AtomicU64,
+    /// A sink is inside a pull right now, which can wait on the network
+    /// while a stream buffers: alive, however long it takes.
+    pulling: AtomicBool,
 }
+
+/// Milliseconds since the engine first asked, for `Mixer::pulled_ms`.
+fn clock_ms() -> u64 {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
+/// How long a playing song may go unpulled before its output counts as
+/// dead and is opened again.
+const STALLED_MS: u64 = 600;
 
 /// One sink's hold on the mixer. It reads a few milliseconds at a time,
 /// so the lock is rare.
@@ -354,9 +445,12 @@ impl Iterator for Handoff {
             if self.ended || self.mixer.owner.load(Ordering::Relaxed) != self.id {
                 return None;
             }
+            self.mixer.pulling.store(true, Ordering::Relaxed);
             let mut chunk = std::mem::take(&mut self.chunk);
             chunk.clear();
             chunk.extend((&mut *self.lock()).take(HANDOFF));
+            self.mixer.pulled_ms.store(clock_ms(), Ordering::Relaxed);
+            self.mixer.pulling.store(false, Ordering::Relaxed);
             self.ended = chunk.len() < HANDOFF;
             self.chunk = chunk;
             self.at = 0;
@@ -416,6 +510,8 @@ fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
     // When the default device was last checked. A new default takes over
     // the song playing.
     let mut checked = Instant::now();
+    // When a stalled output was last opened again (see the loop's end).
+    let mut revived = Instant::now();
     let mut playing: Option<Playing> = None;
     // The next song, opened ahead for a crossfade, and its `prepare` token.
     let mut next: Option<(u64, crate::decode::Track)> = None;
@@ -521,6 +617,8 @@ fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
             }
             Ok(Command::Play) => {
                 if let Some(p) = &playing {
+                    // Paused, nothing pulled; that wasn't a dead output.
+                    p.mixer.pulled_ms.store(clock_ms(), Ordering::Relaxed);
                     p.out.play();
                     status.state.store(PLAYING, Ordering::SeqCst);
                 }
@@ -599,6 +697,21 @@ fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
                     p.out.set_volume(volume);
                 }
             }
+            // Unopened, the next play opens the default as it is then; while
+            // casting, the phone's own output isn't in use.
+            Ok(Command::Reopen) if output.is_some() && cast.is_none() => match open_output() {
+                Ok(moved) => {
+                    if let Some(p) = &mut playing {
+                        if let Err(e) = p.move_to(Target::Device(&moved.handle), volume) {
+                            eprintln!("audio output: {e}");
+                        }
+                    }
+                    output = Some(moved);
+                    checked = Instant::now();
+                }
+                Err(e) => eprintln!("audio output: {e}"),
+            },
+            Ok(Command::Reopen) => {}
             Ok(Command::Stop) => {
                 playing = None;
                 next = None;
@@ -647,6 +760,33 @@ fn run(rx: mpsc::Receiver<Command>, status: Arc<Status>) {
         let Some(p) = &mut playing else {
             continue;
         };
+        // A song playing that nothing has pulled from for a moment: its
+        // output died under it. Android disconnects an AAudio stream when
+        // the route changes (another app's voice input or call taking the
+        // audio, say) rather than moving it, which left the song "playing"
+        // in silence. It moves onto the default output as it is now, tried
+        // again each second until one runs.
+        let stalled = cast.is_none()
+            && !p.out.is_paused()
+            && status.state.load(Ordering::SeqCst) == PLAYING
+            && !p.mixer.pulling.load(Ordering::Relaxed)
+            && clock_ms().saturating_sub(p.mixer.pulled_ms.load(Ordering::Relaxed)) > STALLED_MS;
+        if stalled && revived.elapsed() >= Duration::from_secs(1) {
+            revived = Instant::now();
+            match open_output() {
+                Ok(moved) => {
+                    match p.move_to(Target::Device(&moved.handle), volume) {
+                        Ok(()) => eprintln!("audio output: stalled, opened again on {}", moved.name),
+                        Err(e) => eprintln!("audio output: {e}"),
+                    }
+                    output = Some(moved);
+                    checked = Instant::now();
+                }
+                Err(e) => eprintln!("audio output: stalled, and could not open again: {e}"),
+            }
+            // Its new stream gets the same moment to start.
+            p.mixer.pulled_ms.store(clock_ms(), Ordering::Relaxed);
+        }
         // The armed song started the moment the last one ended.
         let followed = p.monitor.followed.swap(0, Ordering::SeqCst);
         if followed != 0 {
@@ -726,6 +866,10 @@ fn start(
     let mixer = Arc::new(Mixer {
         mix: Mutex::new(mix::Mix::new(rate, deck, rx, monitor.clone(), done)),
         owner: AtomicU64::new(0),
+        // Counts as pulled now, so a stream still starting isn't taken
+        // for a dead one.
+        pulled_ms: AtomicU64::new(clock_ms()),
+        pulling: AtomicBool::new(false),
     });
     let out = Out::attach(&mixer, rate, target, volume, false)?;
     Ok(Playing {

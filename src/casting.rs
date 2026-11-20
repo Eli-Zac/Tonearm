@@ -9,8 +9,9 @@ use crate::{cast, on_ui, App, CastDevice};
 use slint::{ModelRc, SharedString, VecModel};
 use std::rc::Rc;
 
-/// What the device shows as playing. Its Default Media Receiver can't be
-/// told when the song changes, so it names the app and the computer.
+/// What the device shows as playing until it hears of a song. Google's
+/// Default Media Receiver can't be told when the song changes, so with it
+/// this stays: the app and the computer.
 const TITLE: &str = "Tonearm";
 
 #[derive(Default)]
@@ -25,6 +26,14 @@ pub struct Casting {
     local_volume: Option<f32>,
     /// Counts casts, so word from one that has ended is ignored.
     generation: u64,
+    /// The lyrics the device has, as `lyrics_key` names them.
+    lyrics_sent: Option<String>,
+}
+
+/// Names a song's lyrics as found, so they go again once translated.
+fn lyrics_key(id: &str, found: &crate::lyrics::Lyrics) -> String {
+    let translated = found.lines.iter().filter(|l| !l.translation.is_empty()).count();
+    format!("{id}/{}/{translated}", found.lines.len())
 }
 
 /// What this computer is called on the network, for the device to show.
@@ -126,7 +135,11 @@ impl App {
         }
         match event {
             cast::Event::Playing => {
-                self.casting.borrow_mut().connecting = false;
+                let mut casting = self.casting.borrow_mut();
+                casting.connecting = false;
+                // Lyrics sent while the device was starting may be lost.
+                casting.lyrics_sent = None;
+                drop(casting);
                 self.show_cast_devices();
             }
             // The slider follows the device. Setting it here sends nothing
@@ -134,6 +147,8 @@ impl App {
             cast::Event::Volume(level) => self.ui.set_volume(level.clamp(0.0, 1.0)),
             cast::Event::Paused(true) => self.audio.pause(),
             cast::Event::Paused(false) => self.audio.play(),
+            cast::Event::Next => self.next(),
+            cast::Event::Previous => self.previous(),
             cast::Event::Ended(reason) => {
                 let name = self.ui.get_cast_name().to_string();
                 let message = reason.unwrap_or_else(|| format!("{name} stopped playing"));
@@ -182,6 +197,67 @@ impl App {
             }
             None => false,
         }
+    }
+
+    /// Tells the device the song playing and how far in, for Tonearm's own
+    /// receiver to show. `seconds` is where the playhead shows, which
+    /// follows what the device plays.
+    pub(crate) fn cast_now_playing(&self, seconds: f32, duration: f32, playing: bool) {
+        let mut casting = self.casting.borrow_mut();
+        let casting = &mut *casting;
+        let Some(session) = casting.session.as_ref().filter(|s| s.shows_songs()) else {
+            return;
+        };
+        let player = self.player.borrow();
+        let Some(item) = player.queue.get(player.index) else {
+            return;
+        };
+        let artist = if item.artists.is_empty() {
+            item.subtitle.split(" • ").next().unwrap_or_default().to_string()
+        } else {
+            item.artists.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(", ")
+        };
+        let cover = if item.thumb.starts_with("//") {
+            format!("https:{}", item.thumb)
+        } else {
+            crate::images::sized(&item.thumb, 720)
+        };
+        let id = item.video_id.clone().unwrap_or_else(|| item.title.clone());
+        // The song's synced lyrics, once they're found.
+        let lyrics = self.lyrics.borrow();
+        if let Some(found) = lyrics.found.as_ref().filter(|f| f.synced && lyrics.generation == player.generation) {
+            let key = lyrics_key(&id, found);
+            if casting.lyrics_sent.as_deref() != Some(key.as_str()) {
+                let lines: Vec<cast::LyricLine> = found
+                    .lines
+                    .iter()
+                    .map(|l| cast::LyricLine {
+                        start: l.start,
+                        end: l.end,
+                        text: l.text.clone(),
+                        background: l.background_text.clone(),
+                        translation: l.translation.clone(),
+                        syllables: l.syllables.clone(),
+                        background_syllables: l.background.clone(),
+                        align: l.align,
+                    })
+                    .collect();
+                session.lyrics(&id, &lines);
+                casting.lyrics_sent = Some(key);
+            }
+        }
+        drop(lyrics);
+        session.now_playing(cast::NowPlaying {
+            id,
+            title: item.title.clone(),
+            artist,
+            album: item.album.as_ref().map(|(name, _)| name.clone()).unwrap_or_default(),
+            // A downloaded song's cover is a file here, out of the device's reach.
+            cover: if cover.starts_with("http") { cover } else { String::new() },
+            duration,
+            position: seconds,
+            paused: !playing,
+        });
     }
 
     /// This computer's volume, also while the slider shows the device's.

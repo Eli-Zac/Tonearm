@@ -236,147 +236,19 @@ mod tests {
         assert!(inked("Ah-oh 비로소") > inked("Ah-oh"));
     }
 }
-/// How many pixels a side the backdrop is worked out at. The window
-/// stretches it over the whole expanded view, and that smooths it into a
-/// soft blur of the cover's colours.
-const BACKDROP: usize = 32;
-
 /// A very blurred copy of `src`, for the expanded Now playing view to fill
-/// its background with: the picture shrunk to a few dozen pixels by
-/// averaging, then softened twice more so no block edges show when it is
-/// stretched.
+/// its background with. The work is the core's, which the Android app
+/// shares (`tonearm_core::backdrop`).
 pub fn backdrop(src: &SharedPixelBuffer<Rgba8Pixel>) -> SharedPixelBuffer<Rgba8Pixel> {
-    let (w, h) = (src.width() as usize, src.height() as usize);
-    let n = BACKDROP;
-    let mut small = vec![[0f32; 3]; n * n];
-    if w > 0 && h > 0 {
-        let pixels = src.as_slice();
-        for y in 0..n {
-            let (y0, y1) = (y * h / n, ((y + 1) * h / n).max(y * h / n + 1).min(h));
-            for x in 0..n {
-                let (x0, x1) = (x * w / n, ((x + 1) * w / n).max(x * w / n + 1).min(w));
-                let mut sum = [0f32; 3];
-                for yy in y0..y1 {
-                    for p in &pixels[yy * w + x0..yy * w + x1] {
-                        sum[0] += p.r as f32;
-                        sum[1] += p.g as f32;
-                        sum[2] += p.b as f32;
-                    }
-                }
-                let count = ((y1 - y0) * (x1 - x0)).max(1) as f32;
-                small[y * n + x] = [sum[0] / count, sum[1] / count, sum[2] / count];
-            }
-        }
-    }
-    // Two passes of a 5 by 5 box, edges held.
-    for _ in 0..2 {
-        let before = small.clone();
-        for y in 0..n {
-            for x in 0..n {
-                let mut sum = [0f32; 3];
-                for dy in -2i32..=2 {
-                    for dx in -2i32..=2 {
-                        let yy = (y as i32 + dy).clamp(0, n as i32 - 1) as usize;
-                        let xx = (x as i32 + dx).clamp(0, n as i32 - 1) as usize;
-                        let p = before[yy * n + xx];
-                        sum[0] += p[0];
-                        sum[1] += p[1];
-                        sum[2] += p[2];
-                    }
-                }
-                small[y * n + x] = [sum[0] / 25.0, sum[1] / 25.0, sum[2] / 25.0];
-            }
-        }
-    }
-    // A light cover would make a light background, and white words on it
-    // hard to read. Each pixel is held to a brightness the words stand out
-    // on, keeping its colour; darker covers are left as they are.
-    const BRIGHTEST: f32 = 96.0;
-    let mut out = SharedPixelBuffer::<Rgba8Pixel>::new(n as u32, n as u32);
-    for (d, s) in out.make_mut_slice().iter_mut().zip(&small) {
-        let luma = 0.2126 * s[0] + 0.7152 * s[1] + 0.0722 * s[2];
-        let k = if luma > BRIGHTEST { BRIGHTEST / luma } else { 1.0 };
-        *d = Rgba8Pixel {
-            r: (s[0] * k) as u8,
-            g: (s[1] * k) as u8,
-            b: (s[2] * k) as u8,
-            a: 255,
-        };
-    }
-    out
+    let n = tonearm_core::backdrop::BASE as u32;
+    let out = tonearm_core::backdrop::backdrop(src.as_bytes(), src.width() as usize, src.height() as usize);
+    SharedPixelBuffer::clone_from_slice(&out, n, n)
 }
 
-/// `base`, a backdrop, flowing like liquid at `t` seconds. Each point
-/// reads its colour from somewhere else, and where it reads from is itself
-/// pushed around by a slower current, twice over, so the colours curl,
-/// fold and swirl into one another like ink in water, and never repeat
-/// quite the same. Zoomed in, so the edges never show, and a little more
-/// saturated, so the movement reads. Small, as the window stretches it.
+/// `base`, a backdrop, flowing like liquid at `t` seconds: one small frame
+/// of the background's slow swirl, as the core works it out.
 pub fn wave(base: &SharedPixelBuffer<Rgba8Pixel>, t: f32) -> SharedPixelBuffer<Rgba8Pixel> {
-    const SIZE: u32 = 64;
-    let (w, h) = (base.width() as usize, base.height() as usize);
-    let mut out = SharedPixelBuffer::<Rgba8Pixel>::new(SIZE, SIZE);
-    if w < 2 || h < 2 {
-        return out;
-    }
-    let src = base.as_slice();
-    let at = |x: usize, y: usize| src[y.min(h - 1) * w + x.min(w - 1)];
-    let pixels = out.make_mut_slice();
-    for y in 0..SIZE as usize {
-        for x in 0..SIZE as usize {
-            // -1 to 1 across the image.
-            let u = x as f32 / (SIZE - 1) as f32 * 2.0 - 1.0;
-            let v = y as f32 / (SIZE - 1) as f32 * 2.0 - 1.0;
-            // The slow current.
-            let qx = (u * 1.7 + t * 0.21).sin() + 0.5 * (v * 2.9 - t * 0.17).sin();
-            let qy = (v * 1.9 - t * 0.19).cos() + 0.5 * (u * 2.3 + t * 0.23).cos();
-            // The current it carries, which curls the colours.
-            let rx = ((u + 0.9 * qx) * 2.1 + t * 0.29).sin();
-            let ry = ((v + 0.9 * qy) * 2.4 - t * 0.25).cos();
-            let (su, sv) = (u * 0.55 + 0.32 * rx, v * 0.55 + 0.32 * ry);
-            let fx = (su * 0.5 + 0.5).clamp(0.0, 1.0) * (w - 1) as f32;
-            let fy = (sv * 0.5 + 0.5).clamp(0.0, 1.0) * (h - 1) as f32;
-            let (x0, y0) = (fx as usize, fy as usize);
-            let (ax, ay) = (fx - x0 as f32, fy - y0 as f32);
-            let (p00, p10, p01, p11) = (at(x0, y0), at(x0 + 1, y0), at(x0, y0 + 1), at(x0 + 1, y0 + 1));
-            let mix = |a: u8, b: u8, c: u8, d: u8| {
-                let top = a as f32 + (b as f32 - a as f32) * ax;
-                let bottom = c as f32 + (d as f32 - c as f32) * ax;
-                top + (bottom - top) * ay
-            };
-            let (r, g, b) = (mix(p00.r, p10.r, p01.r, p11.r), mix(p00.g, p10.g, p01.g, p11.g), mix(p00.b, p10.b, p01.b, p11.b));
-            // Pushed away from grey, so the colours stand apart as they flow.
-            let grey = (r + g + b) / 3.0;
-            let push = |c: f32| (grey + (c - grey) * 1.35).clamp(0.0, 255.0) as u8;
-            pixels[y * SIZE as usize + x] = Rgba8Pixel { r: push(r), g: push(g), b: push(b), a: 255 };
-        }
-    }
-    // Where the flow folds over itself it leaves a crease. Two light
-    // softenings melt those into the rest.
-    let n = SIZE as usize;
-    for _ in 0..2 {
-        let copy = pixels.to_vec();
-        for y in 0..n {
-            for x in 0..n {
-                let mut sum = [0u32; 3];
-                let mut count = 0;
-                for yy in y.saturating_sub(1)..(y + 2).min(n) {
-                    for xx in x.saturating_sub(1)..(x + 2).min(n) {
-                        let p = copy[yy * n + xx];
-                        sum[0] += p.r as u32;
-                        sum[1] += p.g as u32;
-                        sum[2] += p.b as u32;
-                        count += 1;
-                    }
-                }
-                pixels[y * n + x] = Rgba8Pixel {
-                    r: (sum[0] / count) as u8,
-                    g: (sum[1] / count) as u8,
-                    b: (sum[2] / count) as u8,
-                    a: 255,
-                };
-            }
-        }
-    }
-    out
+    let n = tonearm_core::backdrop::FRAME as u32;
+    let out = tonearm_core::backdrop::wave(base.as_bytes(), base.width() as usize, base.height() as usize, t);
+    SharedPixelBuffer::clone_from_slice(&out, n, n)
 }

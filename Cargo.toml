@@ -8,7 +8,7 @@ repository = "https://github.com/Eli-Zac/tonearm"
 publish = false
 
 [workspace]
-members = ["crates/tonearm-core"]
+members = ["crates/tonearm-core", "crates/tonearm-android"]
 
 [dependencies]
 tonearm-core = { path = "crates/tonearm-core" }

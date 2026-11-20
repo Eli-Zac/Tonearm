@@ -19,7 +19,7 @@ mod session;
 mod stream;
 
 pub use find::Finder;
-pub use session::{status, Event, Session};
+pub use session::{status, Event, LyricLine, NowPlaying, Session};
 pub use stream::{Feed, Pipe};
 #[cfg(test)]
 pub use stream::Server;

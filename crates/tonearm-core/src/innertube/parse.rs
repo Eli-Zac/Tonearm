@@ -582,10 +582,29 @@ impl Walker {
                                 });
                             }
                         }
+                        // A mood or genre on "Moods & genres": its name, its
+                        // colour and the page it opens.
+                        "musicNavigationButtonRenderer" => {
+                            let browse = child.get("clickCommand").and_then(|c| c.get("browseEndpoint"));
+                            let title = child.get("buttonText").map(text).unwrap_or_default();
+                            if let (Some(browse), false) = (browse, title.is_empty()) {
+                                self.push(Item {
+                                    title,
+                                    browse_id: string(browse, "browseId"),
+                                    params: string(browse, "params"),
+                                    color: child
+                                        .get("solid")
+                                        .and_then(|s| s.get("leftStripeColor"))
+                                        .and_then(Value::as_u64)
+                                        .map(|c| c as u32),
+                                    ..Item::default()
+                                });
+                            }
+                        }
                         "playlistPanelVideoRenderer" => self.push(panel_item(child)),
                         "playlistPanelVideoWrapperRenderer" => {
-                            if let Some(primary) = child.get("primaryRenderer") {
-                                self.walk(primary);
+                            if let Some(chosen) = song_of_wrapper(child) {
+                                self.walk(chosen);
                             }
                         }
                         // The user's own playlist wraps the usual header.
@@ -677,6 +696,34 @@ pub fn page(v: &Value) -> Page {
     page
 }
 
+/// A queue row that wraps a music video with its song: the song, as
+/// YouTube Music's song mode plays it, with its album cover rather than the
+/// video's frame. The video stays when there is no song for it.
+fn song_of_wrapper(wrapper: &Value) -> Option<&Value> {
+    let primary = wrapper.get("primaryRenderer")?;
+    let is_song = |v: &Value| find(v, "musicVideoType").and_then(Value::as_str) == Some("MUSIC_VIDEO_TYPE_ATV");
+    if is_song(primary) {
+        return Some(primary);
+    }
+    let counterpart = wrapper
+        .get("counterpart")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c.get("counterpartRenderer"))
+        .find(|c| is_song(c));
+    Some(counterpart.unwrap_or(primary))
+}
+
+/// Whether the song of a `next` response is liked, from the player's like
+/// button: "LIKE" is liked, "INDIFFERENT" or "DISLIKE" is not. Only the
+/// player's own button counts, not those in the queue's rows.
+pub fn like_status(v: &Value) -> Option<bool> {
+    let overlay = find(v, "playerOverlays")?;
+    let status = find(overlay, "likeButtonRenderer")?.get("likeStatus")?.as_str()?;
+    Some(status == "LIKE")
+}
+
 /// Browse id of the lyrics tab inside a `next` response.
 pub fn lyrics_browse_id(v: &Value) -> Option<String> {
     let tabs = find(v, "watchNextTabbedResultsRenderer")?
@@ -759,6 +806,26 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn parses_mood_buttons_with_their_colour() {
+        let v = json!({"contents": {"gridRenderer": {
+            "header": {"gridHeaderRenderer": {"title": {"runs": [{"text": "Moods & moments"}]}}},
+            "items": [{"musicNavigationButtonRenderer": {
+                "buttonText": {"runs": [{"text": "Chill"}]},
+                "solid": {"leftStripeColor": 4282545907u64},
+                "clickCommand": {"browseEndpoint": {
+                    "browseId": "FEmusic_moods_and_genres_category", "params": "ggMPOg1uX1"
+                }}
+            }}]
+        }}});
+        let page = page(&v);
+        let item = page.shelves.iter().flat_map(|s| &s.items).next().expect("a mood");
+        assert_eq!(item.title, "Chill");
+        assert_eq!(item.browse_id.as_deref(), Some("FEmusic_moods_and_genres_category"));
+        assert_eq!(item.params.as_deref(), Some("ggMPOg1uX1"));
+        assert_eq!(item.color, Some(4282545907));
+    }
+
+    #[test]
     fn parses_a_shelf_with_a_song() {
         let v = json!({"contents": {"musicShelfRenderer": {
             "title": {"runs": [{"text": "Songs"}]},
@@ -788,6 +855,46 @@ mod tests {
         json!({"text": name, "navigationEndpoint": {"browseEndpoint": {"browseId": id,
             "browseEndpointContextSupportedConfigs": {"browseEndpointContextMusicConfig":
                 {"pageType": "MUSIC_PAGE_TYPE_ARTIST"}}}}})
+    }
+
+    #[test]
+    fn a_queued_video_plays_as_its_song() {
+        let row = |id: &str, kind: &str| {
+            json!({"playlistPanelVideoRenderer": {
+                "videoId": id,
+                "title": {"runs": [{"text": "T"}]},
+                "navigationEndpoint": {"watchEndpoint": {"videoId": id, "watchEndpointMusicSupportedConfigs":
+                    {"watchEndpointMusicConfig": {"musicVideoType": kind}}}}
+            }})
+        };
+        let wrapper = |primary: Value, counterpart: Value| {
+            json!({"playlistPanelVideoWrapperRenderer": {
+                "primaryRenderer": primary,
+                "counterpart": [{"counterpartRenderer": counterpart}]
+            }})
+        };
+        let video = wrapper(row("mv", "MUSIC_VIDEO_TYPE_OMV"), row("song", "MUSIC_VIDEO_TYPE_ATV"));
+        let chosen = song_of_wrapper(&video["playlistPanelVideoWrapperRenderer"]).unwrap();
+        assert_eq!(chosen["playlistPanelVideoRenderer"]["videoId"], "song");
+        // Already the song: kept.
+        let song = wrapper(row("song", "MUSIC_VIDEO_TYPE_ATV"), row("mv", "MUSIC_VIDEO_TYPE_OMV"));
+        let chosen = song_of_wrapper(&song["playlistPanelVideoWrapperRenderer"]).unwrap();
+        assert_eq!(chosen["playlistPanelVideoRenderer"]["videoId"], "song");
+    }
+
+    #[test]
+    fn reads_the_players_like_status() {
+        let next = |status: &str| {
+            json!({
+                "contents": {"queue": [{"likeButtonRenderer": {"likeStatus": "LIKE"}}]},
+                "playerOverlays": {"playerOverlayRenderer": {"actions": [
+                    {"likeButtonRenderer": {"likeStatus": status}}]}}
+            })
+        };
+        assert_eq!(like_status(&next("LIKE")), Some(true));
+        assert_eq!(like_status(&next("INDIFFERENT")), Some(false));
+        // A queue row's button is not the player's.
+        assert_eq!(like_status(&json!({"contents": {"likeButtonRenderer": {"likeStatus": "LIKE"}}})), None);
     }
 
     #[test]

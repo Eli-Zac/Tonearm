@@ -43,9 +43,14 @@ pub struct Client {
 }
 
 pub fn agent(read_timeout: Duration) -> ureq::Agent {
-    let tls = native_tls::TlsConnector::new().expect("system TLS is unavailable");
-    ureq::AgentBuilder::new()
-        .tls_connector(Arc::new(tls))
+    let builder = ureq::AgentBuilder::new();
+    // The computer's own TLS. Android has rustls built in, with Mozilla's
+    // roots.
+    #[cfg(not(target_os = "android"))]
+    let builder = builder.tls_connector(Arc::new(
+        native_tls::TlsConnector::new().expect("system TLS is unavailable"),
+    ));
+    builder
         .timeout_connect(Duration::from_secs(10))
         .timeout_read(read_timeout)
         .try_proxy_from_env(true)
@@ -475,6 +480,16 @@ impl Client {
             .map(|s| (text(&s["title"]), text(&s["subtitle"])))
             .filter(|(role, names)| !role.is_empty() && !names.is_empty())
             .collect())
+    }
+
+    /// Whether the signed-in user has liked a song, as the player's heart
+    /// shows it. None signed out, or when YouTube Music doesn't say.
+    pub fn liked(&self, video_id: &str) -> Result<Option<bool>, String> {
+        if !self.signed_in() {
+            return Ok(None);
+        }
+        let response = self.post("next", json!({"videoId": video_id, "isAudioOnly": true}))?;
+        Ok(parse::like_status(&response))
     }
 
     pub fn rate(&self, video_id: &str, like: bool) -> Result<(), String> {

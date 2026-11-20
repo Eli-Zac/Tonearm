@@ -336,14 +336,31 @@ fn candidates(http: &ureq::Agent, album: &str, artist: &str) -> Result<Vec<Strin
 /// A video's title as a song's: no "(Official Video)" or "[HD]", and no
 /// "Artist - " in front.
 fn song_title(title: &str, artist: &str) -> String {
+    // A note saying it is another recording (live, acoustic, a remix) stays:
+    // without it "Everlong (Live at the Roundhouse)" would find the studio
+    // "Everlong" and its album's moving cover. Notes about the upload
+    // ("Official Video", "Lyrics") go.
     let mut out = String::new();
+    let mut note = String::new();
     let mut depth = 0i32;
     for c in title.chars() {
         match c {
-            '(' | '[' => depth += 1,
-            ')' | ']' => depth = (depth - 1).max(0),
+            '(' | '[' => {
+                if depth == 0 {
+                    note.clear();
+                }
+                depth += 1;
+                note.push(c);
+            }
+            ')' | ']' => {
+                depth = (depth - 1).max(0);
+                note.push(c);
+                if depth == 0 && is_other_recording(&note) {
+                    out.push_str(&note);
+                }
+            }
             _ if depth == 0 => out.push(c),
-            _ => {}
+            _ => note.push(c),
         }
     }
     if let Some((left, right)) = out.split_once(" - ") {
@@ -352,6 +369,18 @@ fn song_title(title: &str, artist: &str) -> String {
         }
     }
     out.trim().to_string()
+}
+
+/// Whether a bracketed note in a title marks a different recording of the
+/// song, which has its own album (or none on Apple), not the studio one's.
+fn is_other_recording(note: &str) -> bool {
+    let words = plain(note);
+    let words: Vec<&str> = words.split(' ').collect();
+    const MARKS: [&str; 12] = [
+        "live", "acoustic", "remix", "demo", "unplugged", "instrumental",
+        "session", "sessions", "cover", "rehearsal", "orchestral", "piano",
+    ];
+    words.iter().any(|w| MARKS.contains(w))
 }
 
 /// The albums Apple has the song on, by name and id, when sure of them.
@@ -413,6 +442,25 @@ fn first_artist(artist: &str) -> &str {
 
 /// The square video's stream for the first of the albums that has one.
 fn video_url(http: &ureq::Agent, ids: &[String]) -> Result<Option<String>, String> {
+    let albums = album_videos(http, ids)?;
+    // Apple answers in its own order. Keep ours, best match first.
+    for id in ids {
+        let Some((_, videos)) = albums.iter().find(|(found, _)| found == id) else {
+            continue;
+        };
+        let url = ["motionSquareVideo1x1", "motionDetailSquare"].iter().find_map(|kind| {
+            videos.get(*kind)?.get("video")?.as_str().map(str::to_string)
+        });
+        if url.is_some() {
+            return Ok(url);
+        }
+    }
+    Ok(None)
+}
+
+/// Each of the albums Apple found, by id, with its `editorialVideo`: the
+/// moving covers it has, by kind.
+fn album_videos(http: &ureq::Agent, ids: &[String]) -> Result<Vec<(String, serde_json::Map<String, Value>)>, String> {
     for attempt in 0..2 {
         let token = token(http)?;
         let result = http
@@ -434,21 +482,18 @@ fn video_url(http: &ureq::Agent, ids: &[String]) -> Result<Option<String>, Strin
             Err(e) => return Err(format!("Apple Music catalogue: {e}")),
         };
         let albums = response.get("data").and_then(Value::as_array).cloned().unwrap_or_default();
-        // Apple answers in its own order. Keep ours, best match first.
-        for id in ids {
-            let Some(found) = albums.iter().find(|a| a.get("id").and_then(Value::as_str) == Some(id))
-            else {
-                continue;
-            };
-            let videos = found.pointer("/attributes/editorialVideo");
-            let url = ["motionSquareVideo1x1", "motionDetailSquare"].iter().find_map(|kind| {
-                videos?.get(kind)?.get("video")?.as_str().map(str::to_string)
-            });
-            if url.is_some() {
-                return Ok(url);
-            }
-        }
-        return Ok(None);
+        return Ok(albums
+            .iter()
+            .filter_map(|album| {
+                let id = album.get("id")?.as_str()?.to_string();
+                let videos = album
+                    .pointer("/attributes/editorialVideo")
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                Some((id, videos))
+            })
+            .collect());
     }
     Err("Apple Music refused its own token".into())
 }
@@ -694,6 +739,7 @@ pub fn fetch(http: &ureq::Agent, album: &str, title: &str, artist: &str) -> Resu
                 return Ok(None);
             }
         } else if let Some(path) = clips_dir().map(|d| d.join(&file)).filter(|p| p.is_file()) {
+            fix_start(&path);
             return Ok(Some(path));
         }
     }
@@ -743,17 +789,95 @@ fn look_up(http: &ureq::Agent, album: &str, title: &str, artist: &str) -> Result
         .collect();
     let path = dir.join(format!("{name}.mp4"));
     if path.is_file() {
+        fix_start(&path);
         return Ok(Some(path));
     }
-    let Some(bytes) = fetch_video(http, &master)? else {
+    let Some(mut bytes) = fetch_video(http, &master)? else {
         return Ok(None);
     };
+    rebase(&mut bytes);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let partial = path.with_extension("part");
     std::fs::write(&partial, &bytes).map_err(|e| e.to_string())?;
     std::fs::rename(&partial, &path).map_err(|e| e.to_string())?;
     trim_clips(&dir);
     Ok(Some(path))
+}
+
+/// Makes a fragmented MP4's first frame start at zero. Apple's clips are
+/// cut from a longer stream: the first fragment's decode time (`tfdt`) can
+/// be ten seconds in, with no edit list saying so, and players start the
+/// clock at zero, so they held the first frame that long on every loop.
+/// Every fragment's time moves back by the first one's. Returns whether
+/// anything changed.
+fn rebase(bytes: &mut [u8]) -> bool {
+    // Each `tfdt`: where its time field is, and whether it is 64 bits.
+    let mut found: Vec<(usize, bool)> = Vec::new();
+    fn walk(bytes: &[u8], start: usize, end: usize, found: &mut Vec<(usize, bool)>) {
+        let mut at = start;
+        while at + 8 <= end {
+            let size32 = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+            let kind = &bytes[at + 4..at + 8];
+            let (size, head) = match size32 {
+                0 => (end - at, 8),
+                1 if at + 16 <= end => (u64::from_be_bytes(bytes[at + 8..at + 16].try_into().unwrap()) as usize, 16),
+                _ => (size32, 8),
+            };
+            if size < head || at + size > end {
+                return;
+            }
+            match kind {
+                b"moof" | b"traf" => walk(bytes, at + head, at + size, found),
+                b"tfdt" if size >= head + 8 => {
+                    let wide = bytes[at + head] == 1;
+                    if !wide || size >= head + 12 {
+                        found.push((at + head + 4, wide));
+                    }
+                }
+                _ => {}
+            }
+            at += size;
+        }
+    }
+    walk(bytes, 0, bytes.len(), &mut found);
+    let read = |bytes: &[u8], (at, wide): (usize, bool)| -> u64 {
+        if wide {
+            u64::from_be_bytes(bytes[at..at + 8].try_into().unwrap())
+        } else {
+            u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as u64
+        }
+    };
+    let Some(base) = found.iter().map(|&f| read(bytes, f)).min().filter(|&b| b > 0) else {
+        return false;
+    };
+    for &(at, wide) in &found {
+        let time = read(bytes, (at, wide)) - base;
+        if wide {
+            bytes[at..at + 8].copy_from_slice(&time.to_be_bytes());
+        } else {
+            bytes[at..at + 4].copy_from_slice(&(time as u32).to_be_bytes());
+        }
+    }
+    true
+}
+
+/// Rebases a clip saved before `rebase` existed, once per run.
+fn fix_start(path: &Path) {
+    static CHECKED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    {
+        let mut checked = CHECKED.lock().unwrap_or_else(|e| e.into_inner());
+        if checked.iter().any(|p| p == path) {
+            return;
+        }
+        checked.push(path.to_path_buf());
+    }
+    let Ok(mut bytes) = std::fs::read(path) else { return };
+    if rebase(&mut bytes) {
+        let partial = path.with_extension("part");
+        if std::fs::write(&partial, &bytes).is_ok() {
+            let _ = std::fs::rename(&partial, path);
+        }
+    }
 }
 
 /// Keeps the newest clips and deletes the rest.
@@ -789,6 +913,14 @@ pub fn probe(album: &str, artist: &str) {
         Err(message) => return println!("search: {message}"),
     };
     println!("albums {ids:?}");
+    match album_videos(&http, &ids) {
+        Ok(albums) => {
+            for (id, kinds) in albums {
+                println!("album {id} has {:?}", kinds.keys().collect::<Vec<_>>());
+            }
+        }
+        Err(message) => return println!("catalogue: {message}"),
+    }
     let master = match video_url(&http, &ids) {
         Ok(Some(url)) => url,
         Ok(None) => return println!("no moving cover"),
@@ -807,6 +939,53 @@ pub fn probe(album: &str, artist: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A box: its size, kind and body.
+    fn mp4_box(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut out = ((body.len() + 8) as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(body);
+        out
+    }
+
+    fn fragment(time: u64) -> Vec<u8> {
+        let mut tfdt = vec![1, 0, 0, 0];
+        tfdt.extend_from_slice(&time.to_be_bytes());
+        let traf = mp4_box(b"traf", &[mp4_box(b"tfhd", &[0; 8]), mp4_box(b"tfdt", &tfdt)].concat());
+        [mp4_box(b"moof", &[mp4_box(b"mfhd", &[0; 8]), traf].concat()), mp4_box(b"mdat", &[7; 5])].concat()
+    }
+
+    #[test]
+    fn rebase_starts_clips_at_zero() {
+        let mut file = [mp4_box(b"ftyp", b"isom"), mp4_box(b"moov", &[]), fragment(300), fragment(413)].concat();
+        let expected = [mp4_box(b"ftyp", b"isom"), mp4_box(b"moov", &[]), fragment(0), fragment(113)].concat();
+        assert!(rebase(&mut file));
+        assert_eq!(file, expected);
+        // Already at zero: left alone.
+        assert!(!rebase(&mut file));
+    }
+
+    /// `REBASE_FILE=clip.mp4 cargo test -p tonearm-core rebase_file -- --ignored`
+    /// rebases a real clip in place.
+    #[test]
+    #[ignore]
+    fn rebase_file() {
+        let path = std::env::var("REBASE_FILE").unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        println!("changed: {}", rebase(&mut bytes));
+        std::fs::write(&path, bytes).unwrap();
+    }
+
+    #[test]
+    fn song_titles_keep_notes_of_another_recording() {
+        assert_eq!(song_title("Everlong (Official HD Video)", "Foo Fighters"), "Everlong");
+        assert_eq!(
+            song_title("Everlong (Live at the Roundhouse, London)", "Foo Fighters"),
+            "Everlong (Live at the Roundhouse, London)",
+        );
+        assert_eq!(song_title("Foo Fighters - Everlong (Acoustic)", "Foo Fighters"), "Everlong (Acoustic)");
+        assert_eq!(song_title("Song [Lyrics]", "A"), "Song");
+    }
 
     #[test]
     fn editions_match_but_other_albums_do_not() {

@@ -2,21 +2,37 @@
 //! Windows, DPAPI encrypts them so only your Windows account can read them.
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
+
+/// A folder of the app's own, set once at start. An Android app's files
+/// live where Android says, which `dirs` can't know.
+static HOME: OnceLock<PathBuf> = OnceLock::new();
+
+/// Keeps settings and data under `dir`, as `TONEARM_PROFILE` does. Call
+/// before anything reads or writes them. Later calls change nothing.
+pub fn set_home(dir: PathBuf) {
+    let _ = HOME.set(dir);
+}
+
+/// A folder holding both, if one was given.
+fn home() -> Option<PathBuf> {
+    HOME.get().cloned().or_else(|| std::env::var_os("TONEARM_PROFILE").map(PathBuf::from))
+}
 
 /// Where Tonearm keeps its settings and sign in. `TONEARM_PROFILE` points a
 /// copy at a folder of its own instead, so a test copy starts signed out and
 /// leaves the real queue and history alone.
 pub fn config_dir() -> Option<PathBuf> {
-    match std::env::var_os("TONEARM_PROFILE") {
-        Some(dir) => Some(PathBuf::from(dir).join("config")),
+    match home() {
+        Some(dir) => Some(dir.join("config")),
         None => Some(dirs::config_dir()?.join("tonearm")),
     }
 }
 
 /// Where Tonearm keeps downloads, caches and yt-dlp. See `config_dir`.
 pub fn data_dir() -> Option<PathBuf> {
-    match std::env::var_os("TONEARM_PROFILE") {
-        Some(dir) => Some(PathBuf::from(dir).join("data")),
+    match home() {
+        Some(dir) => Some(dir.join("data")),
         None => Some(dirs::data_local_dir()?.join("tonearm")),
     }
 }

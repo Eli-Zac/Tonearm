@@ -69,6 +69,10 @@ pub fn default() -> Option<Box<dyn Resolver>> {
     if let Ok(url) = std::env::var("TONEARM_TEST_STREAM") {
         return Some(Box::new(Fixed(url)));
     }
+    // A phone can't run yt-dlp, so Android asks InnerTube alone.
+    if cfg!(target_os = "android") {
+        return Some(Box::new(Cached::new(Box::new(Native::new()))));
+    }
     let inner: Box<dyn Resolver> = match std::env::var("TONEARM_RESOLVER").as_deref() {
         Ok("native") => Box::new(Native::new()),
         Ok("ytdlp") => Box::new(YtDlp::new()),

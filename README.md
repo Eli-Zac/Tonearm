@@ -110,6 +110,15 @@ Windows settings: Windows blocks incoming connections on public networks.
 `tonearm --probe cast` lists the devices found and what each is running,
 without changing anything on them.
 
+Speakers play through Google's Default Media Receiver. Devices with a
+screen can use Tonearm's own receiver instead, `receiver/public/index.html`,
+which shows each song's cover, title, artist and progress. It is Cast app
+`79497171`, served from `https://tonearm-cast.eli-zac.dev/` by a Cloudflare
+Worker (`cd receiver && npx wrangler deploy` to update it). A build uses it
+when `TONEARM_CAST_APP` holds that id (in `keys.env` or the environment).
+Until the app is published, only devices registered in the Cast developer
+console can open it; any other device falls back to Google's receiver.
+
 ## Lyrics
 
 Tonearm asks these public lyric services in order, and stops at the first
