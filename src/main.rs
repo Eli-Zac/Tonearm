@@ -532,6 +532,9 @@ struct App {
     cover_choices: Cell<(i32, i32)>,
     outgoing: RefCell<Option<Outgoing>>,
     clock: Cell<(u64, Instant)>,
+    /// Where a seek sent the song, shown until the audio's report catches
+    /// up, so the timeline doesn't jump back.
+    seek_hold: audio::SeekHold,
     /// Seconds a song crossfades into the next one over. Zero is off.
     crossfade: Cell<u32>,
     /// Songs' analyses read from the library, by video id.
@@ -3038,6 +3041,8 @@ impl App {
         ui.set_queue_index(index as i32);
         self.sync_up_next();
         ui.set_liked(false);
+        // A seek held for the last song is not this one's place.
+        self.seek_hold.clear();
         // Whether the song is liked comes after. It only ever fills the
         // heart, so a press made meanwhile isn't undone.
         if let Some(video_id) = item.video_id.clone().filter(|_| self.client.signed_in()) {
@@ -3215,7 +3220,10 @@ impl App {
         };
         match pending {
             Some(id) => self.show_resume_point(id, seconds),
-            None => self.audio.seek(seconds),
+            None => {
+                self.seek_hold.set((seconds.max(0.0) * 1000.0) as u64);
+                self.audio.seek(seconds);
+            }
         }
     }
 
@@ -4733,6 +4741,11 @@ impl App {
                 time = base + (at.elapsed().as_millis() as u64).min(200);
             } else {
                 time = base;
+            }
+            // Just after a seek: the place picked, until the audio says so.
+            let held = self.seek_hold.apply(reported, playing);
+            if held != reported {
+                time = held;
             }
             // While casting, what is heard trails the mixer by the stream's
             // lead. What shows follows what is heard. Mixes keep to the
@@ -6260,6 +6273,7 @@ fn main() -> Result<(), slint::PlatformError> {
         cover_choices: Cell::new(load_cover_choices()),
         outgoing: RefCell::new(None),
         clock: Cell::new((0, Instant::now())),
+        seek_hold: audio::SeekHold::default(),
         crossfade: Cell::new(load_crossfade()),
         analyses: RefCell::new(HashMap::new()),
         unanalyzed: RefCell::new(HashSet::new()),

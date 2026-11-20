@@ -29,12 +29,23 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withLink
+import androidx.compose.material3.Text
+import uniffi.tonearm_android.Link
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import coil3.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import uniffi.tonearm_android.Item
 import uniffi.tonearm_android.Tonearm as Core
@@ -56,11 +67,16 @@ fun NowPlayingScreen(
     /** Whether the song is liked; null while unknown or signed out. */
     liked: Boolean?,
     onLike: () -> Unit,
+    /** An artist's name tapped: their page. */
+    onOpenArtist: (id: String, name: String) -> Unit,
     onClose: () -> Unit,
 ) {
     // A panel's button shows it, and pressed again goes back to the cover.
     val toggle = { p: Panel -> onPanel(if (panel == p) Panel.Cover else p) }
-    val cover = now.meta?.artworkUri?.toString()
+    // The song from the core's queue, by id: its cover and linked artists.
+    // The session's details can still be the last song's for a moment.
+    val playing = remember(now.id) { core.nowPlaying()?.takeIf { it.videoId == now.id } }
+    val cover = playing?.cover?.ifEmpty { null } ?: now.meta?.artworkUri?.toString()
     // Each song's lyrics are looked for as it comes on, so they are ready
     // when the button is pressed. The core keeps those found.
     val title = now.meta?.title?.toString() ?: ""
@@ -118,12 +134,14 @@ fun NowPlayingScreen(
                     verticalArrangement = Arrangement.Center,
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    AsyncImage(
-                        model = cover,
-                        contentDescription = null,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.weight(1f, fill = false).aspectRatio(1f)
-                            .clip(RoundedCornerShape(Tonearm.radius)).background(Tonearm.raised),
+                    // Slides as songs change, swipes to skip, and plays the
+                    // album's moving cover when it has one.
+                    CoverCarousel(
+                        now.id?.let { CoverSong(it, cover) },
+                        now.index,
+                        core,
+                        controller,
+                        Modifier.weight(1f, fill = false).aspectRatio(1f),
                     )
                     // A few lines from where the song is, under the cover,
                     // as on the desktop. Tap them for the lyrics.
@@ -143,15 +161,33 @@ fun NowPlayingScreen(
             // in the accent once liked.
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Title(now.meta?.title?.toString() ?: "", size = 24.sp, weight = FontWeight.Bold, lines = 2)
+                    // From the core's queue, known the moment the song
+                    // changes, and kept through loading and seeking. A bar
+                    // stands in only while neither knows it yet.
+                    val songTitle = playing?.title ?: now.meta?.title?.toString().orEmpty()
+                    val songArtist = playing?.artist ?: now.meta?.artist?.toString().orEmpty()
+                    // Each line keeps one height, loaded or not, so nothing
+                    // above or below moves when it fills in.
+                    if (songTitle.isEmpty()) {
+                        Box(Modifier.height(30.dp), contentAlignment = Alignment.CenterStart) {
+                            TextSkeleton(width = 0.6f, height = 24.dp)
+                        }
+                    } else {
+                        Title(songTitle, size = 24.sp, weight = FontWeight.Bold, lines = 2)
+                    }
                     Spacer(Modifier.height(4.dp))
-                    Title(
-                        if (now.loading) "Loading…" else now.meta?.artist?.toString() ?: "",
-                        size = 17.sp, weight = FontWeight.Medium, color = Tonearm.dim,
-                    )
+                    Box(Modifier.fillMaxWidth().height(24.dp), contentAlignment = Alignment.CenterStart) {
+                        if (songArtist.isEmpty()) {
+                            TextSkeleton(width = 0.35f, height = 18.dp)
+                        } else {
+                            ArtistLine(playing?.artists.orEmpty(), songArtist, onOpenArtist)
+                        }
+                    }
                 }
-                if (liked != null) {
-                    LikeButton(liked, onLike)
+                // The heart's room is kept while it loads, so the title
+                // never wraps differently when it appears.
+                Box(Modifier.padding(start = 12.dp).size(48.dp)) {
+                    if (liked != null) LikeButton(liked, onLike)
                 }
             }
             Spacer(Modifier.height(22.dp))
@@ -178,10 +214,20 @@ fun NowPlayingScreen(
     }
 }
 
-/** Two faint lines, gently pulsing, where the lyrics preview will be. The
- *  pulse runs in the draw phase only, so it costs no recomposition. */
+/** Two faint lines, gently pulsing, where the lyrics preview will be. */
 @Composable
 private fun LyricsSkeleton(height: androidx.compose.ui.unit.Dp) {
+    Column(Modifier.fillMaxWidth().height(height), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        TextSkeleton(0.72f, 18.dp)
+        TextSkeleton(0.46f, 18.dp)
+    }
+}
+
+/** A faint bar, gently pulsing, `width` of the room across, where text
+ *  will be. The pulse runs in the draw phase only, so it costs no
+ *  recomposition. */
+@Composable
+private fun TextSkeleton(width: Float, height: androidx.compose.ui.unit.Dp) {
     val pulse = rememberInfiniteTransition(label = "skeleton")
     val alpha by pulse.animateFloat(
         initialValue = 0.06f,
@@ -189,14 +235,35 @@ private fun LyricsSkeleton(height: androidx.compose.ui.unit.Dp) {
         animationSpec = infiniteRepeatable(tween(900, easing = FastOutSlowInEasing), RepeatMode.Reverse),
         label = "alpha",
     )
-    Column(Modifier.fillMaxWidth().height(height), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        listOf(0.72f, 0.46f).forEach { width ->
-            Box(
-                Modifier.fillMaxWidth(width).height(18.dp).clip(RoundedCornerShape(6.dp))
-                    .drawBehind { drawRect(Color.White.copy(alpha = alpha)) },
-            )
+    Box(
+        Modifier.fillMaxWidth(width).height(height).clip(RoundedCornerShape(6.dp))
+            .drawBehind { drawRect(Color.White.copy(alpha = alpha)) },
+    )
+}
+
+/** The song's artists, each name opening their page where YouTube Music
+ *  links one, as the desktop's artist line does. */
+@Composable
+private fun ArtistLine(artists: List<Link>, fallback: String, onOpen: (String, String) -> Unit) {
+    val style = TextStyle(fontFamily = Tonearm.font, fontWeight = FontWeight.Medium, fontSize = 17.sp, color = Tonearm.dim)
+    if (artists.none { it.id != null }) {
+        Title(fallback, size = 17.sp, weight = FontWeight.Medium, color = Tonearm.dim)
+        return
+    }
+    val text = buildAnnotatedString {
+        artists.forEachIndexed { i, artist ->
+            if (i > 0) append(", ")
+            val id = artist.id
+            if (id == null) {
+                append(artist.name)
+            } else {
+                // Looks just like the rest of the line: no colour, no underline.
+                val plain = TextLinkStyles(SpanStyle(color = Tonearm.dim, textDecoration = TextDecoration.None))
+                withLink(LinkAnnotation.Clickable(id, plain) { onOpen(id, artist.name) }) { append(artist.name) }
+            }
         }
     }
+    Text(text, style = style, maxLines = 1, overflow = TextOverflow.Ellipsis)
 }
 
 /** The heart. A like gives a small pop, as the press lands. */
@@ -211,7 +278,7 @@ private fun LikeButton(liked: Boolean, onClick: () -> Unit) {
         }
     }
     Box(
-        Modifier.padding(start = 12.dp).size(48.dp).clip(CircleShape).clickable {
+        Modifier.size(48.dp).clip(CircleShape).clickable {
             pressed++
             onClick()
         },
@@ -244,7 +311,26 @@ fun SeekBar(now: NowPlaying, controller: MediaController) {
     var dragging by remember { mutableStateOf<Float?>(null) }
     var width by remember { mutableIntStateOf(1) }
     val duration = now.duration.coerceAtLeast(0)
-    val shown = dragging ?: if (duration > 0) now.position.toFloat() / duration else 0f
+    // Where a tap or drag sent the song. The position read back lags the
+    // audio by up to a second, so the bar holds here until it catches up
+    // rather than jumping back to where it was.
+    var seekedTo by remember { mutableStateOf<Long?>(null) }
+    val target = seekedTo
+    if (target != null && kotlin.math.abs(now.position - target) < 1500) {
+        SideEffect { seekedTo = null }
+    }
+    LaunchedEffect(target) {
+        if (target != null) {
+            delay(2000)
+            seekedTo = null
+        }
+    }
+    fun seek(ms: Long) {
+        seekedTo = ms
+        controller.seekTo(ms)
+    }
+    val position = target ?: now.position
+    val shown = dragging ?: if (duration > 0) position.toFloat() / duration else 0f
     Column(Modifier.fillMaxWidth()) {
         Box(
             Modifier
@@ -253,14 +339,14 @@ fun SeekBar(now: NowPlaying, controller: MediaController) {
                 .onSizeChangedWidth { width = it }
                 .pointerInput(duration) {
                     detectTapGestures { offset ->
-                        if (duration > 0) controller.seekTo((offset.x / width * duration).toLong())
+                        if (duration > 0) seek((offset.x / width * duration).toLong())
                     }
                 }
                 .pointerInput(duration) {
                     detectHorizontalDragGestures(
                         onDragStart = { dragging = it.x / width },
                         onDragEnd = {
-                            dragging?.let { if (duration > 0) controller.seekTo((it * duration).toLong()) }
+                            dragging?.let { if (duration > 0) seek((it * duration).toLong()) }
                             dragging = null
                         },
                         onDragCancel = { dragging = null },
@@ -273,7 +359,7 @@ fun SeekBar(now: NowPlaying, controller: MediaController) {
             }
         }
         Row(Modifier.fillMaxWidth()) {
-            val at = dragging?.let { (it * duration).toLong() } ?: now.position
+            val at = dragging?.let { (it * duration).toLong() } ?: position
             Dim(clock(at), 12.sp)
             Spacer(Modifier.weight(1f))
             Dim(if (duration > 0) clock(duration) else "", 12.sp)
@@ -293,13 +379,14 @@ fun Controls(now: NowPlaying, controller: MediaController, core: Core) {
             core.setShuffle(shuffle)
         }
         Spacer(Modifier.weight(1f))
-        IconButton(Icons.prev, size = 30) { controller.seekToPrevious() }
+        IconButton(Icons.rewind, size = 36) { controller.seekToPrevious() }
         Spacer(Modifier.width(18.dp))
-        RoundButton(if (now.playing) Icons.pause else Icons.play, size = 72.dp) {
+        // Plain white glyphs, no disc behind play, as on the desktop.
+        IconButton(if (now.playing) Icons.pause else Icons.play, size = 52) {
             if (now.playing) controller.pause() else controller.play()
         }
         Spacer(Modifier.width(18.dp))
-        IconButton(Icons.next, size = 30) { controller.seekToNext() }
+        IconButton(Icons.fastForward, size = 36) { controller.seekToNext() }
         Spacer(Modifier.weight(1f))
         val repeat = controller.repeatMode
         ModeButton(if (repeat == Player.REPEAT_MODE_ONE) Icons.repeatOne else Icons.repeat, repeat != Player.REPEAT_MODE_OFF) {

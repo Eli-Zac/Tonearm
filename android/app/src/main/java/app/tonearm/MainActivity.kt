@@ -10,6 +10,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -128,15 +129,15 @@ fun MiniPlayer(now: NowPlaying, controller: MediaController, onOpen: () -> Unit)
             Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
                 Title(now.meta?.title?.toString() ?: "", size = 15.sp)
                 Dim(
-                    if (now.loading) "Loading…" else now.error ?: now.meta?.artist?.toString() ?: "",
+                    now.error ?: now.meta?.artist?.toString() ?: "",
                     13.sp,
                 )
             }
-            IconButton(Icons.prev) { controller.seekToPrevious() }
-            IconButton(if (now.playing) Icons.pause else Icons.play, size = 30) {
+            IconButton(Icons.rewind) { controller.seekToPrevious() }
+            IconButton(if (now.playing) Icons.pause else Icons.play, size = 26) {
                 if (now.playing) controller.pause() else controller.play()
             }
-            IconButton(Icons.next) { controller.seekToNext() }
+            IconButton(Icons.fastForward) { controller.seekToNext() }
         }
         // The progress line along the island's foot.
         Box(Modifier.fillMaxWidth().height(2.dp).background(Tonearm.line)) {
@@ -148,7 +149,7 @@ fun MiniPlayer(now: NowPlaying, controller: MediaController, onOpen: () -> Unit)
 @Composable
 fun IconButton(glyph: String, size: Int = 22, onClick: () -> Unit) {
     Box(
-        Modifier.size(44.dp).clip(RoundedCornerShape(22.dp)).clickable(onClick = onClick),
+        Modifier.size((size * 1.5f).coerceAtLeast(44f).dp).clip(CircleShape).clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         Icon(glyph, size = size.sp, filled = true)

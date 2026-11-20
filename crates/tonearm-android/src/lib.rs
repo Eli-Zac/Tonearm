@@ -128,6 +128,8 @@ pub struct Tonearm {
     lyrics: Mutex<HashMap<String, Lyrics>>,
     /// Whether songs are liked, by video id, as last read or set.
     liked: Mutex<HashMap<String, bool>>,
+    /// Where a seek sent the song, reported until the engine catches up.
+    seek_hold: audio::SeekHold,
 }
 
 #[uniffi::export]
@@ -152,6 +154,7 @@ impl Tonearm {
             topped_for: Mutex::new(String::new()),
             lyrics: Mutex::new(HashMap::new()),
             liked: Mutex::new(HashMap::new()),
+            seek_hold: audio::SeekHold::default(),
         });
         // Signed in as last time, as the desktop app starts.
         if let Some(cookie) = store::load("session") {
@@ -262,6 +265,28 @@ impl Tonearm {
         }
         cache.insert(video_id, found.clone());
         Some(found)
+    }
+
+    // -------------------------------------------------------- moving covers
+
+    /// The album's moving cover from Apple Music, as the desktop shows in
+    /// Now Playing: the path of a looping H.264 MP4 kept on disk, or None
+    /// when the album has none (or none the core is sure of). Looks the
+    /// song up in the queue by id, so its own album, title and artist are
+    /// used. Blocks.
+    pub fn animated_cover(&self, video_id: String) -> Option<String> {
+        let song = {
+            let queue = self.queue.lock().unwrap();
+            queue.items().iter().find(|s| s.video_id == video_id).cloned()?
+        };
+        let http = innertube::agent(Duration::from_secs(20));
+        match tonearm_core::animated_art::fetch(&http, &song.album, &song.title, &song.artist) {
+            Ok(path) => path.map(|p| p.to_string_lossy().into_owned()),
+            Err(message) => {
+                eprintln!("tonearm: animated cover: {message}");
+                None
+            }
+        }
     }
 
     // ------------------------------------------------- playing, as on desktop
@@ -517,6 +542,7 @@ impl Tonearm {
     }
 
     pub fn seek(&self, seconds: f32) {
+        self.seek_hold.set((seconds.max(0.0) * 1000.0) as u64);
         self.audio.seek(seconds);
     }
 
@@ -545,7 +571,9 @@ impl Tonearm {
         let queue = self.queue.lock().unwrap();
         Playback {
             state,
-            position_ms: status.position_ms.load(Ordering::SeqCst),
+            position_ms: self
+                .seek_hold
+                .apply(status.position_ms.load(Ordering::SeqCst), state == PlayState::Playing),
             duration_ms: status.duration_ms.load(Ordering::SeqCst),
             error,
             index: queue.index() as u32,
@@ -683,6 +711,8 @@ impl Tonearm {
             }
         };
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        // A seek held for the last song is not this one's place.
+        self.seek_hold.clear();
         self.audio.load(
             audio::Input::Http {
                 url: stream.url,

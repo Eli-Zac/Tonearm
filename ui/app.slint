@@ -276,6 +276,9 @@ export global Icons {
     out property <string> pause: "\u{e39e}";
     out property <string> prev: "\u{e5a4}";
     out property <string> next: "\u{e5a6}";
+    // Filled only: two triangles each way, the transport's skip buttons.
+    out property <string> rewind: "\u{e6a8}";
+    out property <string> fast-forward: "\u{e6a6}";
     out property <string> shuffle: "\u{e422}";
     out property <string> repeat: "\u{e3f6}";
     out property <string> repeat-one: "\u{e3f8}";
@@ -8454,8 +8457,9 @@ export component AppWindow inherits Window {
             y: transport-y;
             width: 32px;
             height: 32px;
-            // Sharp edged, a triangle and a bar.
-            shape: "M 18 4 L 18 20 L 7 12 Z M 4 4 L 6.5 4 L 6.5 20 L 4 20 Z";
+            // Two filled triangles, as the phone has them too.
+            icon: Icons.rewind;
+            fill: true;
             size: 18px;
             tint: Theme.text;
             tip: "Previous";
@@ -8466,15 +8470,16 @@ export component AppWindow inherits Window {
             y: transport-y;
             width: 32px;
             height: 32px;
+            // Plain white, no disc behind it, between the two.
             icon: root.buffering ? "" : root.playing ? Icons.pause : Icons.play;
             fill: true;
-            size: 16px;
-            filled: true;
+            size: 22px;
+            tint: Theme.text;
             tip: root.playing ? "Pause" : "Play";
             clicked => { root.toggle-play(); }
             if root.buffering: Loader {
                 dot: 5px;
-                tint: #08080a;
+                tint: Theme.text;
             }
         }
         IconButton {
@@ -8482,7 +8487,8 @@ export component AppWindow inherits Window {
             y: transport-y;
             width: 32px;
             height: 32px;
-            shape: "M 6 4 L 6 20 L 17 12 Z M 17.5 4 L 20 4 L 20 20 L 17.5 20 Z";
+            icon: Icons.fast-forward;
+            fill: true;
             size: 18px;
             tint: Theme.text;
             tip: "Next";

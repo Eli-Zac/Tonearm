@@ -45,6 +45,9 @@ dependencies {
     // The media session: notification, lock screen, headphone buttons.
     implementation("androidx.media3:media3-session:1.11.1")
     implementation("androidx.media3:media3-common:1.11.1")
+    // Plays the moving album cover, muted and looping, over the still one.
+    implementation("androidx.media3:media3-exoplayer:1.11.1")
+    implementation("androidx.media3:media3-ui-compose:1.11.1")
     // UniFFI's Kotlin calls into Rust through JNA.
     implementation("net.java.dev.jna:jna:5.19.1@aar")
     implementation("io.coil-kt.coil3:coil-compose:3.6.3")

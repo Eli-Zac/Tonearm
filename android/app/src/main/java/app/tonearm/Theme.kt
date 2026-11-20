@@ -66,6 +66,9 @@ object Icons {
     const val addQueue = ""
     const val artist = ""
     const val album = ""
+    /** Filled only: the transport's skip buttons, two triangles each way. */
+    const val rewind = ""
+    const val fastForward = ""
     const val open = ""
     const val trash = ""
     const val download = ""

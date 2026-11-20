@@ -584,8 +584,8 @@ impl Walker {
                         }
                         "playlistPanelVideoRenderer" => self.push(panel_item(child)),
                         "playlistPanelVideoWrapperRenderer" => {
-                            if let Some(primary) = child.get("primaryRenderer") {
-                                self.walk(primary);
+                            if let Some(chosen) = song_of_wrapper(child) {
+                                self.walk(chosen);
                             }
                         }
                         // The user's own playlist wraps the usual header.
@@ -675,6 +675,25 @@ pub fn page(v: &Value) -> Page {
         }
     }
     page
+}
+
+/// A queue row that wraps a music video with its song: the song, as
+/// YouTube Music's song mode plays it, with its album cover rather than the
+/// video's frame. The video stays when there is no song for it.
+fn song_of_wrapper(wrapper: &Value) -> Option<&Value> {
+    let primary = wrapper.get("primaryRenderer")?;
+    let is_song = |v: &Value| find(v, "musicVideoType").and_then(Value::as_str) == Some("MUSIC_VIDEO_TYPE_ATV");
+    if is_song(primary) {
+        return Some(primary);
+    }
+    let counterpart = wrapper
+        .get("counterpart")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c.get("counterpartRenderer"))
+        .find(|c| is_song(c));
+    Some(counterpart.unwrap_or(primary))
 }
 
 /// Whether the song of a `next` response is liked, from the player's like
@@ -797,6 +816,31 @@ mod tests {
         json!({"text": name, "navigationEndpoint": {"browseEndpoint": {"browseId": id,
             "browseEndpointContextSupportedConfigs": {"browseEndpointContextMusicConfig":
                 {"pageType": "MUSIC_PAGE_TYPE_ARTIST"}}}}})
+    }
+
+    #[test]
+    fn a_queued_video_plays_as_its_song() {
+        let row = |id: &str, kind: &str| {
+            json!({"playlistPanelVideoRenderer": {
+                "videoId": id,
+                "title": {"runs": [{"text": "T"}]},
+                "navigationEndpoint": {"watchEndpoint": {"videoId": id, "watchEndpointMusicSupportedConfigs":
+                    {"watchEndpointMusicConfig": {"musicVideoType": kind}}}}
+            }})
+        };
+        let wrapper = |primary: Value, counterpart: Value| {
+            json!({"playlistPanelVideoWrapperRenderer": {
+                "primaryRenderer": primary,
+                "counterpart": [{"counterpartRenderer": counterpart}]
+            }})
+        };
+        let video = wrapper(row("mv", "MUSIC_VIDEO_TYPE_OMV"), row("song", "MUSIC_VIDEO_TYPE_ATV"));
+        let chosen = song_of_wrapper(&video["playlistPanelVideoWrapperRenderer"]).unwrap();
+        assert_eq!(chosen["playlistPanelVideoRenderer"]["videoId"], "song");
+        // Already the song: kept.
+        let song = wrapper(row("song", "MUSIC_VIDEO_TYPE_ATV"), row("mv", "MUSIC_VIDEO_TYPE_OMV"));
+        let chosen = song_of_wrapper(&song["playlistPanelVideoWrapperRenderer"]).unwrap();
+        assert_eq!(chosen["playlistPanelVideoRenderer"]["videoId"], "song");
     }
 
     #[test]

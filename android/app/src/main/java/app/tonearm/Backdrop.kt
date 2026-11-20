@@ -1,6 +1,9 @@
 package app.tonearm
 
 import android.graphics.Bitmap
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -17,6 +20,7 @@ import coil3.request.SuccessResult
 import coil3.request.allowHardware
 import coil3.toBitmap
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
 import uniffi.tonearm_android.backdrop
@@ -66,10 +70,20 @@ fun FlowingBackdrop(cover: String?, modifier: Modifier = Modifier) {
 
     val frame = remember { Bitmap.createBitmap(FRAME, FRAME, Bitmap.Config.ARGB_8888) }
     val image = remember(frame) { frame.asImageBitmap() }
+    // The last song's background, held still while the next fades in over
+    // it, so a new song never cuts.
+    val from = remember { Bitmap.createBitmap(FRAME, FRAME, Bitmap.Config.ARGB_8888) }
+    val fromImage = remember(from) { from.asImageBitmap() }
+    val fade = remember { Animatable(1f) }
     // Bumped as each frame lands, so the canvas redraws.
     var drawn by remember { mutableIntStateOf(0) }
     LaunchedEffect(base) {
         val still = base ?: return@LaunchedEffect
+        if (drawn > 0) {
+            android.graphics.Canvas(from).drawBitmap(frame, 0f, 0f, null)
+            fade.snapTo(0f)
+            launch { fade.animateTo(1f, tween(700, easing = FastOutSlowInEasing)) }
+        }
         val start = withFrameNanos { it }
         var last = -1L
         while (true) {
@@ -97,11 +111,18 @@ fun FlowingBackdrop(cover: String?, modifier: Modifier = Modifier) {
                 val h = (FRAME / aspect).toInt().coerceAtLeast(1)
                 IntOffset(0, (FRAME - h) / 2) to IntSize(FRAME, h)
             }
+            val dst = IntSize(size.width.toInt(), size.height.toInt())
+            // Read here, in drawing, so the fade only redraws.
+            val t = fade.value
+            if (t < 1f) {
+                drawImage(fromImage, srcOffset = src.first, srcSize = src.second, dstSize = dst, filterQuality = FilterQuality.Low)
+            }
             drawImage(
                 image,
                 srcOffset = src.first,
                 srcSize = src.second,
-                dstSize = IntSize(size.width.toInt(), size.height.toInt()),
+                dstSize = dst,
+                alpha = t,
                 filterQuality = FilterQuality.Low,
             )
         }

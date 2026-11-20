@@ -92,6 +92,38 @@ pub struct Status {
     pub error: Mutex<String>,
 }
 
+/// Where a seek sent the song, for what is shown. The engine reports the
+/// old place for a moment after a seek, so a timeline drawn from its report
+/// jumps back before it catches up. Shown instead is the place picked, until
+/// the report comes within reach of it, or two seconds pass.
+#[derive(Default)]
+pub struct SeekHold {
+    held: Mutex<Option<(u64, Instant)>>,
+}
+
+impl SeekHold {
+    /// A seek to `ms`.
+    pub fn set(&self, ms: u64) {
+        *self.held.lock().unwrap() = Some((ms, Instant::now()));
+    }
+
+    pub fn clear(&self) {
+        *self.held.lock().unwrap() = None;
+    }
+
+    /// The position to show, from the engine's `reported` one: the place
+    /// picked while it is held, moving on with the time since if playing.
+    pub fn apply(&self, reported: u64, playing: bool) -> u64 {
+        let mut held = self.held.lock().unwrap();
+        let Some((target, since)) = *held else { return reported };
+        if reported.abs_diff(target) < 1500 || since.elapsed() > Duration::from_secs(2) {
+            *held = None;
+            return reported;
+        }
+        target + if playing { since.elapsed().as_millis() as u64 } else { 0 }
+    }
+}
+
 pub struct Audio {
     tx: Sender<Command>,
     pub status: Arc<Status>,

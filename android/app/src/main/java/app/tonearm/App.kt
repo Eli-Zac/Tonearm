@@ -25,6 +25,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.TextStyle
@@ -186,12 +187,15 @@ fun App(core: Core, controller: MediaController?) {
                     // banner reaches the top edge.
                     PageScreen(top, core, actions, libraryEpoch) { stack.removeAt(stack.lastIndex) }
                 } else {
-                    Box(Modifier.statusBarsPadding()) {
-                        when (tab) {
-                            Tab.Home -> HomeScreen(core, actions)
-                            Tab.Search -> SearchScreen(core, actions)
-                            Tab.Library -> LibraryScreen(core, actions, libraryEpoch)
+                    when (tab) {
+                        // Home runs up under the status bar, so its glows
+                        // reach the top edge rather than stopping short.
+                        Tab.Home -> Box {
+                            HomeScreen(core, actions)
+                            StatusFade()
                         }
+                        Tab.Search -> Box(Modifier.statusBarsPadding()) { SearchScreen(core, actions) }
+                        Tab.Library -> Box(Modifier.statusBarsPadding()) { LibraryScreen(core, actions, libraryEpoch) }
                     }
                 }
             }
@@ -216,6 +220,7 @@ fun App(core: Core, controller: MediaController?) {
                     onMenu = { menuItem = MenuRequest(it) },
                     liked = liked,
                     onLike = { flipLike() },
+                    onOpenArtist = { id, name -> host.open(id, name) },
                 ) { nowPlayingOpen = false }
             }
         }
@@ -242,6 +247,21 @@ fun App(core: Core, controller: MediaController?) {
         }
         toast?.let { Toast(it, Modifier.align(Alignment.BottomCenter).padding(bottom = 150.dp)) }
     }
+}
+
+/** A fade behind the status bar, so the clock and battery read over a
+ *  bright banner or Home's glows, on pages that run up under it. */
+@Composable
+fun StatusFade() {
+    Box(
+        Modifier.fillMaxWidth().windowInsetsTopHeight(WindowInsets.statusBars.add(WindowInsets(top = 24.dp)))
+            .background(
+                androidx.compose.ui.graphics.Brush.verticalGradient(
+                    0f to androidx.compose.ui.graphics.Color(0x8C000000),
+                    1f to androidx.compose.ui.graphics.Color.Transparent,
+                ),
+            ),
+    )
 }
 
 @Composable
@@ -293,7 +313,8 @@ fun HomeScreen(core: Core, actions: Actions) {
         more = { token -> withContext(Dispatchers.IO) { core.more(token) } },
         actions = actions,
         top = { page ->
-            Column {
+            // Under the status bar: the glows start there, the words below it.
+            Column(Modifier.homeGlow(WindowInsets.statusBars.getTop(LocalDensity.current).toFloat()).statusBarsPadding()) {
                 Title("Home", size = 28.sp, weight = FontWeight.ExtraBold,
                     modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 10.dp))
                 if (page.chips.isNotEmpty()) {
@@ -432,17 +453,7 @@ fun PageScreen(route: Route, core: Core, actions: Actions, libraryEpoch: Int, on
                 }
             },
         )
-        // A fade behind the status bar, so the clock and battery read over
-        // a bright banner.
-        Box(
-            Modifier.fillMaxWidth().windowInsetsTopHeight(WindowInsets.statusBars.add(WindowInsets(top = 24.dp)))
-                .background(
-                    androidx.compose.ui.graphics.Brush.verticalGradient(
-                        0f to androidx.compose.ui.graphics.Color(0x8C000000),
-                        1f to androidx.compose.ui.graphics.Color.Transparent,
-                    ),
-                ),
-        )
+        StatusFade()
         Box(
             Modifier.statusBarsPadding().padding(8.dp).size(40.dp).clip(RoundedCornerShape(20.dp))
                 .background(androidx.compose.ui.graphics.Color(0x9908080A)).clickable(onClick = onBack),
