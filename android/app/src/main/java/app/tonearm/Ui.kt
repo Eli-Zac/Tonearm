@@ -188,7 +188,10 @@ fun ItemCard(item: Item, width: Dp, wide: Boolean, actions: Actions) {
             }
         }
         Spacer(Modifier.height(8.dp))
-        Title(item.title, size = 14.sp, lines = 2,
+        // One line, cut short: a shelf is as tall as its tallest card on
+        // screen, so a title wrapping to two would make it jump as that
+        // card scrolled into view.
+        Title(item.title, size = 14.sp, lines = 1,
             modifier = if (item.round()) Modifier.fillMaxWidth() else Modifier)
         Dim(item.line(), 13.sp, lines = 1)
     }

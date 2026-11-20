@@ -246,12 +246,19 @@ fun NowPlayingScreen(
                     val songArtist = playing?.artist ?: now.meta?.artist?.toString().orEmpty()
                     // Each line keeps one height, loaded or not, so nothing
                     // above or below moves when it fills in.
-                    if (songTitle.isEmpty()) {
-                        Box(Modifier.height(30.dp), contentAlignment = Alignment.CenterStart) {
+                    // One line, scrolling when too long, as the desktop's.
+                    Box(Modifier.fillMaxWidth().height(30.dp), contentAlignment = Alignment.CenterStart) {
+                        if (songTitle.isEmpty()) {
                             TextSkeleton(width = 0.6f, height = 24.dp)
+                        } else {
+                            Marquee(
+                                songTitle,
+                                TextStyle(
+                                    color = Tonearm.text, fontFamily = Tonearm.font,
+                                    fontWeight = FontWeight.Bold, fontSize = 24.sp, lineHeight = 30.sp,
+                                ),
+                            )
                         }
-                    } else {
-                        Title(songTitle, size = 24.sp, weight = FontWeight.Bold, lines = 2)
                     }
                     Spacer(Modifier.height(4.dp))
                     Box(Modifier.fillMaxWidth().height(24.dp), contentAlignment = Alignment.CenterStart) {
