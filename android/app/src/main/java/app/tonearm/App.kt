@@ -454,8 +454,13 @@ fun LibraryScreen(core: Core, actions: Actions, epoch: Int) {
 fun SearchScreen(core: Core, actions: Actions) {
     val focus = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
+    // Whether the suggestions are up: from the box taking the cursor or
+    // typing, until a search, a tap on something, or Back. The keyboard
+    // going away leaves them up.
+    var suggesting by remember { mutableStateOf(false) }
     // Clearing focus alone can leave the keyboard up.
     fun putAway() {
+        suggesting = false
         keyboard?.hide()
         focus.clearFocus()
     }
@@ -512,21 +517,14 @@ fun SearchScreen(core: Core, actions: Actions) {
             }
         }
     }
-    // The list shows while the box has the cursor, once there is something
-    // to list.
-    val listing = focused && (query.isNotBlank() || recent.isNotEmpty())
+    // The list shows from the box taking the cursor, once there is
+    // something to list. Back with the keyboard up only puts the keyboard
+    // away (it hears Back first); with it down, Back closes the list.
+    LaunchedEffect(focused) { if (focused) suggesting = true }
+    val listing = suggesting && (query.isNotBlank() || recent.isNotEmpty())
     BackHandler(enabled = listing) { putAway() }
-    // Back first puts the keyboard away, before the app hears it. The list
-    // goes with the keyboard, as the box lets go of the cursor.
-    @OptIn(ExperimentalLayoutApi::class)
-    val keyboardUp = WindowInsets.isImeVisible
-    var keyboardWasUp by remember { mutableStateOf(false) }
-    LaunchedEffect(keyboardUp) {
-        if (keyboardWasUp && !keyboardUp) focus.clearFocus()
-        keyboardWasUp = keyboardUp
-    }
     Column(Modifier.fillMaxSize()) {
-        SearchBox(query, { query = it }, { focused = it }) { search(query) }
+        SearchBox(query, { query = it; suggesting = true }, { focused = it }) { search(query) }
         val words = searched
         if (listing) {
             SuggestList(
@@ -535,7 +533,7 @@ fun SearchScreen(core: Core, actions: Actions) {
                 found = found,
                 loading = finding,
                 onSearch = ::search,
-                onItem = { tapped.tap(it) },
+                onItem = { putAway(); tapped.tap(it) },
                 onItemMenu = { tapped.menu(it) },
             )
         } else if (words == null) {
