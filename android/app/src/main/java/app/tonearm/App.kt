@@ -229,7 +229,7 @@ fun App(core: Core, controller: MediaController?) {
                             HomeScreen(
                                 core, actions,
                                 onSettings = { stack.add(Route(SettingsPages.root, null, "Settings")) },
-                                onAccount = { stack.add(Route(SettingsPages.account, null, "YouTube Music account")) },
+                                onAccount = { stack.add(Route(SettingsPages.account, null, "Account")) },
                             )
                             StatusFade()
                         }

@@ -99,7 +99,8 @@ fun SettingsScreen(
         SettingsPages.spotifySignIn -> SpotifySignIn(core, onBack, onToast)
         else -> SettingsPage(
             title = when (page) {
-                SettingsPages.account -> "YouTube Music account"
+                // Short: the card under it says YouTube Music with the logo.
+                SettingsPages.account -> "Account"
                 SettingsPages.connections -> "Connections"
                 SettingsPages.playback -> "Playback"
                 SettingsPages.customization -> "Customization"
@@ -137,7 +138,20 @@ private fun SettingsPage(title: String, onBack: () -> Unit, content: @Composable
                 ) {
                     Icon(Icons.back, size = 20.sp)
                 }
-                Title(title, size = 28.sp, weight = FontWeight.ExtraBold, lines = 2, modifier = Modifier.padding(start = 4.dp))
+                // One line always: a title too long for it shrinks (to 20sp at
+                // most) rather than wrapping, then ends in an ellipsis.
+                androidx.compose.foundation.text.BasicText(
+                    title,
+                    modifier = Modifier.padding(start = 4.dp).weight(1f),
+                    style = androidx.compose.ui.text.TextStyle(
+                        color = Tonearm.text, fontFamily = Tonearm.font, fontWeight = FontWeight.ExtraBold,
+                    ),
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    autoSize = androidx.compose.foundation.text.TextAutoSize.StepBased(
+                        minFontSize = 20.sp, maxFontSize = 28.sp, stepSize = 1.sp,
+                    ),
+                )
             }
             content()
         }
