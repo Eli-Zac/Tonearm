@@ -130,7 +130,7 @@
     .phone img, .phone video { width: 100%; display: block; aspect-ratio: 9 / 20; object-fit: cover; border-radius: 26px; border: 1px solid var(--line); background: var(--island); box-shadow: 0 30px 70px -35px #000; }
     .phone.big video { box-shadow: 0 30px 90px -30px #ff4f6d55; }
     .phone figcaption { text-align: center; }
-    ul.ticks { list-style: none; margin: 18px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px 28px; color: var(--dim); font-size: 15px; }
+    ul.ticks { list-style: none; margin: 18px auto 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 10px 28px; color: var(--dim); font-size: 15px; }
     ul.ticks li { padding-left: 20px; position: relative; }
     ul.ticks li::before { content: ""; position: absolute; left: 2px; top: .6em; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 
@@ -160,6 +160,25 @@
     footer.foot a.l { display: inline-flex; align-items: center; gap: 8px; color: var(--dim); font-size: 14px; font-weight: 500; text-decoration: none; }
     footer.foot a.l:hover { color: var(--text); }
     footer.foot a.l .i { font-size: 18px; }
+
+    /* Centre the section headings, and any grid that ends on a short row. */
+    .page .inner > h2, .page .inner > .sub, h3.more { text-align: center; margin-left: auto; margin-right: auto; }
+    .page .inner > .sub { max-width: 40em; }
+    .features { display: flex; flex-wrap: wrap; justify-content: center; }
+    .features .card { flex: 1 1 230px; max-width: 258px; }
+    .three .card, .downloads .card { text-align: center; }
+    .three .card .ic, .downloads .card .ic { margin-left: auto; margin-right: auto; }
+    .downloads .btn { align-self: center; }
+    .downloads { max-width: 860px; margin: 0 auto; }
+    .potato { text-align: center; }
+    .chips { justify-content: center; }
+    .phones { justify-content: safe center; }
+    ul.ticks { max-width: 760px; margin-left: auto; margin-right: auto; }
+    .note { text-align: center; }
+    .notice { text-align: center; max-width: 860px; margin-left: auto; margin-right: auto; }
+    footer.foot .inner { justify-content: center; }
+    footer.foot .brand { margin-right: 0; flex-basis: 100%; justify-content: center; }
+    .hero .small { text-align: center; }
 
     @media (max-width: 860px) {
       .top nav a:not(.on):not(:last-child) { display: none; }
