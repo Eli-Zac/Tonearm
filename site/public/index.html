@@ -139,6 +139,17 @@
     .js .rv.in { opacity: 1; transform: none; }
     .hero-shot img { animation: float 7s ease-in-out infinite; }
     @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-8px); } }
+
+    .vs { max-width: 900px; margin: 0 auto; background: var(--island); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+    .vs-head, .vs-row { display: grid; grid-template-columns: 150px 1.3fr 1fr; gap: 20px; padding: 16px 22px; align-items: center; }
+    .vs-head { background: var(--raised); font-size: 14px; color: var(--dim); }
+    .vs-head b { font-weight: 600; }
+    .vs-head b.us { color: var(--accent); }
+    .vs-row { border-top: 1px solid var(--line); font-size: 15px; color: var(--dim); }
+    .vs-row .what { color: var(--text); font-weight: 600; }
+    .vs-row .us { color: var(--text); }
+    .why-note { text-align: center; color: var(--faint); font-size: 14px; max-width: 36em; margin: 22px auto 22px; }
+    #why .buttons { justify-content: center; }
     .shots { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px var(--gap); }
     figure { margin: 0; }
     figure img { width: 100%; height: auto; display: block; border-radius: var(--radius); background: var(--bg); }
@@ -187,6 +198,10 @@
       .hero .inner { padding-top: 44px; }
       .shots { grid-template-columns: 1fr; }
       .row, .row.flip { grid-template-columns: 1fr; gap: 18px; }
+      .vs-head { display: none; }
+      .vs-row { grid-template-columns: 1fr; gap: 6px; padding: 16px 18px; }
+      .vs-row .us::before { content: "Tonearm: "; color: var(--accent); font-weight: 600; }
+      .vs-row span:last-child::before { content: "YouTube Music on the web: "; color: var(--faint); }
       .row.flip figure { order: 0; }
     }
     @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .btn, .chip { transition: none; } .hero-shot img, .verdict.swap { animation: none; } .js .rv { opacity: 1; transform: none; transition: none; } }
@@ -199,6 +214,7 @@
       <a class="brand" href="#top"><img src="logo.svg" alt="">Tonearm</a>
       <nav id="nav">
         <a href="#fast">Fast</a>
+        <a href="#why">Why</a>
         <a href="#features">Features</a>
         <a href="#android">Android</a>
         <a href="#download">Download</a>
@@ -244,6 +260,25 @@
             <p class="verdict" id="verdict" aria-live="polite"></p>
             <p class="fine">Tonearm needs Windows or Android 8 or later. The rest of this panel is a joke, and we take no responsibility for anything you plug a vegetable into.</p>
           </div>
+        </div>
+      </section>
+
+      <section class="page" id="why">
+        <div class="inner">
+          <h2>Same songs. Fewer things in the way.</h2>
+          <p class="sub">Tonearm plays YouTube Music: the same catalogue, the same library, the same recommendations. It just drops the browser tab and adds the things people keep asking a music app for.</p>
+
+          <div class="vs rv">
+            <div class="vs-head"><span></span><b class="us">Tonearm</b><b>YouTube Music on the web</b></div>
+            <div class="vs-row"><span class="what">Where it lives</span><span class="us">Its own native window, with no browser underneath</span><span>A browser tab, or a wrapper around one</span></div>
+            <div class="vs-row"><span class="what">Offline</span><span class="us">Keep songs on your computer and play them with no connection</span><span>Not on the web player</span></div>
+            <div class="vs-row"><span class="what">Lyrics</span><span class="us">Timed by the syllable, with duet sides and blurred-out lines</span><span>Line by line</span></div>
+            <div class="vs-row"><span class="what">Your other accounts</span><span class="us">Last.fm scrobbling and a Discord status, built in</span><span>Not built in</span></div>
+            <div class="vs-row"><span class="what">On the desktop</span><span class="us">Closes to the tray and keeps playing, plus Windows media keys and taskbar controls</span><span>Closing the tab ends the music</span></div>
+          </div>
+
+          <p class="why-note">Fair warning: Tonearm is young, unofficial and needs your YouTube Music sign-in to see your library. We would rather you know that now than find out later.</p>
+          <div class="buttons"><a class="btn primary" href="#download"><i class="i">&#xe028;</i>Try it, it is free</a></div>
         </div>
       </section>
 
