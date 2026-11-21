@@ -78,6 +78,9 @@ object Icons {
     const val speakerHigh = "\ue44a"
     const val connections = "\ueb5a"
     const val sparkle = "\ue6a2"
+    /** Fill only: a phone and a computer, for the Tonearm account's devices. */
+    const val mobile = "\ue1e0"
+    const val desktop = "\ue560"
 }
 
 @Composable

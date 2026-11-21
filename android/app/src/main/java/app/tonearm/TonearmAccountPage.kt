@@ -1,6 +1,10 @@
 package app.tonearm
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -181,9 +185,15 @@ private fun SignedIn(core: Core, account: TonearmAccount, onToast: (String) -> U
             } else {
                 list.forEach { d ->
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f).padding(end = 12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Box(
+                            Modifier.size(40.dp).clip(RoundedCornerShape(10.dp)).background(Color(0x14FFFFFF)),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(if (d.kind == "computer") Icons.desktop else Icons.mobile, size = 22.sp, filled = true)
+                        }
+                        Column(Modifier.weight(1f).padding(horizontal = 14.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             Title(if (d.current) "${d.name} (this phone)" else d.name, size = 16.sp, lines = 2)
-                            Dim("Last used ${ago(d.lastSeen)}", 14.sp)
+                            Dim(listOf(d.model, "Last used ${ago(d.lastSeen)}").filter { it.isNotEmpty() }.joinToString(" · "), 14.sp, lines = 2)
                         }
                         if (!d.current) {
                             PillButton("Remove", danger = true) {

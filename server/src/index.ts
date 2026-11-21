@@ -78,6 +78,12 @@ function cleanEmail(value: unknown): string {
   return email;
 }
 
+/** What a device says it is, for the list's icon: phone, tablet or computer. */
+function deviceKind(value: unknown): string {
+  const kind = String(value ?? "").toLowerCase();
+  return kind === "phone" || kind === "tablet" ? kind : "computer";
+}
+
 interface Session {
   account_id: string;
   device_id: string;
@@ -151,6 +157,8 @@ async function verifyCode(req: Request, env: Env): Promise<Response> {
   const email = cleanEmail(input.email);
   const code = String(input.code ?? "").replace(/\s/g, "");
   const name = String(input.device ?? "").trim().slice(0, 60) || "Device";
+  const kind = deviceKind(input.kind);
+  const model = String(input.model ?? "").trim().slice(0, 60);
   const now = Date.now();
   const wrong = new Fail(400, "that code isn't right or has expired");
 
@@ -171,9 +179,9 @@ async function verifyCode(req: Request, env: Env): Promise<Response> {
   const deviceId = crypto.randomUUID();
   const secret = token();
   await env.DB.prepare(
-    "INSERT INTO devices (id, account_id, name, token_hash, created, last_seen) VALUES (?, ?, ?, ?, ?, ?)",
+    "INSERT INTO devices (id, account_id, name, kind, model, token_hash, created, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
   )
-    .bind(deviceId, account.id, name, await sha256(secret), now, now)
+    .bind(deviceId, account.id, name, kind, model, await sha256(secret), now, now)
     .run();
   return json({ token: secret, account_id: account.id, device_id: deviceId, email });
 }
@@ -216,6 +224,8 @@ async function startPairing(s: Session, env: Env): Promise<Response> {
 async function claimPairing(req: Request, env: Env): Promise<Response> {
   const input = await body(req);
   const name = String(input.device ?? "").trim().slice(0, 60) || "Device";
+  const kind = deviceKind(input.kind);
+  const model = String(input.model ?? "").trim().slice(0, 60);
   const now = Date.now();
   const wrong = new Fail(400, "that pairing code isn't right or has expired");
 
@@ -242,16 +252,16 @@ async function claimPairing(req: Request, env: Env): Promise<Response> {
   const deviceId = crypto.randomUUID();
   const secret = token();
   await env.DB.prepare(
-    "INSERT INTO devices (id, account_id, name, token_hash, created, last_seen) VALUES (?, ?, ?, ?, ?, ?)",
+    "INSERT INTO devices (id, account_id, name, kind, model, token_hash, created, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
   )
-    .bind(deviceId, account.id, name, await sha256(secret), now, now)
+    .bind(deviceId, account.id, name, kind, model, await sha256(secret), now, now)
     .run();
   return json({ token: secret, account_id: account.id, device_id: deviceId, email: account.email });
 }
 
 async function listDevices(s: Session, env: Env): Promise<Response> {
   const { results } = await env.DB.prepare(
-    "SELECT id, name, created, last_seen FROM devices WHERE account_id = ? ORDER BY created",
+    "SELECT id, name, kind, model, created, last_seen FROM devices WHERE account_id = ? ORDER BY created",
   )
     .bind(s.account_id)
     .all();
@@ -260,6 +270,8 @@ async function listDevices(s: Session, env: Env): Promise<Response> {
     devices: results.map((d: any) => ({
       id: d.id,
       name: d.name,
+      kind: d.kind,
+      model: d.model,
       created: d.created,
       last_seen: d.last_seen,
     })),

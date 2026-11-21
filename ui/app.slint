@@ -176,6 +176,18 @@ export struct CastDevice {
     kind: int,
 }
 
+// One of the Tonearm account's devices, for its list in Settings.
+export struct AccountDevice {
+    name: string,
+    // "phone", "tablet" or "computer", for its icon.
+    kind: string,
+    // Make and model; empty when unknown.
+    model: string,
+    // "just now", "5 minutes ago"
+    seen: string,
+    current: bool,
+}
+
 // The cast button's icon: a screen with the corner waves, as a filled
 // path in a 24 unit box. The icon font has no cast glyph.
 global CastIcon {
@@ -322,6 +334,9 @@ export global Icons {
     out property <string> recent: "\u{e1a0}";
     // Fill only: three solid dots for the "more" button.
     out property <string> dots: "\u{e204}";
+    // Fill only: a phone and a computer, for the Tonearm account's devices.
+    out property <string> mobile: "\u{e1e0}";
+    out property <string> desktop: "\u{e560}";
 }
 
 // One of the Icons glyphs. fill draws it from the fill weight.
@@ -5276,6 +5291,24 @@ export component AppWindow inherits Window {
     callback close-choice-changed(int);
     callback lastfm-connect();
 
+    // The Tonearm account (settings page 6). The email is empty while signed out.
+    in property <string> tonearm-email;
+    in property <string> tonearm-note;
+    in property <bool> tonearm-busy;
+    // A sign in code was emailed, so the code box shows.
+    in property <bool> tonearm-code-sent;
+    // A pairing code for another device, with how long it has left.
+    in property <string> tonearm-pair-code;
+    in property <string> tonearm-pair-note;
+    in property <[AccountDevice]> tonearm-devices;
+    callback tonearm-open();
+    callback tonearm-request-code(string);
+    callback tonearm-sign-in(string, string);
+    callback tonearm-pair-claim(string);
+    callback tonearm-pair-start();
+    callback tonearm-sign-out();
+    callback tonearm-remove-device(int);
+
     // The side menu shows only its icons, its labels as tooltips. Saved.
     in-out property <bool> menu-collapsed;
     callback menu-collapsed-changed(bool);
@@ -6093,6 +6126,15 @@ export component AppWindow inherits Window {
                         font-weight: 800;
                     }
                     SubpageRow {
+                        icon: Icons.artist;
+                        title: "Tonearm account";
+                        subtitle: root.tonearm-email != "" ? "Signed in as " + root.tonearm-email : "Not signed in";
+                        clicked => {
+                            root.settings-page = 6;
+                            root.tonearm-open();
+                        }
+                    }
+                    SubpageRow {
                         logo: @image-url("youtubemusic.svg");
                         brand: #ff0000;
                         title: "YouTube Music account";
@@ -6644,6 +6686,167 @@ export component AppWindow inherits Window {
                     content-y <=> account-flick.content-y;
                     content-height: account-flick.content-height;
                     view-height: account-flick.height;
+                }
+            }
+
+            // Settings sub page: the Tonearm account, signed in with an
+            // emailed code or a code another device shows.
+            if root.nav == 3 && root.settings-page == 6: tonearm-flick := Flickable {
+                max-width: 100000px;
+                horizontal-stretch: 1;
+                content-height: tonearm-account.preferred-height;
+                tonearm-account := VerticalLayout {
+                    padding: 28px;
+                    padding-top: 26px;
+                    spacing: 14px;
+                    alignment: start;
+                    Text {
+                        text: "Tonearm account";
+                        color: Theme.text;
+                        font-size: 32px;
+                        font-weight: 800;
+                    }
+                    if root.tonearm-note != "": Text {
+                        text: root.tonearm-note;
+                        color: Theme.accent;
+                        font-size: 14px;
+                        wrap: word-wrap;
+                    }
+                    if root.tonearm-email == "": Section {
+                        title: "Sign in with email";
+                        about: "Your settings and pins follow you to every device you sign in on. Tonearm emails you a six digit code; there is no password.";
+                        tonearm-mail := Field {
+                            placeholder: "Email address";
+                            accepted(text) => { root.tonearm-request-code(text); }
+                        }
+                        if !root.tonearm-code-sent: HorizontalLayout {
+                            alignment: start;
+                            PillButton {
+                                text: root.tonearm-busy ? "Sending…" : "Email me a code";
+                                primary: true;
+                                clicked => { root.tonearm-request-code(tonearm-mail.text); }
+                            }
+                        }
+                        if root.tonearm-code-sent: VerticalLayout {
+                            spacing: 10px;
+                            tonearm-code := Field {
+                                placeholder: "6 digit code";
+                                accepted(text) => { root.tonearm-sign-in(tonearm-mail.text, text); }
+                            }
+                            HorizontalLayout {
+                                spacing: 10px;
+                                alignment: start;
+                                PillButton {
+                                    text: root.tonearm-busy ? "Signing in…" : "Sign in";
+                                    primary: true;
+                                    clicked => { root.tonearm-sign-in(tonearm-mail.text, tonearm-code.text); }
+                                }
+                                PillButton {
+                                    text: "Send again";
+                                    clicked => { root.tonearm-request-code(tonearm-mail.text); }
+                                }
+                            }
+                        }
+                    }
+                    if root.tonearm-email == "": Section {
+                        title: "Use a pairing code";
+                        about: "Already signed in on another device? Open Pair a device there, and enter the code it shows.";
+                        tonearm-pair := Field {
+                            placeholder: "XXXX-XXXX";
+                            accepted(text) => { root.tonearm-pair-claim(text); }
+                        }
+                        HorizontalLayout {
+                            alignment: start;
+                            PillButton {
+                                text: root.tonearm-busy ? "Joining…" : "Join";
+                                clicked => { root.tonearm-pair-claim(tonearm-pair.text); }
+                            }
+                        }
+                    }
+                    if root.tonearm-email != "": Section {
+                        title: "Signed in";
+                        about: "This account's settings follow you to every device signed in to it.";
+                        AccountRow {
+                            linked: true;
+                            title: root.tonearm-email;
+                            unlink-text: "Sign out";
+                            unlink => { root.tonearm-sign-out(); }
+                        }
+                    }
+                    if root.tonearm-email != "": Section {
+                        title: "Pair a device";
+                        about: root.tonearm-pair-code == ""
+                            ? "Shows a code to enter on another device, so it joins this account without email."
+                            : root.tonearm-pair-note;
+                        if root.tonearm-pair-code != "": Text {
+                            text: root.tonearm-pair-code;
+                            color: Theme.text;
+                            font-size: 36px;
+                            font-weight: 800;
+                        }
+                        HorizontalLayout {
+                            alignment: start;
+                            PillButton {
+                                text: root.tonearm-pair-code == "" ? "Show a code" : "New code";
+                                primary: root.tonearm-pair-code == "";
+                                clicked => { root.tonearm-pair-start(); }
+                            }
+                        }
+                    }
+                    if root.tonearm-email != "": Section {
+                        title: "Devices";
+                        for device[i] in root.tonearm-devices: HorizontalLayout {
+                            spacing: 14px;
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 40px;
+                                    height: 40px;
+                                    border-radius: 10px;
+                                    background: #ffffff14;
+                                    Icon {
+                                        fill: true;
+                                        text: device.kind == "computer" ? Icons.desktop : Icons.mobile;
+                                        font-size: 22px;
+                                    }
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                horizontal-stretch: 1;
+                                spacing: 2px;
+                                Text {
+                                    text: device.current ? device.name + " (this computer)" : device.name;
+                                    color: Theme.text;
+                                    font-size: 16px;
+                                    font-weight: 600;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: (device.model != "" ? device.model + " · " : "") + "Last used " + device.seen;
+                                    color: Theme.dim;
+                                    font-size: 14px;
+                                    overflow: elide;
+                                }
+                            }
+                            if !device.current: VerticalLayout {
+                                alignment: center;
+                                PillButton {
+                                    text: "Remove";
+                                    danger: true;
+                                    clicked => { root.tonearm-remove-device(i); }
+                                }
+                            }
+                        }
+                    }
+                }
+                ScrollThumb {
+                    x: tonearm-flick.width - self.width;
+                    y: -tonearm-flick.content-y;
+                    height: tonearm-flick.height;
+                    content-y <=> tonearm-flick.content-y;
+                    content-height: tonearm-flick.content-height;
+                    view-height: tonearm-flick.height;
                 }
             }
 

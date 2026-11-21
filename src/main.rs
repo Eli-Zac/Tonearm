@@ -17,6 +17,7 @@ mod shell;
 mod single;
 #[cfg(windows)]
 mod taskbar;
+mod tonearm_account;
 mod motion;
 mod update;
 mod wheel;
@@ -509,6 +510,10 @@ struct App {
     services: services::Services,
     settings: RefCell<services::Settings>,
     lastfm_token: RefCell<String>,
+    /// The Tonearm account's devices, by id, as listed in Settings.
+    tonearm_devices: RefCell<Vec<String>>,
+    /// Counts pairing codes made, so an old code's timer leaves a newer one.
+    tonearm_pair: Cell<u32>,
     listen: RefCell<tonearm_core::listen::Listen>,
     toast_timer: Timer,
     /// What the toast's button does, while it shows one.
@@ -5980,6 +5985,8 @@ fn main() -> Result<(), slint::PlatformError> {
         services: services::Services::start(settings.clone()),
         settings: RefCell::new(settings),
         lastfm_token: RefCell::default(),
+        tonearm_devices: RefCell::default(),
+        tonearm_pair: Cell::new(0),
         listen: RefCell::default(),
         ui,
         client,
@@ -6176,6 +6183,14 @@ translate: Cell::new(load_translate()),
     on!(on_save_services, |app| app.save_services());
     on!(on_spotify_unlink, |app| app.spotify_unlink());
     on!(on_lastfm_connect, |app| app.lastfm_connect());
+    on!(on_tonearm_open, |app| app.tonearm_open());
+    on!(on_tonearm_request_code, |app, email| app.tonearm_request_code(email.to_string()));
+    on!(on_tonearm_sign_in, |app, email, code| app.tonearm_sign_in(email.to_string(), code.to_string()));
+    on!(on_tonearm_pair_claim, |app, code| app.tonearm_pair_claim(code.to_string()));
+    on!(on_tonearm_pair_start, |app| app.tonearm_pair_start());
+    on!(on_tonearm_sign_out, |app| app.tonearm_sign_out());
+    on!(on_tonearm_remove_device, |app, index| app.tonearm_remove_device(index.max(0) as usize));
+    app.show_tonearm_account();
     on!(on_open_spotify_web, |_app| services::open_browser("https://open.spotify.com/"));
     on!(on_sync_open, |app, key, side| app.sync_open(&key, side));
     on!(on_sync_act, |app, key, action| app.sync_act(key.to_string(), action));

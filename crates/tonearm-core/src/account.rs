@@ -37,6 +37,10 @@ pub struct Account {
 pub struct Device {
     pub id: String,
     pub name: String,
+    /// "phone", "tablet" or "computer".
+    pub kind: String,
+    /// Make and model, as the device gave it. Empty when unknown.
+    pub model: String,
     /// Milliseconds since 1970.
     pub created: i64,
     pub last_seen: i64,
@@ -55,17 +59,87 @@ pub fn current() -> Option<Account> {
     })
 }
 
+/// What an app knows about the device it runs on and the core can't: its name
+/// and model. The Android app gives them at start (`Build`); a computer's are
+/// read from Windows.
+static DEVICE: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
+
+/// Tells the core this device's name and model, as the account's list shows
+/// them. Call once, before signing in. Later calls change nothing.
+pub fn set_device(name: &str, model: &str) {
+    let _ = DEVICE.set((name.trim().to_string(), model.trim().to_string()));
+}
+
+/// "phone" or "computer", for the list's icon.
+pub fn device_kind() -> &'static str {
+    if cfg!(target_os = "android") { "phone" } else { "computer" }
+}
+
 /// A short name for this device in the account's list.
 pub fn device_name() -> String {
-    let kind = if cfg!(target_os = "android") { "Phone" } else { "Computer" };
-    let host = std::env::var("COMPUTERNAME")
-        .or_else(|_| std::env::var("HOSTNAME"))
-        .unwrap_or_default();
-    if host.is_empty() || cfg!(target_os = "android") {
-        kind.to_string()
-    } else {
-        format!("{kind} ({host})")
+    if let Some((name, _)) = DEVICE.get().filter(|(name, _)| !name.is_empty()) {
+        return name.clone();
     }
+    if cfg!(target_os = "android") {
+        return "Phone".to_string();
+    }
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .ok()
+        .filter(|host| !host.is_empty())
+        .unwrap_or_else(|| "Computer".to_string())
+}
+
+/// This device's make and model ("Samsung SM-S908E", "LENOVO 82JW"), or empty
+/// when it can't be found.
+pub fn device_model() -> String {
+    if let Some((_, model)) = DEVICE.get().filter(|(_, model)| !model.is_empty()) {
+        return model.clone();
+    }
+    #[cfg(windows)]
+    {
+        static MODEL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        return MODEL.get_or_init(windows_model).clone();
+    }
+    #[cfg(not(windows))]
+    String::new()
+}
+
+/// The computer's maker and model from its BIOS entry in the registry.
+#[cfg(windows)]
+fn windows_model() -> String {
+    use std::os::windows::process::CommandExt;
+    let read = |name: &str| -> String {
+        std::process::Command::new("reg")
+            .args(["query", r"HKLM\HARDWARE\DESCRIPTION\System\BIOS", "/v", name])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .output()
+            .ok()
+            .and_then(|out| String::from_utf8(out.stdout).ok())
+            .and_then(|text| {
+                text.lines()
+                    .find_map(|line| line.split_once("REG_SZ").map(|(_, value)| value.trim().to_string()))
+            })
+            .unwrap_or_default()
+    };
+    let (maker, model) = (read("SystemManufacturer"), read("SystemProductName"));
+    // Boards that never filled these in say so.
+    let junk = |text: &str| {
+        let lower = text.to_lowercase();
+        text.is_empty() || lower.contains("o.e.m") || lower.contains("system product") || lower.contains("system manufacturer")
+    };
+    match (junk(&maker), junk(&model)) {
+        (_, true) => String::new(),
+        (true, false) => model,
+        (false, false) if model.to_lowercase().starts_with(&maker.to_lowercase()) => model,
+        (false, false) => format!("{maker} {model}"),
+    }
+}
+
+/// What the server is told about this device when it signs in.
+fn device_json(device: &str) -> Value {
+    let name = if device.trim().is_empty() { device_name() } else { device.trim().to_string() };
+    json!({ "device": name, "kind": device_kind(), "model": device_model() })
 }
 
 /// Asks for a sign-in code to be emailed.
@@ -76,14 +150,10 @@ pub fn request_code(email: &str) -> Result<(), String> {
 /// Swaps the emailed code for this device's sign-in. `device` names it in the
 /// account's list (`device_name()` if empty).
 pub fn sign_in(email: &str, code: &str, device: &str) -> Result<Account, String> {
-    let device = if device.trim().is_empty() { device_name() } else { device.trim().to_string() };
-    let answer = call(
-        "POST",
-        "/v1/auth/verify",
-        None,
-        Some(json!({ "email": email.trim(), "code": code.trim(), "device": device })),
-    )?;
-    keep(&answer)
+    let mut body = device_json(device);
+    body["email"] = json!(email.trim());
+    body["code"] = json!(code.trim());
+    keep(&call("POST", "/v1/auth/verify", None, Some(body))?)
 }
 
 /// A code for a new device to join this account with, shown as `XXXX-XXXX`
@@ -105,8 +175,9 @@ pub fn pair_start() -> Result<PairCode, String> {
 
 /// Joins an account with a code another device made, typed or scanned.
 pub fn pair_claim(code: &str, device: &str) -> Result<Account, String> {
-    let device = if device.trim().is_empty() { device_name() } else { device.trim().to_string() };
-    keep(&call("POST", "/v1/pair/claim", None, Some(json!({ "code": code.trim(), "device": device })))?)
+    let mut body = device_json(device);
+    body["code"] = json!(code.trim());
+    keep(&call("POST", "/v1/pair/claim", None, Some(body))?)
 }
 
 /// Saves a sign-in the server gave.
@@ -150,6 +221,8 @@ pub fn devices() -> Result<Vec<Device>, String> {
                         current: id == current,
                         id,
                         name: d["name"].as_str().unwrap_or("Device").to_string(),
+                        kind: d["kind"].as_str().unwrap_or("computer").to_string(),
+                        model: d["model"].as_str().unwrap_or_default().to_string(),
                         created: d["created"].as_i64().unwrap_or(0),
                         last_seen: d["last_seen"].as_i64().unwrap_or(0),
                     })
@@ -232,6 +305,7 @@ mod tests {
 
     #[test]
     fn a_device_name_says_what_it_is() {
-        assert!(device_name().starts_with("Computer") || device_name() == "Phone");
+        assert!(!device_name().is_empty());
+        assert!(["phone", "computer"].contains(&device_kind()));
     }
 }

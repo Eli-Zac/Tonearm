@@ -18,6 +18,10 @@ pub struct TonearmAccount {
 pub struct AccountDevice {
     pub id: String,
     pub name: String,
+    /// "phone", "tablet" or "computer".
+    pub kind: String,
+    /// Make and model. Empty when unknown.
+    pub model: String,
     /// Milliseconds since 1970.
     pub last_seen: i64,
     /// This phone.
@@ -37,6 +41,12 @@ fn of(account: account::Account) -> TonearmAccount {
 
 #[uniffi::export]
 impl Tonearm {
+    /// Gives the core this phone's name and model ("Galaxy S22 Ultra",
+    /// "Samsung SM-S908E") for the account's device list. Call at start.
+    pub fn account_set_device(&self, name: String, model: String) {
+        account::set_device(&name, &model);
+    }
+
     /// The Tonearm account signed in on this phone, if any. Reads the store only.
     pub fn tonearm_account(&self) -> Option<TonearmAccount> {
         account::current().map(of)
@@ -67,7 +77,14 @@ impl Tonearm {
     pub fn account_devices(&self) -> Result<Vec<AccountDevice>, TonearmError> {
         Ok(account::devices()?
             .into_iter()
-            .map(|d| AccountDevice { id: d.id, name: d.name, last_seen: d.last_seen, current: d.current })
+            .map(|d| AccountDevice {
+                id: d.id,
+                name: d.name,
+                kind: d.kind,
+                model: d.model,
+                last_seen: d.last_seen,
+                current: d.current,
+            })
             .collect())
     }
 

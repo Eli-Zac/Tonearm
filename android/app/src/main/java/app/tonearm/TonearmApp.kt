@@ -1,6 +1,8 @@
 package app.tonearm
 
 import android.app.Application
+import android.os.Build
+import android.provider.Settings
 import uniffi.tonearm_android.Tonearm
 
 /** Starts the Rust core once for the whole app. The playback service and
@@ -9,6 +11,12 @@ import uniffi.tonearm_android.Tonearm
 class TonearmApp : Application() {
     val core: Tonearm by lazy {
         TonearmNative.init(this)
-        Tonearm(filesDir.absolutePath)
+        Tonearm(filesDir.absolutePath).also {
+            // How the account's device list names this phone: the name the
+            // user gave it in Settings, and its make and model.
+            val name = runCatching { Settings.Global.getString(contentResolver, "device_name") }.getOrNull().orEmpty()
+            val maker = Build.MANUFACTURER.replaceFirstChar { c -> c.uppercase() }
+            it.accountSetDevice(name, if (Build.MODEL.startsWith(maker, ignoreCase = true)) Build.MODEL else "$maker ${Build.MODEL}")
+        }
     }
 }
