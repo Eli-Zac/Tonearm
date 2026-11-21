@@ -70,12 +70,15 @@ object Prefs {
 /** A page of Settings, as a route's id. */
 object SettingsPages {
     const val root = "tonearm:settings"
-    const val account = "tonearm:settings/account"
-    const val connections = "tonearm:settings/connections"
+    /** The list of accounts, each opening a page of its own. */
+    const val accounts = "tonearm:settings/accounts"
+    const val tonearm = "tonearm:settings/tonearm"
+    const val youtube = "tonearm:settings/youtube"
+    const val spotify = "tonearm:settings/spotify"
+    const val lastfm = "tonearm:settings/lastfm"
     const val playback = "tonearm:settings/playback"
     const val customization = "tonearm:settings/customization"
     const val storage = "tonearm:settings/storage"
-    const val tonearm = "tonearm:settings/tonearm"
     const val signIn = "tonearm:settings/sign-in"
     const val spotifySignIn = "tonearm:settings/spotify-sign-in"
 
@@ -108,10 +111,11 @@ fun SettingsScreen(
         SettingsPages.spotifySignIn -> SpotifySignIn(core, onBack, onToast)
         else -> SettingsPage(
             title = when (page) {
-                // Short: the card under it says YouTube Music with the logo.
-                SettingsPages.account -> "Account"
-                SettingsPages.tonearm -> "Tonearm account"
-                SettingsPages.connections -> "Connections"
+                SettingsPages.accounts -> "Accounts"
+                SettingsPages.tonearm -> "Tonearm"
+                SettingsPages.youtube -> "YouTube Music"
+                SettingsPages.spotify -> "Spotify"
+                SettingsPages.lastfm -> "Last.fm"
                 SettingsPages.playback -> "Playback"
                 SettingsPages.customization -> "Customization"
                 SettingsPages.storage -> "Storage and history"
@@ -120,9 +124,11 @@ fun SettingsScreen(
             onBack = onBack,
         ) {
             when (page) {
-                SettingsPages.account -> AccountPage(core, onOpen)
+                SettingsPages.accounts -> AccountsPage(core, onOpen)
                 SettingsPages.tonearm -> TonearmAccountPage(core, onToast)
-                SettingsPages.connections -> ConnectionsPage(core, onOpen)
+                SettingsPages.youtube -> AccountPage(core, onOpen)
+                SettingsPages.spotify -> ConnectionsPage(core, onOpen, spotify = true)
+                SettingsPages.lastfm -> ConnectionsPage(core, onOpen, spotify = false)
                 SettingsPages.playback -> PlaybackPage(core)
                 SettingsPages.customization -> CustomizationPage(core)
                 SettingsPages.storage -> StoragePage(core, onToast)
@@ -183,30 +189,48 @@ fun BackButton(onBack: () -> Unit) {
 
 // ------------------------------------------------------------------- pages
 
+/** The accounts, a row for each that opens its own page. */
 @Composable
-private fun RootPage(core: Core, onOpen: (String) -> Unit) {
-    val account = rememberAccount(core)
-    // Read from the store each time Settings opens, so a sign in or out on
-    // its page shows when coming back.
-    val tonearmAccount = core.tonearmAccount()
+private fun AccountsPage(core: Core, onOpen: (String) -> Unit) {
+    val youtube = rememberAccount(core)
+    // Read again each time the page shows, so a sign in or out on an
+    // account's page shows when coming back.
+    val tonearm = core.tonearmAccount()
+    val connections = remember { core.connections() }
     SubpageRow(
-        title = "Tonearm account",
-        subtitle = tonearmAccount?.let { "Signed in as ${it.email}" } ?: "Not signed in",
+        title = "Tonearm",
+        subtitle = tonearm?.let { "Signed in as ${it.email}" } ?: "Not signed in",
         icon = Icons.artist,
     ) { onOpen(SettingsPages.tonearm) }
     SubpageRow(
-        title = "YouTube Music account",
-        subtitle = when (val a = account) {
+        title = "YouTube Music",
+        subtitle = when (val a = youtube) {
             AccountState.Loading -> null
             is AccountState.SignedIn -> "Signed in as ${a.account.name}"
             AccountState.SignedOut -> "Not signed in"
         },
         logo = R.drawable.logo_youtubemusic,
         brand = brandYouTube,
-    ) { onOpen(SettingsPages.account) }
+    ) { onOpen(SettingsPages.youtube) }
+    SubpageRow(
+        title = "Spotify",
+        subtitle = if (connections.spotifyLinked) "Linked" else "Not linked",
+        logo = R.drawable.logo_spotify,
+        brand = brandSpotify,
+    ) { onOpen(SettingsPages.spotify) }
+    SubpageRow(
+        title = "Last.fm",
+        subtitle = connections.lastfmUser.let { if (it.isNotEmpty()) "Linked as $it" else "Not linked" },
+        logo = R.drawable.logo_lastfm,
+        brand = brandLastfm,
+    ) { onOpen(SettingsPages.lastfm) }
+}
+
+@Composable
+private fun RootPage(core: Core, onOpen: (String) -> Unit) {
     // Discord stays on the desktop, which it has to be running beside.
-    SubpageRow(title = "Connections", subtitle = "Last.fm and Spotify", icon = Icons.connections) {
-        onOpen(SettingsPages.connections)
+    SubpageRow(title = "Accounts", subtitle = "Tonearm, YouTube Music, Spotify and Last.fm", icon = Icons.artist) {
+        onOpen(SettingsPages.accounts)
     }
     SubpageRow(title = "Playback", subtitle = "Crossfade and volume levelling", icon = Icons.speakerHigh) {
         onOpen(SettingsPages.playback)
@@ -417,7 +441,7 @@ private fun StoragePage(core: Core, onToast: (String) -> Unit) {
 }
 
 @Composable
-private fun ConnectionsPage(core: Core, onOpen: (String) -> Unit) {
+private fun ConnectionsPage(core: Core, onOpen: (String) -> Unit, spotify: Boolean) {
     val context = LocalContext.current
     var shown by remember { mutableStateOf(core.connections()) }
     // Read again as Last.fm links in the background.
@@ -432,31 +456,7 @@ private fun ConnectionsPage(core: Core, onOpen: (String) -> Unit) {
     var lastfmSecret by remember { mutableStateOf(c.lastfmSecret) }
     var spotifyId by remember { mutableStateOf(c.spotifyId) }
     var spotifySecret by remember { mutableStateOf(c.spotifySecret) }
-    Section(
-        title = "Last.fm",
-        logo = R.drawable.logo_lastfm,
-        brand = brandLastfm,
-        about = "Keeps a record of what you listen to. A track scrobbles after it has played for half its length or four minutes." +
-            if (c.lastfmBuiltin) "" else " This build has no Last.fm keys of its own. Enter an API key and shared secret from last.fm/api/account/create.",
-    ) {
-        if (!c.lastfmBuiltin && c.lastfmUser.isEmpty()) {
-            Field(lastfmKey, { lastfmKey = it }, "Last.fm API key")
-            Field(lastfmSecret, { lastfmSecret = it }, "Last.fm shared secret", secret = true)
-        }
-        val linked = c.lastfmUser.isNotEmpty()
-        AccountRow(
-            linked = linked,
-            title = if (linked) "Linked as ${c.lastfmUser}" else "Not linked",
-            subtitle = if (linked) "" else "Connect opens Last.fm in your browser. Approve Tonearm there and it links by itself.",
-            onLink = { linkLastfm(core, context, lastfmKey, lastfmSecret) { shown = core.connections() } },
-            onUnlink = {
-                core.lastfmUnlink()
-                Prefs.servicesNote = "Last.fm is unlinked"
-                shown = core.connections()
-            },
-        )
-    }
-    Section(
+    if (spotify) Section(
         title = "Spotify",
         logo = R.drawable.logo_spotify,
         brand = brandSpotify,
@@ -499,6 +499,30 @@ private fun ConnectionsPage(core: Core, onOpen: (String) -> Unit) {
             onUnlink = {
                 core.canvasUnlink()
                 Prefs.servicesNote = "Spotify sign in removed"
+                shown = core.connections()
+            },
+        )
+    }
+    if (!spotify) Section(
+        title = "Last.fm",
+        logo = R.drawable.logo_lastfm,
+        brand = brandLastfm,
+        about = "Keeps a record of what you listen to. A track scrobbles after it has played for half its length or four minutes." +
+            if (c.lastfmBuiltin) "" else " This build has no Last.fm keys of its own. Enter an API key and shared secret from last.fm/api/account/create.",
+    ) {
+        if (!c.lastfmBuiltin && c.lastfmUser.isEmpty()) {
+            Field(lastfmKey, { lastfmKey = it }, "Last.fm API key")
+            Field(lastfmSecret, { lastfmSecret = it }, "Last.fm shared secret", secret = true)
+        }
+        val linked = c.lastfmUser.isNotEmpty()
+        AccountRow(
+            linked = linked,
+            title = if (linked) "Linked as ${c.lastfmUser}" else "Not linked",
+            subtitle = if (linked) "" else "Connect opens Last.fm in your browser. Approve Tonearm there and it links by itself.",
+            onLink = { linkLastfm(core, context, lastfmKey, lastfmSecret) { shown = core.connections() } },
+            onUnlink = {
+                core.lastfmUnlink()
+                Prefs.servicesNote = "Last.fm is unlinked"
                 shown = core.connections()
             },
         )
@@ -578,7 +602,12 @@ internal fun SubpageRow(
         Column(Modifier.weight(1f).padding(horizontal = 14.dp)) {
             Title(title, size = 16.sp)
             Spacer(Modifier.height(3.dp))
-            if (subtitle == null) TextSkeleton(0.55f, 14.dp) else Dim(subtitle, 14.sp)
+            // One height whether it is loading or loaded (a Dim line is
+            // 1.3 times its size), so the title above never moves.
+            val line = with(LocalDensity.current) { (14.sp * 1.3f).toDp() }
+            Box(Modifier.height(line), contentAlignment = Alignment.CenterStart) {
+                if (subtitle == null) TextSkeleton(0.55f, 14.dp) else Dim(subtitle, 14.sp)
+            }
         }
         Icon(Icons.right, size = 16.sp, color = Tonearm.dim)
     }

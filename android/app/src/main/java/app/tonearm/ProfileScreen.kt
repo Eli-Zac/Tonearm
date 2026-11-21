@@ -152,7 +152,7 @@ fun ProfileScreen(
                     subtitle = connections?.let { if (it.lastfmUser.isNotEmpty()) "Scrobbling as ${it.lastfmUser}" else "Not linked" },
                     logo = R.drawable.logo_lastfm,
                     brand = brandLastfm,
-                ) { onOpenSettings(SettingsPages.connections) }
+                ) { onOpenSettings(SettingsPages.lastfm) }
                 SubpageRow(
                     title = "Spotify",
                     subtitle = connections?.let {
@@ -164,7 +164,7 @@ fun ProfileScreen(
                     },
                     logo = R.drawable.logo_spotify,
                     brand = brandSpotify,
-                ) { onOpenSettings(SettingsPages.connections) }
+                ) { onOpenSettings(SettingsPages.spotify) }
             }
         }
         StatusFade()
@@ -208,7 +208,7 @@ private fun ProfileHeader(account: AccountState, core: Core, onOpenSettings: (St
             when (account) {
                 AccountState.Loading -> Bone(Modifier.width(150.dp).height(36.dp), RoundedCornerShape(18.dp))
                 is AccountState.SignedIn -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    PillButton("Account settings") { onOpenSettings(SettingsPages.account) }
+                    PillButton("Account settings") { onOpenSettings(SettingsPages.youtube) }
                     PillButton("Sign out", danger = true) {
                         scope.launch {
                             withContext(Dispatchers.IO) { core.signOut() }

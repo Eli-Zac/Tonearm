@@ -42,6 +42,18 @@ internal fun TonearmAccountPage(core: Core, onToast: (String) -> Unit) {
     }
 }
 
+/** The Tonearm account's section heading, as the other accounts have: a
+ *  tile in the accent colour and the name. */
+@Composable
+private fun TonearmHeader() {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(32.dp).clip(RoundedCornerShape(8.dp)).background(Tonearm.accent), contentAlignment = Alignment.Center) {
+            Icon(Icons.artist, size = 18.sp, color = Color.White)
+        }
+        Title("Tonearm", size = 16.sp, modifier = Modifier.padding(start = 12.dp))
+    }
+}
+
 /** A QR code, drawn white on black as a scanner likes it, with its blank border. */
 @Composable
 private fun QrView(qr: QrMatrix, modifier: Modifier = Modifier) {
@@ -82,6 +94,7 @@ private fun SignedOut(core: Core, onToast: (String) -> Unit, onSignedIn: (Tonear
 
     Card {
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            TonearmHeader()
             Title("Sign in with email", size = 16.sp)
             Dim(
                 "Your settings and pins follow you to every device you sign in on. Tonearm emails you a six digit code; there is no password.",
@@ -197,6 +210,7 @@ private fun SignedIn(core: Core, account: TonearmAccount, onToast: (String) -> U
 
     Card {
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            TonearmHeader()
             Title("Signed in as ${account.email}", size = 16.sp, lines = 2)
             Dim("This account's settings follow you to every device signed in to it.", 14.sp, lines = 3)
             Row {

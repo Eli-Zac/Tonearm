@@ -1121,6 +1121,8 @@ component Section inherits Rectangle {
     in property <string> about;
     // An optional logo, drawn white on a tile of the brand colour.
     in property <image> logo;
+    // Or an icon from the icon font, drawn white on the tile instead.
+    in property <string> glyph;
     in property <color> brand;
     max-width: 880px;
     border-radius: 12px;
@@ -1137,11 +1139,16 @@ component Section inherits Rectangle {
                     height: 32px;
                     border-radius: 8px;
                     background: root.brand;
-                    Image {
+                    if root.glyph == "": Image {
                         width: 18px;
                         height: 18px;
                         source: root.logo;
                         colorize: #ffffff;
+                    }
+                    if root.glyph != "": Icon {
+                        text: root.glyph;
+                        color: #ffffff;
+                        font-size: 18px;
                     }
                 }
             }
@@ -5239,20 +5246,29 @@ export component AppWindow inherits Window {
     // What the Discord member list shows: 0 artist, 1 song, 2 app name.
     in-out property <int> discord-status;
     callback discord-status-changed(int);
-    // Which settings page shows. 0 is the main one, 1 is Connections.
+    // Which settings page shows. 0 is the main one; under it 3 is
+    // Customization, 4 Playback, 5 Storage and 7 Accounts. Under Accounts
+    // 6 is Tonearm, 2 YouTube Music, 8 Spotify, 9 Last.fm and 10 Discord.
     property <int> settings-page;
-    // Set by `show-connections`, so moving to Settings lands on Connections.
-    property <bool> open-connections;
+    // The page moving to Settings should land on (0 for the main one), set
+    // by `show-connections` and the Profile page's account buttons.
+    property <int> open-page;
     changed nav => {
-        root.settings-page = root.open-connections ? 1 : 0;
-        root.open-connections = false;
+        root.settings-page = root.open-page;
+        root.open-page = 0;
         search.close();
     }
-    // Settings' Connections page, from Library's "Connect Spotify" card.
+    // Settings' Spotify page, from Library's "Connect Spotify" card.
     // Rust then moves `nav` to Settings.
     public function show-connections() {
-        root.open-connections = root.nav != 3;
-        root.settings-page = 1;
+        root.open-page = root.nav != 3 ? 8 : 0;
+        root.settings-page = 8;
+    }
+    // Opening the Tonearm account page refreshes its state.
+    changed settings-page => {
+        if root.settings-page == 6 {
+            root.tonearm-open();
+        }
     }
     in property <string> services-note;
     callback save-services();
@@ -6129,25 +6145,9 @@ export component AppWindow inherits Window {
                     }
                     SubpageRow {
                         icon: Icons.artist;
-                        title: "Tonearm account";
-                        subtitle: root.tonearm-email != "" ? "Signed in as " + root.tonearm-email : "Not signed in";
-                        clicked => {
-                            root.settings-page = 6;
-                            root.tonearm-open();
-                        }
-                    }
-                    SubpageRow {
-                        logo: @image-url("youtubemusic.svg");
-                        brand: #ff0000;
-                        title: "YouTube Music account";
-                        subtitle: root.signed-in ? "Signed in as " + root.account-name : "Not signed in";
-                        clicked => { root.settings-page = 2; }
-                    }
-                    SubpageRow {
-                        icon: Icons.connections;
-                        title: "Connections";
-                        subtitle: "Discord rich presence, Last.fm and Spotify";
-                        clicked => { root.settings-page = 1; }
+                        title: "Accounts";
+                        subtitle: "Tonearm, YouTube Music, Spotify, Last.fm and Discord";
+                        clicked => { root.settings-page = 7; }
                     }
                     SubpageRow {
                         icon: Icons.speaker-high;
@@ -6310,7 +6310,7 @@ export component AppWindow inherits Window {
                                 if root.signed-in: PillButton {
                                     text: "Account settings";
                                     clicked => {
-                                        root.settings-page = 2;
+                                        root.open-page = 2;
                                         root.navigate(3);
                                     }
                                 }
@@ -6323,7 +6323,7 @@ export component AppWindow inherits Window {
                                     text: "Sign in";
                                     primary: true;
                                     clicked => {
-                                        root.settings-page = 2;
+                                        root.open-page = 2;
                                         root.navigate(3);
                                     }
                                 }
@@ -6410,7 +6410,7 @@ export component AppWindow inherits Window {
                             title: "Discord";
                             subtitle: root.discord-on ? "Showing what you play" : "Not linked";
                             clicked => {
-                                root.settings-page = 1;
+                                root.open-page = 10;
                                 root.navigate(3);
                             }
                         }
@@ -6420,7 +6420,7 @@ export component AppWindow inherits Window {
                             title: "Last.fm";
                             subtitle: root.lastfm-user != "" ? "Scrobbling as " + root.lastfm-user : "Not linked";
                             clicked => {
-                                root.settings-page = 1;
+                                root.open-page = 9;
                                 root.navigate(3);
                             }
                         }
@@ -6430,7 +6430,7 @@ export component AppWindow inherits Window {
                             title: "Spotify";
                             subtitle: root.spotify-linked ? (root.canvas-linked ? "Track details and Canvas" : "Track details") : "Not linked";
                             clicked => {
-                                root.settings-page = 1;
+                                root.open-page = 8;
                                 root.navigate(3);
                             }
                         }
@@ -6621,79 +6621,73 @@ export component AppWindow inherits Window {
                     }
                 }
             }
-            if root.nav == 3 && root.settings-page == 2: account-flick := Flickable {
+            // Settings sub page: the accounts Tonearm can sign in to.
+            if root.nav == 3 && root.settings-page == 7: accounts-flick := Flickable {
                 // Fills the panel. Left alone it takes the cards' cap as
                 // its own width and stops short, scroll bar and all.
                 max-width: 100000px;
                 horizontal-stretch: 1;
-                content-height: account.preferred-height;
-                account := VerticalLayout {
+                content-height: accounts-page.preferred-height;
+                accounts-page := VerticalLayout {
                     padding: 28px;
                     padding-top: 26px;
                     spacing: 14px;
                     alignment: start;
                     Text {
-                        text: "YouTube Music account";
+                        text: "Accounts";
                         color: Theme.text;
                         font-size: 32px;
                         font-weight: 800;
                     }
-                    if root.settings-note != "": Text {
-                        text: root.settings-note;
-                        color: Theme.accent;
-                        font-size: 14px;
-                        wrap: word-wrap;
+                    SubpageRow {
+                        icon: Icons.artist;
+                        title: "Tonearm";
+                        subtitle: root.tonearm-email != "" ? "Signed in as " + root.tonearm-email : "Not signed in";
+                        clicked => { root.settings-page = 6; }
                     }
-                    Section {
-                        title: "YouTube Music";
+                    SubpageRow {
                         logo: @image-url("youtubemusic.svg");
                         brand: #ff0000;
-                        about: root.signed-in
-                            ? "Your library, playlists and recommendations come from this account. The sign in is encrypted with your Windows account and sent only to music.youtube.com."
-                            : "Tonearm has no web view, so it cannot show the Google sign in page. Sign in to music.youtube.com in your browser, open the developer tools, pick any request to music.youtube.com on the Network tab, and copy the value of its Cookie request header. Paste it below. Tonearm encrypts it with your Windows account and sends it only to music.youtube.com.";
-                        if !root.signed-in: HorizontalLayout {
-                            spacing: 8px;
-                            cookie := Field {
-                                placeholder: "Paste the Cookie header here";
-                                secret: true;
-                                accepted(text) => {
-                                    root.save-cookie(text);
-                                    self.text = "";
-                                }
-                            }
-                            VerticalLayout {
-                                alignment: center;
-                                PillButton {
-                                    text: "Sign in";
-                                    primary: true;
-                                    clicked => {
-                                        root.save-cookie(cookie.text);
-                                        cookie.text = "";
-                                    }
-                                }
-                            }
-                        }
-                        if root.signed-in: AccountRow {
-                            linked: true;
-                            title: "Signed in as " + root.account-name;
-                            unlink-text: "Sign out";
-                            unlink => { root.sign-out(); }
-                        }
+                        title: "YouTube Music";
+                        subtitle: root.signed-in ? "Signed in as " + root.account-name : "Not signed in";
+                        clicked => { root.settings-page = 2; }
+                    }
+                    SubpageRow {
+                        logo: @image-url("spotify.svg");
+                        brand: #1db954;
+                        title: "Spotify";
+                        subtitle: root.spotify-linked ? (root.canvas-linked ? "Track details and Canvas" : "Track details") : (root.canvas-linked ? "Library and Canvas" : "Not linked");
+                        clicked => { root.settings-page = 8; }
+                    }
+                    SubpageRow {
+                        logo: @image-url("lastfm.svg");
+                        brand: #d51007;
+                        title: "Last.fm";
+                        subtitle: root.lastfm-user != "" ? "Connected as " + root.lastfm-user : "Not connected";
+                        clicked => { root.settings-page = 9; }
+                    }
+                    SubpageRow {
+                        logo: @image-url("discord.svg");
+                        brand: #5865f2;
+                        title: "Discord";
+                        subtitle: root.discord-on ? "On" : "Off";
+                        clicked => { root.settings-page = 10; }
                     }
                 }
                 ScrollThumb {
-                    x: account-flick.width - self.width;
-                    y: -account-flick.content-y;
-                    height: account-flick.height;
-                    content-y <=> account-flick.content-y;
-                    content-height: account-flick.content-height;
-                    view-height: account-flick.height;
+                    x: accounts-flick.width - self.width;
+                    y: -accounts-flick.content-y;
+                    height: accounts-flick.height;
+                    content-y <=> accounts-flick.content-y;
+                    content-height: accounts-flick.content-height;
+                    view-height: accounts-flick.height;
                 }
             }
 
-            // Settings sub page: the Tonearm account, signed in with an
-            // emailed code or a code another device shows.
+            // Settings sub page: the Tonearm account, signed in with an emailed code or a code another device shows.
             if root.nav == 3 && root.settings-page == 6: tonearm-flick := Flickable {
+                // Fills the panel. Left alone it takes the cards' cap as
+                // its own width and stops short, scroll bar and all.
                 max-width: 100000px;
                 horizontal-stretch: 1;
                 content-height: tonearm-account.preferred-height;
@@ -6703,7 +6697,7 @@ export component AppWindow inherits Window {
                     spacing: 14px;
                     alignment: start;
                     Text {
-                        text: "Tonearm account";
+                        text: "Tonearm";
                         color: Theme.text;
                         font-size: 32px;
                         font-weight: 800;
@@ -6715,8 +6709,10 @@ export component AppWindow inherits Window {
                         wrap: word-wrap;
                     }
                     if root.tonearm-email == "": Section {
-                        title: "Sign in with email";
-                        about: "Your settings and pins follow you to every device you sign in on. Tonearm emails you a six digit code; there is no password.";
+                        title: "Tonearm";
+                        glyph: Icons.artist;
+                        brand: Theme.accent;
+                        about: "Sign in with your email. Your settings and pins follow you to every device you sign in on. Tonearm emails you a six digit code; there is no password.";
                         tonearm-mail := Field {
                             placeholder: "Email address";
                             accepted(text) => { root.tonearm-request-code(text); }
@@ -6766,7 +6762,9 @@ export component AppWindow inherits Window {
                         }
                     }
                     if root.tonearm-email != "": Section {
-                        title: "Signed in";
+                        title: "Tonearm";
+                        glyph: Icons.artist;
+                        brand: Theme.accent;
                         about: "This account's settings follow you to every device signed in to it.";
                         AccountRow {
                             linked: true;
@@ -6861,20 +6859,91 @@ export component AppWindow inherits Window {
                 }
             }
 
-            // Settings sub page: the services Tonearm can report to.
-            if root.nav == 3 && root.settings-page == 1: connections-flick := Flickable {
+            // Settings sub page: the YouTube Music account.
+            if root.nav == 3 && root.settings-page == 2: account-flick := Flickable {
                 // Fills the panel. Left alone it takes the cards' cap as
                 // its own width and stops short, scroll bar and all.
                 max-width: 100000px;
                 horizontal-stretch: 1;
-                content-height: connections.preferred-height;
-                connections := VerticalLayout {
+                content-height: account.preferred-height;
+                account := VerticalLayout {
                     padding: 28px;
                     padding-top: 26px;
                     spacing: 14px;
                     alignment: start;
                     Text {
-                        text: "Connections";
+                        text: "YouTube Music";
+                        color: Theme.text;
+                        font-size: 32px;
+                        font-weight: 800;
+                    }
+                    if root.settings-note != "": Text {
+                        text: root.settings-note;
+                        color: Theme.accent;
+                        font-size: 14px;
+                        wrap: word-wrap;
+                    }
+                    Section {
+                        title: "YouTube Music";
+                        logo: @image-url("youtubemusic.svg");
+                        brand: #ff0000;
+                        about: root.signed-in
+                            ? "Your library, playlists and recommendations come from this account. The sign in is encrypted with your Windows account and sent only to music.youtube.com."
+                            : "Tonearm has no web view, so it cannot show the Google sign in page. Sign in to music.youtube.com in your browser, open the developer tools, pick any request to music.youtube.com on the Network tab, and copy the value of its Cookie request header. Paste it below. Tonearm encrypts it with your Windows account and sends it only to music.youtube.com.";
+                        if !root.signed-in: HorizontalLayout {
+                            spacing: 8px;
+                            cookie := Field {
+                                placeholder: "Paste the Cookie header here";
+                                secret: true;
+                                accepted(text) => {
+                                    root.save-cookie(text);
+                                    self.text = "";
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                PillButton {
+                                    text: "Sign in";
+                                    primary: true;
+                                    clicked => {
+                                        root.save-cookie(cookie.text);
+                                        cookie.text = "";
+                                    }
+                                }
+                            }
+                        }
+                        if root.signed-in: AccountRow {
+                            linked: true;
+                            title: "Signed in as " + root.account-name;
+                            unlink-text: "Sign out";
+                            unlink => { root.sign-out(); }
+                        }
+                    }
+                }
+                ScrollThumb {
+                    x: account-flick.width - self.width;
+                    y: -account-flick.content-y;
+                    height: account-flick.height;
+                    content-y <=> account-flick.content-y;
+                    content-height: account-flick.content-height;
+                    view-height: account-flick.height;
+                }
+            }
+
+            // Settings sub page: Spotify.
+            if root.nav == 3 && root.settings-page == 8: spotify-flick := Flickable {
+                // Fills the panel. Left alone it takes the cards' cap as
+                // its own width and stops short, scroll bar and all.
+                max-width: 100000px;
+                horizontal-stretch: 1;
+                content-height: spotify-page.preferred-height;
+                spotify-page := VerticalLayout {
+                    padding: 28px;
+                    padding-top: 26px;
+                    spacing: 14px;
+                    alignment: start;
+                    Text {
+                        text: "Spotify";
                         color: Theme.text;
                         font-size: 32px;
                         font-weight: 800;
@@ -6884,74 +6953,6 @@ export component AppWindow inherits Window {
                         color: Theme.accent;
                         font-size: 14px;
                         wrap: word-wrap;
-                    }
-                    Section {
-                        title: "Discord";
-                        logo: @image-url("discord.svg");
-                        brand: #5865f2;
-                        about: "Shows what you play on your Discord profile. Discord has to be running on this computer." + (root.discord-builtin ? "" : " This build has no Discord application of its own. Enter the application ID of an app you create at discord.com/developers.");
-                        DiscordPreview {
-                            title: root.has-track ? root.track-title : "Song title";
-                            artist: root.has-track ? root.track-artist : "Artist";
-                            album: root.has-track ? root.track-album : "Album";
-                            art: root.track-art;
-                            has-art: root.has-track && root.track-has-art;
-                            progress: root.has-track ? root.progress : 0.4;
-                            position: root.has-track ? root.position-text : "1:12";
-                            duration: root.has-track ? root.duration-text : "3:04";
-                            status: root.discord-status;
-                        }
-                        SettingRow {
-                            title: "Member list status";
-                            subtitle: "What shows after \"Listening to\" next to your name";
-                            Dropdown {
-                                options: ["Artist", "Song", "App name"];
-                                selected <=> root.discord-status;
-                                changed(i) => { root.discord-status-changed(i); }
-                            }
-                        }
-                        if !root.discord-builtin && !root.discord-on: Field {
-                            placeholder: "Discord application ID";
-                            text <=> root.svc-discord;
-                        }
-                        AccountRow {
-                            linked: root.discord-on;
-                            title: root.discord-on ? "Linked" : "Not linked";
-                            subtitle: root.discord-on ? "Your status shows whenever Discord is open on this computer." : "Discord asks for no password. It trusts apps on the same computer.";
-                            link => {
-                                if root.discord-builtin {
-                                    root.discord-toggle();
-                                } else {
-                                    root.save-services();
-                                }
-                            }
-                            unlink => { root.discord-toggle(); }
-                        }
-                    }
-                    Section {
-                        title: "Last.fm";
-                        logo: @image-url("lastfm.svg");
-                        brand: #d51007;
-                        about: "Keeps a record of what you listen to. A track scrobbles after it has played for half its length or four minutes." + (root.lastfm-builtin ? "" : " This build has no Last.fm keys of its own. Enter an API key and shared secret from last.fm/api/account/create.");
-                        if !root.lastfm-builtin && root.lastfm-user == "": HorizontalLayout {
-                            spacing: 8px;
-                            Field {
-                                placeholder: "Last.fm API key";
-                                text <=> root.svc-lastfm-key;
-                            }
-                            Field {
-                                placeholder: "Last.fm shared secret";
-                                secret: true;
-                                text <=> root.svc-lastfm-secret;
-                            }
-                        }
-                        AccountRow {
-                            linked: root.lastfm-user != "";
-                            title: root.lastfm-user != "" ? "Linked as " + root.lastfm-user : "Not linked";
-                            subtitle: root.lastfm-user != "" ? "" : "Connect opens Last.fm in your browser. Approve Tonearm there and it links by itself.";
-                            link => { root.lastfm-connect(); }
-                            unlink => { root.lastfm-connect(); }
-                        }
                     }
                     Section {
                         title: "Spotify";
@@ -7036,12 +7037,150 @@ export component AppWindow inherits Window {
                     }
                 }
                 ScrollThumb {
-                    x: connections-flick.width - self.width;
-                    y: -connections-flick.content-y;
-                    height: connections-flick.height;
-                    content-y <=> connections-flick.content-y;
-                    content-height: connections-flick.content-height;
-                    view-height: connections-flick.height;
+                    x: spotify-flick.width - self.width;
+                    y: -spotify-flick.content-y;
+                    height: spotify-flick.height;
+                    content-y <=> spotify-flick.content-y;
+                    content-height: spotify-flick.content-height;
+                    view-height: spotify-flick.height;
+                }
+            }
+
+            // Settings sub page: Last.fm scrobbling.
+            if root.nav == 3 && root.settings-page == 9: lastfm-flick := Flickable {
+                // Fills the panel. Left alone it takes the cards' cap as
+                // its own width and stops short, scroll bar and all.
+                max-width: 100000px;
+                horizontal-stretch: 1;
+                content-height: lastfm-page.preferred-height;
+                lastfm-page := VerticalLayout {
+                    padding: 28px;
+                    padding-top: 26px;
+                    spacing: 14px;
+                    alignment: start;
+                    Text {
+                        text: "Last.fm";
+                        color: Theme.text;
+                        font-size: 32px;
+                        font-weight: 800;
+                    }
+                    if root.services-note != "": Text {
+                        text: root.services-note;
+                        color: Theme.accent;
+                        font-size: 14px;
+                        wrap: word-wrap;
+                    }
+                    Section {
+                        title: "Last.fm";
+                        logo: @image-url("lastfm.svg");
+                        brand: #d51007;
+                        about: "Keeps a record of what you listen to. A track scrobbles after it has played for half its length or four minutes." + (root.lastfm-builtin ? "" : " This build has no Last.fm keys of its own. Enter an API key and shared secret from last.fm/api/account/create.");
+                        if !root.lastfm-builtin && root.lastfm-user == "": HorizontalLayout {
+                            spacing: 8px;
+                            Field {
+                                placeholder: "Last.fm API key";
+                                text <=> root.svc-lastfm-key;
+                            }
+                            Field {
+                                placeholder: "Last.fm shared secret";
+                                secret: true;
+                                text <=> root.svc-lastfm-secret;
+                            }
+                        }
+                        AccountRow {
+                            linked: root.lastfm-user != "";
+                            title: root.lastfm-user != "" ? "Linked as " + root.lastfm-user : "Not linked";
+                            subtitle: root.lastfm-user != "" ? "" : "Connect opens Last.fm in your browser. Approve Tonearm there and it links by itself.";
+                            link => { root.lastfm-connect(); }
+                            unlink => { root.lastfm-connect(); }
+                        }
+                    }
+                }
+                ScrollThumb {
+                    x: lastfm-flick.width - self.width;
+                    y: -lastfm-flick.content-y;
+                    height: lastfm-flick.height;
+                    content-y <=> lastfm-flick.content-y;
+                    content-height: lastfm-flick.content-height;
+                    view-height: lastfm-flick.height;
+                }
+            }
+
+            // Settings sub page: Discord rich presence.
+            if root.nav == 3 && root.settings-page == 10: discord-flick := Flickable {
+                // Fills the panel. Left alone it takes the cards' cap as
+                // its own width and stops short, scroll bar and all.
+                max-width: 100000px;
+                horizontal-stretch: 1;
+                content-height: discord-page.preferred-height;
+                discord-page := VerticalLayout {
+                    padding: 28px;
+                    padding-top: 26px;
+                    spacing: 14px;
+                    alignment: start;
+                    Text {
+                        text: "Discord";
+                        color: Theme.text;
+                        font-size: 32px;
+                        font-weight: 800;
+                    }
+                    if root.services-note != "": Text {
+                        text: root.services-note;
+                        color: Theme.accent;
+                        font-size: 14px;
+                        wrap: word-wrap;
+                    }
+                    Section {
+                        title: "Discord";
+                        logo: @image-url("discord.svg");
+                        brand: #5865f2;
+                        about: "Shows what you play on your Discord profile. Discord has to be running on this computer." + (root.discord-builtin ? "" : " This build has no Discord application of its own. Enter the application ID of an app you create at discord.com/developers.");
+                        DiscordPreview {
+                            title: root.has-track ? root.track-title : "Song title";
+                            artist: root.has-track ? root.track-artist : "Artist";
+                            album: root.has-track ? root.track-album : "Album";
+                            art: root.track-art;
+                            has-art: root.has-track && root.track-has-art;
+                            progress: root.has-track ? root.progress : 0.4;
+                            position: root.has-track ? root.position-text : "1:12";
+                            duration: root.has-track ? root.duration-text : "3:04";
+                            status: root.discord-status;
+                        }
+                        SettingRow {
+                            title: "Member list status";
+                            subtitle: "What shows after \"Listening to\" next to your name";
+                            Dropdown {
+                                options: ["Artist", "Song", "App name"];
+                                selected <=> root.discord-status;
+                                changed(i) => { root.discord-status-changed(i); }
+                            }
+                        }
+                        if !root.discord-builtin && !root.discord-on: Field {
+                            placeholder: "Discord application ID";
+                            text <=> root.svc-discord;
+                        }
+                        AccountRow {
+                            linked: root.discord-on;
+                            title: root.discord-on ? "Linked" : "Not linked";
+                            subtitle: root.discord-on ? "Your status shows whenever Discord is open on this computer." : "Discord asks for no password. It trusts apps on the same computer.";
+                            link => {
+                                if root.discord-builtin {
+                                    root.discord-toggle();
+                                } else {
+                                    root.save-services();
+                                }
+                            }
+                            unlink => { root.discord-toggle(); }
+                        }
+                    }
+                }
+                ScrollThumb {
+                    x: discord-flick.width - self.width;
+                    y: -discord-flick.content-y;
+                    height: discord-flick.height;
+                    content-y <=> discord-flick.content-y;
+                    content-height: discord-flick.content-height;
+                    view-height: discord-flick.height;
                 }
             }
         }
@@ -9165,7 +9304,7 @@ export component AppWindow inherits Window {
         tip: "Back";
         clicked => {
             if root.nav == 3 && root.settings-page != 0 {
-                root.settings-page = 0;
+                root.settings-page = (root.settings-page == 2 || root.settings-page == 6 || root.settings-page >= 8) ? 7 : 0;
             } else {
                 root.back();
             }
