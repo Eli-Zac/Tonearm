@@ -18,7 +18,7 @@ android {
         // A release build gets both from the tag (see .github/workflows/android.yml):
         // -PversionName=0.11.0 -PversionCode=1100.
         versionCode = (project.findProperty("versionCode") as String?)?.toInt() ?: 1
-        versionName = (project.findProperty("versionName") as String?) ?: "0.10.0"
+        versionName = (project.findProperty("versionName") as String?) ?: "0.11.0"
     }
 
     // The release key lives in the environment, never in the repository:
