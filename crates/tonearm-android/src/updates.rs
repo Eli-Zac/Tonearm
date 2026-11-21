@@ -21,7 +21,12 @@ impl Tonearm {
     /// (this app's version name), else an empty string.
     pub fn update_available(&self, current: String) -> Result<String, TonearmError> {
         let http = innertube::agent(Duration::from_secs(20));
-        let release = releases::latest_matching(&http, REPO, is_apk)?;
+        // A release with no APK (a desktop-only one) is no update for the phone.
+        let release = match releases::latest_matching(&http, REPO, is_apk) {
+            Ok(release) => release,
+            Err(e) if e.contains("has no installer") => return Ok(String::new()),
+            Err(e) => return Err(e.into()),
+        };
         Ok(if releases::newer(&release.version, &current) { release.version } else { String::new() })
     }
 
