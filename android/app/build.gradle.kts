@@ -15,15 +15,44 @@ android {
         // AAudio, which the core's audio plays through, arrived in 8.0.
         minSdk = 26
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.10.0"
+        // A release build gets both from the tag (see .github/workflows/android.yml):
+        // -PversionName=0.11.0 -PversionCode=1100.
+        versionCode = (project.findProperty("versionCode") as String?)?.toInt() ?: 1
+        versionName = (project.findProperty("versionName") as String?) ?: "0.10.0"
+    }
+
+    // The release key lives in the environment, never in the repository:
+    // the release workflow sets these from its secrets.
+    val releaseKey = System.getenv("TONEARM_KEYSTORE")?.takeIf { it.isNotBlank() }
+    if (releaseKey != null) {
+        signingConfigs {
+            create("release") {
+                storeFile = file(releaseKey)
+                storePassword = System.getenv("TONEARM_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("TONEARM_KEY_ALIAS")
+                keyPassword = System.getenv("TONEARM_KEY_PASSWORD")
+            }
+        }
     }
 
     buildFeatures {
         compose = true
     }
 
+    // Lint's check before a release build trips on the activity-result
+    // permission request in MainActivity, which has no fragments to upgrade.
+    lint {
+        checkReleaseBuilds = false
+    }
+
     buildTypes {
+        // The build handed out: not debuggable, signed with the release key
+        // when the environment has one. Not shrunk, for the same reason as
+        // `profile`.
+        getByName("release") {
+            isMinifyEnabled = false
+            if (releaseKey != null) signingConfig = signingConfigs.getByName("release")
+        }
         // As fast as a release (not debuggable, so ART compiles Compose
         // fully), but signed with the debug key so it installs over the
         // debug build and keeps its data. For judging smoothness on a

@@ -5,10 +5,11 @@
 #   .\build-rust.ps1            the emulator (x86_64) and phones (arm64)
 #   .\build-rust.ps1 -Emulator  the emulator only, quicker
 #   .\build-rust.ps1 -Release   fully optimized, for a build to hand out
+#   .\build-rust.ps1 -Arm64     phones only (what the release APK holds)
 #
 # Needs the Android SDK and NDK (ANDROID_HOME, default C:\Android\Sdk),
 # cargo-ndk, and the targets x86_64-linux-android and aarch64-linux-android.
-param([switch]$Emulator, [switch]$Release)
+param([switch]$Emulator, [switch]$Release, [switch]$Arm64)
 # Not 'Stop': cargo writes its progress to stderr, which Windows PowerShell
 # would take for a failure. Exit codes say whether a step failed.
 $ErrorActionPreference = 'Continue'
@@ -43,7 +44,7 @@ if (-not $env:TONEARM_CAST_APP) { $env:TONEARM_CAST_APP = '79497171' }
 if (-not $env:TONEARM_ANDROID_TARGET) { $env:TONEARM_ANDROID_TARGET = 'C:\Android\target' }
 $target = $env:TONEARM_ANDROID_TARGET
 
-$abis = if ($Emulator) { @('x86_64') } else { @('x86_64', 'arm64-v8a') }
+$abis = if ($Emulator) { @('x86_64') } elseif ($Arm64) { @('arm64-v8a') } else { @('x86_64', 'arm64-v8a') }
 $flags = $abis | ForEach-Object { '-t', $_ }
 $jni = Join-Path $PSScriptRoot 'app\src\main\jniLibs'
 # Day to day the `fast` profile: optimized, but quick to build. -Release
