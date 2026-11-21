@@ -74,7 +74,6 @@ jobs:
       - name: Build the Rust core
         shell: pwsh
         env:
-          ANDROID_HOME: ${{ env.ANDROID_HOME }}
           TONEARM_ANDROID_TARGET: ${{ runner.temp }}\tonearm-android-target
           TONEARM_DISCORD_APP: ${{ secrets.TONEARM_DISCORD_APP }}
           TONEARM_LASTFM_KEY: ${{ secrets.TONEARM_LASTFM_KEY }}
