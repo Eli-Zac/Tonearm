@@ -7251,19 +7251,19 @@ export component AppWindow inherits Window {
             font-weight: 700;
             vertical-alignment: center;
         }
-        // Queue and Devices close. Lyrics goes back to Now playing, which
-        // shows the lyrics too.
+        // Queue, Lyrics and Devices (and the mix editor) go back to Now
+        // playing, which shows the lyrics too.
         if root.queue-t > 0: CloseButton {
             x: parent.width - self.width - 14px;
             y: 12px + root.panel-rise(root.queue-t);
             opacity: root.queue-t;
-            clicked => { root.show-panel(1); }
+            clicked => { root.show-panel(3); }
         }
         if root.cast-t > 0: CloseButton {
             x: parent.width - self.width - 14px;
             y: 12px + root.panel-rise(root.cast-t);
             opacity: root.cast-t;
-            clicked => { root.show-panel(5); }
+            clicked => { root.show-panel(3); }
         }
         if root.lyrics-t > 0: CloseButton {
             x: parent.width - self.width - 14px;
@@ -7482,7 +7482,7 @@ export component AppWindow inherits Window {
                         VerticalLayout {
                             alignment: center;
                             CloseButton {
-                                clicked => { root.leave-mix-panel(-1); }
+                                clicked => { root.leave-mix-panel(3); }
                             }
                         }
                     }
