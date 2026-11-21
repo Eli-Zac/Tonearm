@@ -17,6 +17,7 @@ use tonearm_core::innertube::model::{self, Kind};
 use tonearm_core::queue::{Added, Queue, Repeat, Step};
 use tonearm_core::{audio, history, innertube, listen, offline, resolver, services, store, suggest};
 
+mod account;
 mod auto;
 mod cast;
 mod downloads;

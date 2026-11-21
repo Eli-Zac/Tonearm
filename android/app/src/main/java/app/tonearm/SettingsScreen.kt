@@ -75,6 +75,7 @@ object SettingsPages {
     const val playback = "tonearm:settings/playback"
     const val customization = "tonearm:settings/customization"
     const val storage = "tonearm:settings/storage"
+    const val tonearm = "tonearm:settings/tonearm"
     const val signIn = "tonearm:settings/sign-in"
     const val spotifySignIn = "tonearm:settings/spotify-sign-in"
 
@@ -109,6 +110,7 @@ fun SettingsScreen(
             title = when (page) {
                 // Short: the card under it says YouTube Music with the logo.
                 SettingsPages.account -> "Account"
+                SettingsPages.tonearm -> "Tonearm account"
                 SettingsPages.connections -> "Connections"
                 SettingsPages.playback -> "Playback"
                 SettingsPages.customization -> "Customization"
@@ -119,6 +121,7 @@ fun SettingsScreen(
         ) {
             when (page) {
                 SettingsPages.account -> AccountPage(core, onOpen)
+                SettingsPages.tonearm -> TonearmAccountPage(core, onToast)
                 SettingsPages.connections -> ConnectionsPage(core, onOpen)
                 SettingsPages.playback -> PlaybackPage(core)
                 SettingsPages.customization -> CustomizationPage(core)
@@ -183,6 +186,14 @@ fun BackButton(onBack: () -> Unit) {
 @Composable
 private fun RootPage(core: Core, onOpen: (String) -> Unit) {
     val account = rememberAccount(core)
+    // Read from the store each time Settings opens, so a sign in or out on
+    // its page shows when coming back.
+    val tonearmAccount = core.tonearmAccount()
+    SubpageRow(
+        title = "Tonearm account",
+        subtitle = tonearmAccount?.let { "Signed in as ${it.email}" } ?: "Not signed in",
+        icon = Icons.artist,
+    ) { onOpen(SettingsPages.tonearm) }
     SubpageRow(
         title = "YouTube Music account",
         subtitle = when (val a = account) {
@@ -530,7 +541,7 @@ private fun linkLastfm(core: Core, context: android.content.Context, key: String
 // -------------------------------------------------------------- the parts
 
 @Composable
-private fun Card(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+internal fun Card(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
     Box(modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(card)) { content() }
 }
 
@@ -685,7 +696,7 @@ fun PillButton(text: String, primary: Boolean = false, danger: Boolean = false, 
 }
 
 @Composable
-private fun Field(value: String, onChange: (String) -> Unit, placeholder: String, secret: Boolean = false) {
+internal fun Field(value: String, onChange: (String) -> Unit, placeholder: String, secret: Boolean = false) {
     var focused by remember { mutableStateOf(false) }
     // While focused, the whole pill (and a little room round it) is kept
     // in view, asked again as the keyboard slides up, so it ends clear of
