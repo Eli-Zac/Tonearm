@@ -1,0 +1,13 @@
+// Tonearm's landing page: static files in public/, served by a Worker at
+// its own address. Deploy from this folder with `npx wrangler deploy`.
+//
+// Changing the address: edit the route below (a custom domain needs a zone
+// on this Cloudflare account) and deploy.
+{
+  "name": "tonearm-site",
+  "compatibility_date": "2026-11-18",
+  "assets": { "directory": "./public" },
+  "routes": [
+    { "pattern": "tonearm.eli-zac.dev", "custom_domain": true }
+  ]
+}

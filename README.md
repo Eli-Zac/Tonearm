@@ -1,10 +1,13 @@
 # Tonearm
 
-A native Windows client for YouTube Music, written in Rust.
+A native client for YouTube Music on Windows and Android, written in Rust.
 
-Tonearm has no web view and no browser engine. It draws its own UI with
-[Slint](https://slint.dev) and Skia, and talks to YouTube Music over plain
-HTTPS, so it starts fast and stays small in memory.
+Tonearm has no web view and no browser engine. The desktop app draws its own
+UI with [Slint](https://slint.dev) and Skia, the phone app is Kotlin and
+Jetpack Compose, and both run the same Rust core that talks to YouTube Music
+over plain HTTPS, so they start fast and stay small in memory.
+
+**Website: [tonearm.eli-zac.dev](https://tonearm.eli-zac.dev)**
 
 ![Tonearm's Now playing view: a large album cover beside synced lyrics](assets/screenshots/now-playing.webp)
 
@@ -34,7 +37,10 @@ HTTPS, so it starts fast and stays small in memory.
   taskbar preview
 * Closes to the tray and keeps playing, if you want it to
 * Discord Rich Presence and Last.fm scrobbling
-* In-app updates
+* A phone app for Android, with Android Auto and Galaxy Watch controls
+* A Tonearm account: your settings and pins follow you from computer to
+  phone
+* In-app updates, on the computer and the phone
 
 ## Screenshots
 
@@ -49,6 +55,8 @@ Tonearm is young. Expect rough edges, and please report what breaks.
 
 ## Install
 
+### Windows
+
 Download `Tonearm-<version>-setup.exe` from the
 [latest release](../../releases/latest) and run it. It installs just for
 you, in `%LOCALAPPDATA%\Programs\Tonearm`, and needs no admin rights. You
@@ -57,9 +65,17 @@ can uninstall it from Settings > Apps like any other app.
 The installer is not code signed, so Windows SmartScreen may warn the
 first time. Pick "More info", then "Run anyway".
 
+### Android
+
+Download `Tonearm-<version>.apk` from the
+[latest release](../../releases/latest) and open it. Android 8 or later.
+Your browser or file manager asks to allow installing apps from it, the
+first time only. Sign in to YouTube Music inside the app. The phone app
+checks for a newer release at start and installs it from Settings.
+
 ### Updates
 
-Tonearm checks for a new release at start up and shows a note when one is
+On the computer, Tonearm checks for a new release at start up and shows a note when one is
 out. Settings has an Updates card too. Installing downloads the new
 installer, checks its SHA-256 against the digest GitHub publishes, then
 closes Tonearm, installs the update and starts it again.
@@ -148,7 +164,14 @@ as Last.fm asks.
 
 ## Your data
 
-Everything stays on your computer.
+Everything stays on your computer, unless you make a Tonearm account.
+
+A Tonearm account is optional. With one, Tonearm's server
+(`api.tonearm.eli-zac.dev`, a Cloudflare Worker in `server/`) keeps your
+email address, the list of your signed-in devices (name, kind and model),
+and the settings and pins that sync between them. It never gets your
+YouTube Music sign in, your listening history or your music. Without an
+account nothing is sent to it.
 
 * Settings, the sign in cookie and service keys are in
   `%APPDATA%\tonearm`, all encrypted with DPAPI.
@@ -164,7 +187,9 @@ folders above to remove it.
 
 ## Build
 
-You need Windows and a recent stable Rust.
+You need Windows and a recent stable Rust. The phone app also needs the
+Android SDK and NDK, `cargo-ndk` and JDK 21: run `android\build-rust.ps1`
+for the core, then `gradlew installDebug` in `android/`.
 
 ```bash
 cargo build --release
@@ -199,17 +224,21 @@ A build without them works too. Connections then asks for your own keys.
 
 ### Releases
 
-Open the Actions tab, pick Release, press "Run workflow" and enter a
-version such as `v0.6.0`. Pushing a version tag does the same. GitHub
-builds the app and its installer on Windows and attaches both to a new
-release. The workflow reads the three keys above from the repository
-secrets.
+Push a version tag such as `v0.11.0`. Two workflows run. Release builds
+the Windows app and its installer and creates the GitHub release, reading
+the three keys above from the repository secrets. Android release builds the
+phone app and attaches `Tonearm-<version>.apk` to that release. It needs
+`ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`
+and `ANDROID_KEY_PASSWORD`, the release key's details. A manual run of
+Android release with publish off builds the APK as an artifact without
+touching a release. The landing page in `site/` deploys with
+`cd site && npx wrangler deploy`.
 
 ## Layout
 
-Tonearm is two crates. `crates/tonearm-core` is everything that is not the
-window, so another app (an Android one, say) can share it. The desktop app
-at the top draws it.
+`crates/tonearm-core` is everything that is not the window, and the desktop
+app at the top and the phone app in `android/` (through
+`crates/tonearm-android`) both use it.
 
 | Path | What it holds |
 | --- | --- |
@@ -230,6 +259,12 @@ at the top draws it.
 | `crates/tonearm-core/src/cast/` | Finding Cast devices and streaming to them |
 | `crates/tonearm-core/src/history.rs`, `session.rs` | Listening history, and where you left off |
 | `crates/tonearm-core/src/store.rs` | Encrypted storage for settings and secrets |
+| `crates/tonearm-core/src/account.rs`, `settings_sync.rs` | The Tonearm account client, and syncing settings and pins with it |
+| `crates/tonearm-android/` | The bridge the phone app calls the core through (UniFFI) |
+| `android/` | The phone app: Kotlin and Jetpack Compose |
+| `server/` | The Tonearm account server: a Cloudflare Worker with a D1 database |
+| `site/` | The landing page, tonearm.eli-zac.dev |
+| `receiver/` | Tonearm's own Cast receiver |
 | `installer/tonearm.nsi` | The NSIS installer |
 
 ## Contributing

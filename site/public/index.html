@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tonearm</title>
+  <meta name="description" content="A native YouTube Music client for Windows and Android, written in Rust. No web view, no browser engine.">
+  <meta property="og:title" content="Tonearm">
+  <meta property="og:description" content="A native YouTube Music client for Windows and Android, written in Rust.">
+  <meta property="og:image" content="shots/now-playing.webp">
+  <link rel="icon" href="logo.svg" type="image/svg+xml">
+  <style>
+    :root {
+      --bg: #08080a;
+      --island: #131316;
+      --line: #25252b;
+      --text: #f5f5f7;
+      --dim: #9a9aa5;
+      --accent: #ff4f6d;
+      --accent-2: #ee3a57;
+      color-scheme: dark;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    }
+    a { color: inherit; }
+    .wrap { max-width: 1080px; margin: 0 auto; padding: 0 20px; }
+    header.top { display: flex; align-items: center; gap: 12px; padding: 22px 0; }
+    header.top img { width: 36px; height: 36px; }
+    header.top b { font-size: 20px; letter-spacing: -.01em; }
+    header.top nav { margin-left: auto; display: flex; gap: 22px; color: var(--dim); font-size: 15px; }
+    header.top nav a { text-decoration: none; }
+    header.top nav a:hover { color: var(--text); }
+
+    .hero { text-align: center; padding: 48px 0 28px; }
+    .hero h1 { font-size: clamp(34px, 6vw, 60px); line-height: 1.08; letter-spacing: -.03em; margin: 0 auto 16px; max-width: 14em; }
+    .hero h1 em { font-style: normal; color: var(--accent); }
+    .hero p.lead { color: var(--dim); font-size: clamp(17px, 2.2vw, 20px); max-width: 34em; margin: 0 auto 28px; }
+    .buttons { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; }
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 13px 22px; border-radius: 999px; font-weight: 600; text-decoration: none;
+      background: var(--island); border: 1px solid var(--line);
+    }
+    .btn.primary { background: var(--text); color: #08080a; border-color: var(--text); }
+    .btn:hover { filter: brightness(1.12); }
+    .small { color: var(--dim); font-size: 14px; margin-top: 14px; min-height: 1.5em; }
+    .hero-shot { margin: 40px auto 0; max-width: 980px; }
+    .hero-shot img { width: 100%; height: auto; border-radius: 14px; border: 1px solid var(--line); display: block;
+      box-shadow: 0 30px 90px -30px rgba(255, 79, 109, .35); }
+
+    section { padding: 56px 0; }
+    h2 { font-size: clamp(26px, 4vw, 36px); letter-spacing: -.02em; margin: 0 0 8px; }
+    .sub { color: var(--dim); margin: 0 0 28px; max-width: 38em; }
+
+    .features { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 14px; }
+    .card { background: var(--island); border: 1px solid var(--line); border-radius: 16px; padding: 20px; }
+    .card h3 { margin: 0 0 6px; font-size: 17px; }
+    .card p { margin: 0; color: var(--dim); font-size: 15px; }
+
+    .shots { display: grid; grid-template-columns: repeat(auto-fit, minmax(440px, 1fr)); gap: 18px; }
+    figure { margin: 0; }
+    figure img { width: 100%; height: auto; display: block; border-radius: 12px; border: 1px solid var(--line); }
+    figcaption { color: var(--dim); font-size: 14px; margin-top: 8px; }
+
+    .downloads { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
+    .downloads .card { display: flex; flex-direction: column; gap: 10px; }
+    .downloads .btn { align-self: flex-start; }
+    ol { padding-left: 1.2em; color: var(--dim); }
+    ol li { margin: 4px 0; }
+
+    .notice { background: var(--island); border: 1px solid var(--line); border-left: 3px solid var(--accent);
+      border-radius: 12px; padding: 16px 18px; color: var(--dim); font-size: 14px; }
+    footer { padding: 36px 0 56px; color: var(--dim); font-size: 14px; display: flex; flex-wrap: wrap; gap: 8px 22px; }
+    footer a { text-decoration: none; border-bottom: 1px solid var(--line); }
+    @media (max-width: 640px) { header.top nav { display: none; } .shots { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="top">
+      <img src="logo.svg" alt="">
+      <b>Tonearm</b>
+      <nav>
+        <a href="#features">Features</a>
+        <a href="#screenshots">Screenshots</a>
+        <a href="#download">Download</a>
+        <a href="https://github.com/Eli-Zac/Tonearm">GitHub</a>
+      </nav>
+    </header>
+
+    <div class="hero">
+      <h1>YouTube Music, <em>drawn natively</em>.</h1>
+      <p class="lead">Tonearm is a client for YouTube Music on Windows and Android, written in Rust. No web view and no browser engine, so it starts fast and stays small.</p>
+      <div class="buttons">
+        <a class="btn primary" id="get-windows" href="https://github.com/Eli-Zac/Tonearm/releases/latest">Download for Windows</a>
+        <a class="btn" id="get-android" href="https://github.com/Eli-Zac/Tonearm/releases/latest">Download for Android</a>
+      </div>
+      <div class="small" id="version"></div>
+      <div class="hero-shot"><img src="shots/now-playing.webp" alt="Tonearm's Now playing view: a large album cover beside synced lyrics"></div>
+    </div>
+  </div>
+
+  <section id="features">
+    <div class="wrap">
+      <h2>What it does</h2>
+      <p class="sub">Everything you'd expect from a music app, drawn by the app itself.</p>
+      <div class="features">
+        <div class="card"><h3>Synced lyrics</h3><p>Timed by the syllable where the source allows, with duet sides and out of focus lines.</p></div>
+        <div class="card"><h3>Crossfade and mixes</h3><p>Crossfade, volume levelling and beat-matched transitions you can edit per playlist.</p></div>
+        <div class="card"><h3>Cast to your TV and speakers</h3><p>Chromecasts, Google TVs, Nest speakers and groups, with Tonearm's own screen showing the song and lyrics.</p></div>
+        <div class="card"><h3>One account, every device</h3><p>Sign in with an emailed code or a QR code. Your settings and pins follow you from computer to phone.</p></div>
+        <div class="card"><h3>Offline and resume</h3><p>Keep songs on your device, and pick up where you left off: the queue, the song and the position.</p></div>
+        <div class="card"><h3>In the car and on your wrist</h3><p>Android Auto with Home, Explore, Library and Downloads, and controls on a Galaxy Watch.</p></div>
+        <div class="card"><h3>Moving covers</h3><p>Animated album covers and Spotify Canvas clips, on pages and in Now playing.</p></div>
+        <div class="card"><h3>Updates itself</h3><p>Both apps check the releases page and install the new version for you.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="screenshots">
+    <div class="wrap">
+      <h2>Screenshots</h2>
+      <p class="sub">On Windows.</p>
+      <div class="shots">
+        <figure><img src="shots/artist.webp" alt="An artist page with a banner and a numbered list of popular songs" loading="lazy"><figcaption>Artist pages</figcaption></figure>
+        <figure><img src="shots/lyrics.webp" alt="Synced lyrics in a side panel, with the current line in focus" loading="lazy"><figcaption>Synced lyrics</figcaption></figure>
+        <figure><img src="shots/search.webp" alt="Search suggestions with songs and artists as you type" loading="lazy"><figcaption>Search as you type</figcaption></figure>
+        <figure><img src="shots/queue-panel.webp" alt="The Now playing panel with the cover, lyrics and what plays next" loading="lazy"><figcaption>The Now playing panel</figcaption></figure>
+      </div>
+    </div>
+  </section>
+
+  <section id="download">
+    <div class="wrap">
+      <h2>Download</h2>
+      <p class="sub">Free and open source. Both apps update themselves after the first install.</p>
+      <div class="downloads">
+        <div class="card">
+          <h3>Windows</h3>
+          <p style="color:var(--dim);margin:0">Installs just for you and needs no admin rights. The installer isn't code signed, so SmartScreen may warn the first time: pick More info, then Run anyway.</p>
+          <a class="btn primary" id="dl-windows" href="https://github.com/Eli-Zac/Tonearm/releases/latest">Get the installer</a>
+        </div>
+        <div class="card">
+          <h3>Android</h3>
+          <p style="color:var(--dim);margin:0">Android 8 or later. Your browser or file manager will ask to allow installing from it, the first time only.</p>
+          <a class="btn primary" id="dl-android" href="https://github.com/Eli-Zac/Tonearm/releases/latest">Get the APK</a>
+        </div>
+      </div>
+      <p class="sub" style="margin-top:28px">Signing in to YouTube Music works through your browser's session. The <a href="https://github.com/Eli-Zac/Tonearm#sign-in">README</a> has the steps.</p>
+      <div class="notice">Tonearm is an unofficial, independent project. It is not affiliated with, endorsed by or sponsored by Google, YouTube or Spotify. YouTube Music is a trademark of Google LLC, and Spotify is a trademark of Spotify AB. Using Tonearm may go against YouTube's Terms of Service, and you use it at your own risk.</div>
+    </div>
+  </section>
+
+  <div class="wrap">
+    <footer>
+      <span>Tonearm</span>
+      <a href="https://github.com/Eli-Zac/Tonearm">Source on GitHub</a>
+      <a href="https://github.com/Eli-Zac/Tonearm/releases">All releases</a>
+      <a href="https://github.com/Eli-Zac/Tonearm/issues">Report a problem</a>
+    </footer>
+  </div>
+
+  <script>
+    // Link each button straight to the latest release's file, and show its
+    // version. The buttons keep pointing at the releases page if GitHub
+    // can't be reached.
+    fetch("https://api.github.com/repos/Eli-Zac/Tonearm/releases/latest", { headers: { Accept: "application/vnd.github+json" } })
+      .then(function (r) { return r.ok ? r.json() : Promise.reject(); })
+      .then(function (release) {
+        var find = function (test) {
+          var file = (release.assets || []).find(function (a) { return test(a.name.toLowerCase()); });
+          return file ? file.browser_download_url : null;
+        };
+        var exe = find(function (n) { return /^tonearm-.*-setup\.exe$/.test(n); });
+        var apk = find(function (n) { return /^tonearm-.*\.apk$/.test(n); });
+        var set = function (ids, url) {
+          if (url) ids.forEach(function (id) { document.getElementById(id).href = url; });
+        };
+        set(["get-windows", "dl-windows"], exe);
+        set(["get-android", "dl-android"], apk);
+        document.getElementById("version").textContent =
+          "Latest: " + release.tag_name.replace(/^v/, "") + (apk ? "" : " (Android file not published yet)");
+      })
+      .catch(function () {});
+  </script>
+</body>
+</html>
