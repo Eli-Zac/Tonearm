@@ -46,6 +46,10 @@ class TonearmPlayer(private val context: Context, private val core: Tonearm) :
 
     /** Calls into the core that can reach the network run here, in order. */
     private val worker = MoreExecutors.listeningDecorator(Executors.newSingleThreadExecutor())
+    /** Next, previous and jumps run here, each on its own thread, so a run of
+     *  skips never waits for each song to load before the next one counts.
+     *  The core lets the newest request win. */
+    private val skips = Executors.newCachedThreadPool()
     private val handler = Handler(Looper.getMainLooper())
     private val audio = context.getSystemService(AudioManager::class.java)
 
@@ -211,10 +215,10 @@ class TonearmPlayer(private val context: Context, private val core: Tonearm) :
         val current = playback.index.toInt()
         return when (seekCommand) {
             // The core keeps the desktop's rules for next and previous.
-            COMMAND_SEEK_TO_NEXT, COMMAND_SEEK_TO_NEXT_MEDIA_ITEM -> work { core.next() }
-            COMMAND_SEEK_TO_PREVIOUS, COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM -> work { core.previous() }
+            COMMAND_SEEK_TO_NEXT, COMMAND_SEEK_TO_NEXT_MEDIA_ITEM -> skip { core.next() }
+            COMMAND_SEEK_TO_PREVIOUS, COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM -> skip { core.previous() }
             else -> if (mediaItemIndex != current && mediaItemIndex != C.INDEX_UNSET) {
-                work { core.skipTo(mediaItemIndex.toUInt()) }
+                skip { core.skipTo(mediaItemIndex.toUInt()) }
             } else {
                 core.seek(positionMs.coerceAtLeast(0) / 1000f)
                 later { refresh() }
@@ -253,12 +257,27 @@ class TonearmPlayer(private val context: Context, private val core: Tonearm) :
         noisy(false)
         abandonFocus()
         worker.shutdown()
+        skips.shutdown()
         return Futures.immediateVoidFuture()
     }
 
     /** Runs a core call that can block on the worker, then reads the core. */
     private fun work(call: () -> Unit): ListenableFuture<*> {
         val future = worker.submit {
+            try {
+                call()
+            } catch (e: Exception) {
+                // The core keeps the reason, which shows as the player's error.
+            }
+        }
+        future.addListener({ refresh() }, ContextCompat.getMainExecutor(context))
+        return future
+    }
+
+    /** Like [work], but never queued behind another call: the core moves the
+     *  queue at once and only the newest song's stream is used. */
+    private fun skip(call: () -> Unit): ListenableFuture<*> {
+        val future = MoreExecutors.listeningDecorator(skips).submit {
             try {
                 call()
             } catch (e: Exception) {

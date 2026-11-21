@@ -978,6 +978,13 @@ impl Tonearm {
         let input = match offline::local_file(&song.video_id) {
             Some(path) => audio::Input::File(path),
             None => {
+                // Skipping through many songs: wait a beat, and let go of
+                // this one when a newer request has already moved on, so
+                // the skipped songs are never looked up at all.
+                std::thread::sleep(Duration::from_millis(150));
+                if self.request.load(Ordering::SeqCst) != request {
+                    return Ok(());
+                }
                 let found = self.resolver.resolve(&song.video_id);
                 if self.request.load(Ordering::SeqCst) != request {
                     return Ok(());
