@@ -150,6 +150,76 @@
     .vs-row .us { color: var(--text); }
     .why-note { text-align: center; color: var(--faint); font-size: 14px; max-width: 36em; margin: 22px auto 22px; }
     #why .buttons { justify-content: center; }
+
+    .demos { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 20px var(--gap); }
+    .demo h3 { margin: 16px 0 6px; font-weight: 800; font-size: 20px; letter-spacing: -.02em; }
+    .demo p { margin: 0; color: var(--dim); font-size: 15px; }
+    .stage { position: relative; height: 230px; border-radius: var(--radius); background: var(--island); border: 1px solid var(--line); overflow: hidden; }
+    .demo .stage * { animation-play-state: paused; }
+    .demo.live .stage * { animation-play-state: running; }
+
+    /* Lyrics */
+    .lyr .glow { position: absolute; inset: -30%; background: radial-gradient(closest-side, #ff4f6d44, transparent 70%), radial-gradient(closest-side at 70% 60%, #6a4f9c44, transparent 70%); animation: drift 9s ease-in-out infinite alternate; }
+    @keyframes drift { from { transform: translate(-6%, -4%) scale(1); } to { transform: translate(6%, 5%) scale(1.15); } }
+    .lyr-cover { position: absolute; left: 22px; top: 50%; width: 92px; height: 92px; margin-top: -46px; border-radius: 12px; background: linear-gradient(140deg, #ff6f88, #6a4f9c 60%, #1c1c21); box-shadow: 0 12px 30px -10px #000; }
+    .lyr-list { position: absolute; left: 140px; right: 18px; top: 50%; transition: transform .6s cubic-bezier(.3, .8, .3, 1); }
+    .ly { font-weight: 800; font-size: 20px; line-height: 1.25; padding: 7px 0; color: #ffffff55; opacity: .5; filter: blur(0); transition: opacity .5s, filter .5s, color .5s; }
+    .ly.near { filter: blur(1px); }
+    .ly.far { filter: blur(2.4px); opacity: .28; }
+    .ly.on { opacity: 1; filter: none; }
+    .ly .sy { transition: color .12s; }
+    .ly.on .sy.done { color: #fff; }
+    .ly.on .sy { color: #ffffff66; }
+    .ly:not(.on) .sy.done { color: inherit; }
+
+    /* Crossfade */
+    .fade { padding: 22px 22px 18px; display: flex; flex-direction: column; gap: 14px; }
+    .meter { display: grid; grid-template-columns: 54px 1fr 44px; align-items: center; gap: 12px; font-size: 13px; color: var(--dim); }
+    .meter b { text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
+    .bars { display: flex; align-items: flex-end; gap: 3px; height: 54px; }
+    .bars i { flex: 1; background: var(--accent); border-radius: 2px; min-height: 3px; transition: height .12s linear, opacity .12s linear; }
+    #bars-b i { background: #8a9bff; }
+    .timeline { position: relative; height: 8px; border-radius: 99px; background: var(--raised); margin-top: 6px; }
+    .timeline .zone { position: absolute; left: 37.5%; width: 25%; top: 0; bottom: 0; border-radius: 99px; background: #ffffff1f; }
+    .timeline i { position: absolute; top: -4px; width: 3px; height: 16px; border-radius: 2px; background: var(--text); left: 0; z-index: 1; }
+
+    /* Cast */
+    .cast svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+    .cast .dev { fill: var(--raised); stroke: #ffffff30; stroke-width: 1.5; }
+    .cast .scr { fill: #0c0c0e; }
+    .cast .scr.tv { animation: tvon 6s ease-in-out infinite; }
+    @keyframes tvon { 0%, 20% { fill: #0c0c0e; } 35%, 100% { fill: #2a1a30; } }
+    .cast .dot { fill: #ffffff55; }
+    .cast .link { fill: none; stroke: #ffffff22; stroke-width: 2; stroke-dasharray: 3 6; }
+    .cast .pkt { fill: var(--accent); }
+    .cast .tvtext rect { fill: var(--text); animation: tvt 6s ease-in-out infinite; opacity: 0; }
+    .cast .tvtext .faintfill { fill: #ffffff77; }
+    @keyframes tvt { 0%, 30% { opacity: 0; } 45%, 100% { opacity: 1; } }
+
+    /* Offline */
+    .off { display: flex; flex-direction: column; justify-content: center; gap: 22px; padding: 0 24px; }
+    .off-row { display: flex; align-items: center; gap: 16px; background: var(--raised); border-radius: 12px; padding: 14px 16px; }
+    .ring { position: relative; width: 44px; height: 44px; flex: none; }
+    .ring svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+    .ring circle { fill: none; stroke-width: 4; }
+    .ring .track { stroke: #ffffff1f; }
+    .ring .prog { stroke: var(--accent); stroke-linecap: round; stroke-dasharray: 113; animation: fill 8s ease-in-out infinite; }
+    @keyframes fill { 0% { stroke-dashoffset: 113; } 35%, 92% { stroke-dashoffset: 0; } 100% { stroke-dashoffset: 113; } }
+    .ring .tick { position: absolute; left: 50%; top: 50%; width: 10px; height: 18px; margin: -11px 0 0 -4px; border: solid var(--accent); border-width: 0 3px 3px 0; transform: rotate(45deg) scale(0); animation: tick 8s ease-in-out infinite; }
+    @keyframes tick { 0%, 34% { transform: rotate(45deg) scale(0); } 40%, 92% { transform: rotate(45deg) scale(1); } 100% { transform: rotate(45deg) scale(0); } }
+    .off-meta { display: flex; flex-direction: column; line-height: 1.3; margin-right: auto; }
+    .off-meta b { font-weight: 600; }
+    .off-meta span { color: var(--dim); font-size: 13px; }
+    .eq { display: flex; align-items: flex-end; gap: 3px; height: 24px; }
+    .eq i { width: 4px; background: var(--accent); border-radius: 2px; animation: eq 0.9s ease-in-out infinite alternate; height: 40%; }
+    .eq i:nth-child(2) { animation-delay: -.3s; } .eq i:nth-child(3) { animation-delay: -.6s; } .eq i:nth-child(4) { animation-delay: -.15s; }
+    @keyframes eq { from { height: 20%; } to { height: 100%; } }
+    .net { position: relative; height: 26px; text-align: center; font-size: 14px; font-weight: 600; }
+    .net span { position: absolute; left: 50%; top: 0; transform: translateX(-50%); padding: 4px 14px; border-radius: 99px; }
+    .net-on { background: #ffffff14; color: var(--dim); animation: online 8s ease-in-out infinite; }
+    .net-off { background: #ff4f6d26; color: var(--accent); animation: offline 8s ease-in-out infinite; opacity: 0; }
+    @keyframes online { 0%, 45% { opacity: 1; } 50%, 92% { opacity: 0; } 100% { opacity: 1; } }
+    @keyframes offline { 0%, 45% { opacity: 0; } 50%, 92% { opacity: 1; } 100% { opacity: 0; } }
     .shots { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px var(--gap); }
     figure { margin: 0; }
     figure img { width: 100%; height: auto; display: block; border-radius: var(--radius); background: var(--bg); }
@@ -204,7 +274,7 @@
       .vs-row span:last-child::before { content: "YouTube Music on the web: "; color: var(--faint); }
       .row.flip figure { order: 0; }
     }
-    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .btn, .chip { transition: none; } .hero-shot img, .verdict.swap { animation: none; } .js .rv { opacity: 1; transform: none; transition: none; } }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .btn, .chip { transition: none; } .hero-shot img, .verdict.swap, .demo .stage *, .glow { animation: none !important; } .lyr-list { transition: none; } .js .rv { opacity: 1; transform: none; transition: none; } }
   </style>
 </head>
 <body>
@@ -216,6 +286,7 @@
         <a href="#fast">Fast</a>
         <a href="#why">Why</a>
         <a href="#features">Features</a>
+        <a href="#motion">Demos</a>
         <a href="#android">Android</a>
         <a href="#download">Download</a>
         <a href="https://github.com/Eli-Zac/Tonearm">GitHub</a>
@@ -386,6 +457,69 @@
         </div>
       </section>
 
+      <section class="page" id="motion">
+        <div class="inner">
+          <h2>See it move</h2>
+          <p class="sub">Four small demos, drawn with nothing but HTML, CSS and a little script, to show what the app does. The lyrics are made up for the occasion.</p>
+          <div class="demos">
+
+            <article class="demo rv" id="demo-lyrics">
+              <div class="stage lyr">
+                <div class="glow"></div>
+                <div class="lyr-cover"></div>
+                <div class="lyr-list" id="lyr-list" aria-hidden="true"></div>
+              </div>
+              <h3>Lyrics, timed by the syllable</h3>
+              <p>The line being sung lights up as the singer reaches each syllable. Lines further away fade and blur out.</p>
+            </article>
+
+            <article class="demo rv" id="demo-fade">
+              <div class="stage fade">
+                <div class="meter"><span class="tag">Song A</span><div class="bars" id="bars-a"></div><b id="pct-a">100%</b></div>
+                <div class="meter"><span class="tag">Song B</span><div class="bars" id="bars-b"></div><b id="pct-b">0%</b></div>
+                <div class="timeline"><i id="fade-head"></i><span class="zone"></span></div>
+              </div>
+              <h3>Crossfade, with the seams hidden</h3>
+              <p>As one song ends, the next fades in while it fades out. Skip a song and it still switches at once.</p>
+            </article>
+
+            <article class="demo rv" id="demo-cast">
+              <div class="stage cast">
+                <svg viewBox="0 0 320 180" role="img" aria-label="A phone sending music to a TV">
+                  <rect x="28" y="52" width="46" height="80" rx="9" class="dev"/>
+                  <rect x="34" y="62" width="34" height="48" rx="3" class="scr"/>
+                  <circle cx="51" cy="122" r="3" class="dot"/>
+                  <rect x="222" y="48" width="78" height="52" rx="6" class="dev"/>
+                  <rect x="228" y="54" width="66" height="40" rx="3" class="scr tv"/>
+                  <rect x="250" y="104" width="22" height="5" rx="2" class="dev"/>
+                  <path d="M82 92 C 130 40, 190 40, 214 74" class="link"/>
+                  <circle r="4" class="pkt p1"><animateMotion dur="2.4s" repeatCount="indefinite" path="M82 92 C 130 40, 190 40, 214 74"/></circle>
+                  <circle r="4" class="pkt p2"><animateMotion dur="2.4s" begin="0.8s" repeatCount="indefinite" path="M82 92 C 130 40, 190 40, 214 74"/></circle>
+                  <circle r="4" class="pkt p3"><animateMotion dur="2.4s" begin="1.6s" repeatCount="indefinite" path="M82 92 C 130 40, 190 40, 214 74"/></circle>
+                  <g class="tvtext"><rect x="236" y="62" width="30" height="5" rx="2.5"/><rect x="236" y="72" width="50" height="3" rx="1.5" class="faintfill"/><rect x="236" y="80" width="40" height="3" rx="1.5" class="faintfill"/></g>
+                </svg>
+              </div>
+              <h3>Cast to the living room</h3>
+              <p>Chromecasts, Google TVs and Nest speakers get Tonearm's own output as a live stream, so mixes and crossfades come along.</p>
+            </article>
+
+            <article class="demo rv" id="demo-offline">
+              <div class="stage off">
+                <div class="off-row">
+                  <div class="ring"><svg viewBox="0 0 44 44"><circle cx="22" cy="22" r="18" class="track"/><circle cx="22" cy="22" r="18" class="prog"/></svg><span class="tick"></span></div>
+                  <div class="off-meta"><b>Guide song</b><span>Kept on this device</span></div>
+                  <div class="eq" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+                </div>
+                <div class="net"><span class="net-on">Online</span><span class="net-off">No connection</span></div>
+              </div>
+              <h3>Offline, still playing</h3>
+              <p>Keep songs on the device. When the signal goes, the song carries on and the queue picks up where you left it.</p>
+            </article>
+
+          </div>
+        </div>
+      </section>
+
       <section class="page" id="android">
         <div class="inner">
           <h2>It is on your phone too</h2>
@@ -516,6 +650,67 @@
           entries.forEach(function (e) { if (e.isIntersecting) { var p = v.play(); if (p && p.catch) p.catch(function () {}); } else { v.pause(); } });
         }, { threshold: 0.3 }).observe(v);
       }
+    })();
+
+    // Coded demos. They only run while on screen, and stay still if motion is turned down.
+    (function () {
+      var still = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      // Lyrics: each line is split into syllables with |, and lit one at a time.
+      var lines = ["Ev|ery beat is drawn by hand", "No brow|ser hid|ing un|der|neath", "Just the song and the screen", "Words that land right on time", "Sing it loud, we will not tell"];
+      var list = document.getElementById("lyr-list");
+      var els = lines.map(function (l) {
+        var d = document.createElement("div"); d.className = "ly";
+        l.split("|").forEach(function (t) { var sp = document.createElement("span"); sp.className = "sy"; sp.textContent = t; d.appendChild(sp); });
+        list.appendChild(d); return d;
+      });
+      var cur = 0, step = 0, lyrTimer = null;
+      function paintLyrics() {
+        els.forEach(function (e, i) {
+          var dist = Math.abs(i - cur);
+          e.className = "ly" + (dist === 0 ? " on" : dist === 1 ? " near" : " far");
+          if (dist !== 0) Array.prototype.forEach.call(e.children, function (c) { c.classList.toggle("done", i < cur); });
+        });
+        var a = els[cur]; list.style.transform = "translateY(" + (-(a.offsetTop + a.offsetHeight / 2)) + "px)";
+      }
+      function tickLyrics() {
+        var kids = els[cur].children;
+        if (step < kids.length) { kids[step].classList.add("done"); step++; }
+        else { cur = (cur + 1) % els.length; step = 0; Array.prototype.forEach.call(els[cur].children, function (c) { c.classList.remove("done"); }); paintLyrics(); }
+      }
+      paintLyrics();
+      if (still) { Array.prototype.forEach.call(els[0].children, function (c, i) { if (i < 2) c.classList.add("done"); }); }
+
+      // Crossfade: two rows of bars whose height follows each song's volume.
+      function makeBars(id, n) { var box = document.getElementById(id), out = []; for (var i = 0; i < n; i++) { var b = document.createElement("i"); box.appendChild(b); out.push(b); } return out; }
+      var A = makeBars("bars-a", 28), B = makeBars("bars-b", 28);
+      var pa = document.getElementById("pct-a"), pb = document.getElementById("pct-b"), head = document.getElementById("fade-head");
+      var raf = 0, t0 = 0, fadeLive = false, LEN = 8000;
+      function frame(now) {
+        if (!fadeLive) return;
+        if (!t0) t0 = now;
+        var p = ((now - t0) % LEN) / LEN, va, vb;
+        if (p < .375) { va = 1; vb = 0; } else if (p > .625) { va = 0; vb = 1; } else { var f = (p - .375) / .25; va = 1 - f; vb = f; }
+        head.style.left = "calc(" + (p * 100) + "% - 1.5px)";
+        pa.textContent = Math.round(va * 100) + "%"; pb.textContent = Math.round(vb * 100) + "%";
+        for (var i = 0; i < A.length; i++) {
+          var w = .45 + .55 * Math.abs(Math.sin(now / 260 + i * .9) * Math.cos(now / 410 + i * .37));
+          A[i].style.height = Math.max(3, va * w * 100) + "%"; B[i].style.height = Math.max(3, vb * w * 100) + "%";
+        }
+        raf = requestAnimationFrame(frame);
+      }
+      if (still) { for (var k = 0; k < A.length; k++) { A[k].style.height = "40%"; B[k].style.height = "40%"; } head.style.left = "50%"; pa.textContent = "50%"; pb.textContent = "50%"; }
+
+      // Start and stop with visibility.
+      var demos = document.querySelectorAll(".demo");
+      var io2 = new IntersectionObserver(function (entries) {
+        entries.forEach(function (e) {
+          var on = e.isIntersecting; e.target.classList.toggle("live", on);
+          if (e.target.id === "demo-lyrics" && !still) { clearInterval(lyrTimer); if (on) lyrTimer = setInterval(tickLyrics, 420); }
+          if (e.target.id === "demo-fade" && !still) { fadeLive = on; cancelAnimationFrame(raf); if (on) { t0 = 0; raf = requestAnimationFrame(frame); } }
+        });
+      }, { threshold: 0.35 });
+      demos.forEach(function (d) { io2.observe(d); });
     })();
   </script>
 </body>
