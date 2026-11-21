@@ -1,0 +1,29 @@
+// Tonearm's account server. Deploy from this folder with `npx wrangler deploy`.
+//
+// Changing the domain: edit BASE_HOST, MAIL_FROM and the route pattern below
+// (a route cannot read a variable), onboard the new domain in Resend, and
+// deploy. The apps ask this server for its address (GET /v1/config), so older
+// installs follow a move.
+{
+  "name": "tonearm-server",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-18",
+  "routes": [
+    { "pattern": "tonearm.eli-zac.dev", "custom_domain": true }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "tonearm",
+      "database_id": "fb4a4618-b6e2-45a7-b51c-84e670559df0",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "vars": {
+    // Public address of this server, and the sender of sign-in emails.
+    "BASE_HOST": "tonearm.eli-zac.dev",
+    "MAIL_FROM": "Tonearm <no-reply@tonearm.eli-zac.dev>"
+    // MAIL_PROVIDER: "resend" or "log". Unset = resend when the RESEND_API_KEY
+    // secret exists, otherwise "log" (codes are written to the Worker log).
+  }
+}

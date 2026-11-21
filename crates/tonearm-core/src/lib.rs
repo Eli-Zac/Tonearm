@@ -5,6 +5,7 @@
 //! Background work reports through listeners the app sets at start
 //! (`offline::listen`, `analysis::listen`), never by reaching for a window.
 
+pub mod account;
 pub mod analysis;
 pub mod animated_art;
 pub mod audio;
