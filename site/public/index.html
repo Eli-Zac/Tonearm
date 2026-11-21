@@ -151,75 +151,126 @@
     .why-note { text-align: center; color: var(--faint); font-size: 14px; max-width: 36em; margin: 22px auto 22px; }
     #why .buttons { justify-content: center; }
 
-    .demos { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 20px var(--gap); }
+    .demos { display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px var(--gap); }
+    .demo.wide { grid-column: 1 / -1; }
     .demo h3 { margin: 16px 0 6px; font-weight: 800; font-size: 20px; letter-spacing: -.02em; }
     .demo p { margin: 0; color: var(--dim); font-size: 15px; }
-    .stage { position: relative; height: 230px; border-radius: var(--radius); background: var(--island); border: 1px solid var(--line); overflow: hidden; }
-    .demo .stage * { animation-play-state: paused; }
-    .demo.live .stage * { animation-play-state: running; }
+    .demo.wide h3, .demo.wide p { max-width: 40em; }
+    .demo .win * { animation-play-state: paused; }
+    .demo.live .win * { animation-play-state: running; }
+
+    /* A miniature of the app window: islands on black, 8px apart. */
+    .win { display: flex; flex-direction: column; gap: 8px; padding: 8px; background: #000; border-radius: 16px; border: 1px solid var(--line); height: 300px; overflow: hidden; }
+    .win.tall { height: 470px; }
+    .isl { position: relative; flex: 1; min-height: 0; background: var(--island); border-radius: var(--radius); overflow: hidden; }
+    .win .i { font-style: normal; }
+    .pbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; background: #34403a; border-radius: var(--radius); flex: none; }
+    .pbar.slim { padding: 9px 12px; }
+    .b-meta { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .b-meta img { width: 40px; height: 40px; border-radius: 6px; flex: none; }
+    .b-meta div { display: flex; flex-direction: column; line-height: 1.25; min-width: 0; }
+    .b-meta b { font-size: 13px; font-weight: 600; white-space: nowrap; }
+    .b-meta span { font-size: 12px; color: var(--dim); }
+    .b-mid { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 0; }
+    .ctl { display: flex; align-items: center; gap: 16px; color: var(--dim); font-size: 16px; }
+    .ctl .fill { color: var(--text); font-size: 17px; }
+    .ctl .play { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; background: var(--text); color: var(--bg); }
+    .ctl .play .i { font-size: 16px; color: var(--bg); }
+    .prog { display: flex; align-items: center; gap: 8px; width: 100%; max-width: 380px; font-size: 11px; color: var(--dim); }
+    .prog em { font-style: normal; font-variant-numeric: tabular-nums; }
+    .prog .track { flex: 1; height: 3px; border-radius: 2px; background: #ffffff2e; overflow: hidden; }
+    .prog .fill { height: 100%; width: 14%; background: var(--text); animation: prog 14s linear infinite; }
+    @keyframes prog { from { width: 14%; } to { width: 80%; } }
+    .b-right { display: flex; align-items: center; gap: 14px; color: var(--dim); font-size: 17px; }
+    .b-right .on { color: var(--accent); }
 
     /* Lyrics */
-    .lyr .glow { position: absolute; inset: -30%; background: radial-gradient(closest-side, #ff4f6d44, transparent 70%), radial-gradient(closest-side at 70% 60%, #6a4f9c44, transparent 70%); animation: drift 9s ease-in-out infinite alternate; }
-    @keyframes drift { from { transform: translate(-6%, -4%) scale(1); } to { transform: translate(6%, 5%) scale(1.15); } }
-    .lyr-cover { position: absolute; left: 22px; top: 50%; width: 92px; height: 92px; margin-top: -46px; border-radius: 12px; background: linear-gradient(140deg, #ff6f88, #6a4f9c 60%, #1c1c21); box-shadow: 0 12px 30px -10px #000; }
-    .lyr-list { position: absolute; left: 140px; right: 18px; top: 50%; transition: transform .6s cubic-bezier(.3, .8, .3, 1); }
-    .ly { font-weight: 800; font-size: 20px; line-height: 1.25; padding: 7px 0; color: #ffffff55; opacity: .5; filter: blur(0); transition: opacity .5s, filter .5s, color .5s; }
-    .ly.near { filter: blur(1px); }
-    .ly.far { filter: blur(2.4px); opacity: .28; }
+    .np { display: flex; align-items: center; padding: 0 36px; gap: 40px; background: linear-gradient(135deg, #0d1c24 0%, #14201a 55%, #111113 100%); }
+    .np .glow { position: absolute; inset: -30%; background: radial-gradient(closest-side at 25% 40%, #2c5f7a55, transparent 70%), radial-gradient(closest-side at 80% 75%, #6b7a2e44, transparent 70%); animation: drift 10s ease-in-out infinite alternate; }
+    @keyframes drift { from { transform: translate(-5%, -3%) scale(1); } to { transform: translate(5%, 4%) scale(1.12); } }
+    .np-left { position: relative; flex: none; width: 210px; }
+    .np-cover { width: 100%; aspect-ratio: 1; border-radius: 14px; display: block; box-shadow: 0 20px 50px -20px #000; }
+    .np-left b { display: block; margin-top: 14px; font-size: 20px; font-weight: 800; letter-spacing: -.01em; }
+    .np-left span { color: var(--dim); font-size: 14px; }
+    .lyr-list { position: absolute; left: 286px; right: 30px; top: 50%; transition: transform .6s cubic-bezier(.3, .8, .3, 1); }
+    .ly { font-weight: 800; font-size: clamp(20px, 2.6vw, 30px); line-height: 1.22; padding: 9px 0; opacity: .5; filter: blur(0); transition: opacity .5s, filter .5s; }
+    .ly.near { filter: blur(1.2px); }
+    .ly.far { filter: blur(3px); opacity: .25; }
     .ly.on { opacity: 1; filter: none; }
-    .ly .sy { transition: color .12s; }
-    .ly.on .sy.done { color: #fff; }
-    .ly.on .sy { color: #ffffff66; }
-    .ly:not(.on) .sy.done { color: inherit; }
+    .ly .sy { color: #ffffff59; transition: color .12s; }
+    .ly .sy.done { color: #fff; }
+    .ly:not(.on) .sy { color: #ffffff80; }
 
     /* Crossfade */
-    .fade { padding: 22px 22px 18px; display: flex; flex-direction: column; gap: 14px; }
-    .meter { display: grid; grid-template-columns: 54px 1fr 44px; align-items: center; gap: 12px; font-size: 13px; color: var(--dim); }
-    .meter b { text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
-    .bars { display: flex; align-items: flex-end; gap: 3px; height: 54px; }
-    .bars i { flex: 1; background: var(--accent); border-radius: 2px; min-height: 3px; transition: height .12s linear, opacity .12s linear; }
-    #bars-b i { background: #8a9bff; }
-    .timeline { position: relative; height: 8px; border-radius: 99px; background: var(--raised); margin-top: 6px; }
-    .timeline .zone { position: absolute; left: 37.5%; width: 25%; top: 0; bottom: 0; border-radius: 99px; background: #ffffff1f; }
-    .timeline i { position: absolute; top: -4px; width: 3px; height: 16px; border-radius: 2px; background: var(--text); left: 0; z-index: 1; }
+    .rows { padding: 10px; display: flex; flex-direction: column; gap: 8px; justify-content: center; }
+    .song { display: flex; align-items: center; gap: 10px; background: var(--raised); border-radius: 12px; padding: 10px; }
+    .song img { width: 48px; height: 48px; border-radius: 7px; flex: none; }
+    .song .t { display: flex; flex-direction: column; line-height: 1.25; min-width: 0; margin-right: auto; }
+    .song .t b { font-size: 13px; font-weight: 600; white-space: nowrap; }
+    .song .t span { font-size: 12px; color: var(--dim); }
+    .vol { display: flex; align-items: flex-end; gap: 8px; }
+    .vol b { font-size: 12px; width: 34px; text-align: right; font-variant-numeric: tabular-nums; }
+    .bars { display: flex; align-items: flex-end; gap: 2px; height: 34px; width: 56px; }
+    .bars i { flex: 1; background: var(--accent); border-radius: 1.5px; min-height: 2px; }
+    .timeline { position: relative; width: 100%; height: 6px; border-radius: 99px; background: #ffffff2e; }
+    .timeline .zone { position: absolute; left: 37.5%; width: 25%; top: -9px; bottom: -9px; border-radius: 8px; background: #ffffff1c; display: grid; place-items: end center; }
+    .timeline .zone em { font-style: normal; font-size: 10px; color: var(--dim); transform: translateY(2px); }
+    .timeline i { position: absolute; top: -3px; width: 12px; height: 12px; margin-left: -6px; border-radius: 50%; background: var(--text); left: 0; z-index: 1; }
 
     /* Cast */
-    .cast svg { position: absolute; inset: 0; width: 100%; height: 100%; }
-    .cast .dev { fill: var(--raised); stroke: #ffffff30; stroke-width: 1.5; }
-    .cast .scr { fill: #0c0c0e; }
-    .cast .scr.tv { animation: tvon 6s ease-in-out infinite; }
-    @keyframes tvon { 0%, 20% { fill: #0c0c0e; } 35%, 100% { fill: #2a1a30; } }
-    .cast .dot { fill: #ffffff55; }
-    .cast .link { fill: none; stroke: #ffffff22; stroke-width: 2; stroke-dasharray: 3 6; }
-    .cast .pkt { fill: var(--accent); }
-    .cast .tvtext rect { fill: var(--text); animation: tvt 6s ease-in-out infinite; opacity: 0; }
-    .cast .tvtext .faintfill { fill: #ffffff77; }
-    @keyframes tvt { 0%, 30% { opacity: 0; } 45%, 100% { opacity: 1; } }
+    .castwrap { background: radial-gradient(closest-side at 70% 30%, #ff4f6d1c, transparent 70%), var(--island); }
+    .pop { position: absolute; right: 12px; bottom: 10px; width: 78%; background: var(--raised); border: 1px solid var(--line); border-radius: 12px; padding: 8px; opacity: 0; transform: translateY(8px) scale(.98); transform-origin: bottom right; animation: pop 9s ease-in-out infinite; box-shadow: 0 14px 40px -12px #000; }
+    @keyframes pop { 0% { opacity: 0; transform: translateY(8px) scale(.98); } 8%, 70% { opacity: 1; transform: none; } 78%, 100% { opacity: 0; transform: translateY(8px) scale(.98); } }
+    .pop-h { font-size: 12px; color: var(--dim); padding: 2px 8px 6px; }
+    .dev { display: flex; align-items: center; gap: 10px; padding: 9px 8px; border-radius: 8px; font-size: 13px; }
+    .dev .i { font-size: 17px; color: var(--dim); }
+    .dev b { font-weight: 600; margin-right: auto; }
+    .dev em { font-style: normal; font-size: 11px; color: var(--accent); opacity: 0; animation: casting 9s ease-in-out infinite; }
+    .dev.d2 { animation: sel 9s ease-in-out infinite; }
+    @keyframes sel { 0%, 28% { background: transparent; } 36%, 100% { background: var(--hover); } }
+    @keyframes casting { 0%, 38% { opacity: 0; } 46%, 100% { opacity: 1; } }
+    .cbtn { animation: cbtn 9s ease-in-out infinite; position: relative; }
+    .cbtn::after { content: ""; position: absolute; left: 50%; bottom: -7px; width: 4px; height: 4px; margin-left: -2px; border-radius: 50%; background: var(--accent); opacity: 0; animation: cdot 9s ease-in-out infinite; }
+    @keyframes cbtn { 0%, 40% { color: var(--dim); } 48%, 100% { color: var(--accent); } }
+    @keyframes cdot { 0%, 40% { opacity: 0; } 48%, 100% { opacity: 1; } }
+    .cs { animation: cs 9s ease-in-out infinite; }
+    @keyframes cs { 0%, 44% { color: var(--dim); } 52%, 100% { color: var(--accent); } }
 
     /* Offline */
-    .off { display: flex; flex-direction: column; justify-content: center; gap: 22px; padding: 0 24px; }
-    .off-row { display: flex; align-items: center; gap: 16px; background: var(--raised); border-radius: 12px; padding: 14px 16px; }
-    .ring { position: relative; width: 44px; height: 44px; flex: none; }
-    .ring svg { width: 100%; height: 100%; transform: rotate(-90deg); }
-    .ring circle { fill: none; stroke-width: 4; }
-    .ring .track { stroke: #ffffff1f; }
-    .ring .prog { stroke: var(--accent); stroke-linecap: round; stroke-dasharray: 113; animation: fill 8s ease-in-out infinite; }
-    @keyframes fill { 0% { stroke-dashoffset: 113; } 35%, 92% { stroke-dashoffset: 0; } 100% { stroke-dashoffset: 113; } }
-    .ring .tick { position: absolute; left: 50%; top: 50%; width: 10px; height: 18px; margin: -11px 0 0 -4px; border: solid var(--accent); border-width: 0 3px 3px 0; transform: rotate(45deg) scale(0); animation: tick 8s ease-in-out infinite; }
-    @keyframes tick { 0%, 34% { transform: rotate(45deg) scale(0); } 40%, 92% { transform: rotate(45deg) scale(1); } 100% { transform: rotate(45deg) scale(0); } }
-    .off-meta { display: flex; flex-direction: column; line-height: 1.3; margin-right: auto; }
-    .off-meta b { font-weight: 600; }
-    .off-meta span { color: var(--dim); font-size: 13px; }
-    .eq { display: flex; align-items: flex-end; gap: 3px; height: 24px; }
-    .eq i { width: 4px; background: var(--accent); border-radius: 2px; animation: eq 0.9s ease-in-out infinite alternate; height: 40%; }
+    .dl { padding: 12px; display: flex; flex-direction: column; gap: 6px; }
+    .dl-h { display: flex; align-items: center; justify-content: space-between; padding: 2px 4px 6px; }
+    .dl-h > b { font-size: 20px; font-weight: 800; letter-spacing: -.02em; }
+    .net { position: relative; width: 112px; height: 24px; }
+    .net span { position: absolute; right: 0; top: 0; font-size: 12px; font-weight: 600; padding: 4px 12px; border-radius: 99px; white-space: nowrap; }
+    .net-on { background: #ffffff14; color: var(--dim); animation: online 10s ease-in-out infinite; }
+    .net-off { background: #ff4f6d26; color: var(--accent); opacity: 0; animation: offline 10s ease-in-out infinite; }
+    @keyframes online { 0%, 58% { opacity: 1; } 62%, 94% { opacity: 0; } 100% { opacity: 1; } }
+    @keyframes offline { 0%, 58% { opacity: 0; } 62%, 94% { opacity: 1; } 100% { opacity: 0; } }
+    .dl-row { display: flex; align-items: center; gap: 10px; padding: 7px 6px; border-radius: 10px; }
+    .dl-row img { width: 40px; height: 40px; border-radius: 6px; flex: none; }
+    .dl-row .t { display: flex; flex-direction: column; line-height: 1.25; margin-right: auto; min-width: 0; }
+    .dl-row .t b { font-size: 13px; font-weight: 600; white-space: nowrap; }
+    .dl-row .t b.pink { color: var(--accent); }
+    .dl-row .t span { font-size: 12px; color: var(--dim); }
+    .eq { display: flex; align-items: flex-end; gap: 2px; height: 16px; }
+    .eq i { width: 3px; background: var(--accent); border-radius: 1px; animation: eq .9s ease-in-out infinite alternate; height: 40%; }
     .eq i:nth-child(2) { animation-delay: -.3s; } .eq i:nth-child(3) { animation-delay: -.6s; } .eq i:nth-child(4) { animation-delay: -.15s; }
     @keyframes eq { from { height: 20%; } to { height: 100%; } }
-    .net { position: relative; height: 26px; text-align: center; font-size: 14px; font-weight: 600; }
-    .net span { position: absolute; left: 50%; top: 0; transform: translateX(-50%); padding: 4px 14px; border-radius: 99px; }
-    .net-on { background: #ffffff14; color: var(--dim); animation: online 8s ease-in-out infinite; }
-    .net-off { background: #ff4f6d26; color: var(--accent); animation: offline 8s ease-in-out infinite; opacity: 0; }
-    @keyframes online { 0%, 45% { opacity: 1; } 50%, 92% { opacity: 0; } 100% { opacity: 1; } }
-    @keyframes offline { 0%, 45% { opacity: 0; } 50%, 92% { opacity: 1; } 100% { opacity: 0; } }
+    .ring { position: relative; width: 26px; height: 26px; flex: none; }
+    .ring svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+    .ring circle { fill: none; stroke-width: 4; }
+    .ring .tr { stroke: #ffffff1f; }
+    .ring .pr { stroke: var(--accent); stroke-linecap: round; stroke-dasharray: 113; stroke-dashoffset: 113; }
+    .ring.r1 .pr { animation: fill1 10s ease-in-out infinite; }
+    .ring.r2 .pr { animation: fill2 10s ease-in-out infinite; }
+    @keyframes fill1 { 0% { stroke-dashoffset: 113; } 28%, 94% { stroke-dashoffset: 0; } 100% { stroke-dashoffset: 113; } }
+    @keyframes fill2 { 0%, 24% { stroke-dashoffset: 113; } 52%, 94% { stroke-dashoffset: 0; } 100% { stroke-dashoffset: 113; } }
+    .ring .tick { position: absolute; left: 50%; top: 50%; width: 5px; height: 10px; margin: -7px 0 0 -2px; border: solid var(--accent); border-width: 0 2px 2px 0; transform: rotate(45deg) scale(0); }
+    .ring.r1 .tick { animation: tick1 10s ease-in-out infinite; }
+    .ring.r2 .tick { animation: tick2 10s ease-in-out infinite; }
+    @keyframes tick1 { 0%, 28% { transform: rotate(45deg) scale(0); } 34%, 94% { transform: rotate(45deg) scale(1); } 100% { transform: rotate(45deg) scale(0); } }
+    @keyframes tick2 { 0%, 52% { transform: rotate(45deg) scale(0); } 58%, 94% { transform: rotate(45deg) scale(1); } 100% { transform: rotate(45deg) scale(0); } }
+    @media (max-width: 960px) { .demos { grid-template-columns: 1fr; } .lyr-list { left: 196px; } .np { gap: 24px; padding: 0 20px; } .np-left { width: 150px; } .np-left b { font-size: 16px; } .b-right { display: none; } }
     .shots { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px var(--gap); }
     figure { margin: 0; }
     figure img { width: 100%; height: auto; display: block; border-radius: var(--radius); background: var(--bg); }
@@ -274,7 +325,7 @@
       .vs-row span:last-child::before { content: "YouTube Music on the web: "; color: var(--faint); }
       .row.flip figure { order: 0; }
     }
-    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .btn, .chip { transition: none; } .hero-shot img, .verdict.swap, .demo .stage *, .glow { animation: none !important; } .lyr-list { transition: none; } .js .rv { opacity: 1; transform: none; transition: none; } }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .btn, .chip { transition: none; } .hero-shot img, .verdict.swap, .demo .win *, .glow { animation: none !important; } .lyr-list { transition: none; } .js .rv { opacity: 1; transform: none; transition: none; } }
   </style>
 </head>
 <body>
@@ -460,57 +511,65 @@
       <section class="page" id="motion">
         <div class="inner">
           <h2>See it move</h2>
-          <p class="sub">Four small demos, drawn with nothing but HTML, CSS and a little script, to show what the app does. The lyrics are made up for the occasion.</p>
+          <p class="sub">Four small demos, drawn with HTML, CSS and a little script, in the same look as the app. The lyrics are made up for the occasion.</p>
           <div class="demos">
 
-            <article class="demo rv" id="demo-lyrics">
-              <div class="stage lyr">
-                <div class="glow"></div>
-                <div class="lyr-cover"></div>
-                <div class="lyr-list" id="lyr-list" aria-hidden="true"></div>
+            <article class="demo wide rv" id="demo-lyrics">
+              <div class="win tall">
+                <div class="isl np">
+                  <div class="glow"></div>
+                  <div class="np-left"><img class="np-cover" src="shots/cover-a.webp" alt=""><b>Guide song</b><span>Made-up Artist</span></div>
+                  <div class="lyr-list" id="lyr-list" aria-hidden="true"></div>
+                </div>
+                <div class="pbar">
+                  <div class="b-meta"><img src="shots/cover-a.webp" alt=""><div><b>Guide song</b><span>Made-up Artist</span></div></div>
+                  <div class="b-mid">
+                    <div class="ctl"><i class="i">&#xe422;</i><i class="i fill">&#xe5a4;</i><span class="play"><i class="i fill">&#xe39e;</i></span><i class="i fill">&#xe5a6;</i><i class="i">&#xe3f6;</i></div>
+                    <div class="prog"><em>0:32</em><div class="track"><div class="fill"></div></div><em>3:48</em></div>
+                  </div>
+                  <div class="b-right"><i class="i">&#xeb5a;</i><i class="i">&#xe330;</i><i class="i on">&#xe75c;</i><i class="i">&#xe6ac;</i><i class="i">&#xe44a;</i></div>
+                </div>
               </div>
               <h3>Lyrics, timed by the syllable</h3>
-              <p>The line being sung lights up as the singer reaches each syllable. Lines further away fade and blur out.</p>
+              <p>The line being sung lights up as the singer reaches each syllable. Lines further away fade and blur out, and the page takes its colours from the cover.</p>
             </article>
 
             <article class="demo rv" id="demo-fade">
-              <div class="stage fade">
-                <div class="meter"><span class="tag">Song A</span><div class="bars" id="bars-a"></div><b id="pct-a">100%</b></div>
-                <div class="meter"><span class="tag">Song B</span><div class="bars" id="bars-b"></div><b id="pct-b">0%</b></div>
-                <div class="timeline"><i id="fade-head"></i><span class="zone"></span></div>
+              <div class="win">
+                <div class="isl rows">
+                  <div class="song"><img src="shots/cover-a.webp" alt=""><div class="t"><b>Guide song</b><span>Made-up Artist</span></div><div class="vol"><div class="bars" id="bars-a"></div><b id="pct-a">100%</b></div></div>
+                  <div class="song"><img src="shots/cover-b.webp" alt=""><div class="t"><b>Next song</b><span>Another Artist</span></div><div class="vol"><div class="bars" id="bars-b"></div><b id="pct-b">0%</b></div></div>
+                </div>
+                <div class="pbar slim"><div class="timeline"><span class="zone"><em>crossfade</em></span><i id="fade-head"></i></div></div>
               </div>
               <h3>Crossfade, with the seams hidden</h3>
               <p>As one song ends, the next fades in while it fades out. Skip a song and it still switches at once.</p>
             </article>
 
             <article class="demo rv" id="demo-cast">
-              <div class="stage cast">
-                <svg viewBox="0 0 320 180" role="img" aria-label="A phone sending music to a TV">
-                  <rect x="28" y="52" width="46" height="80" rx="9" class="dev"/>
-                  <rect x="34" y="62" width="34" height="48" rx="3" class="scr"/>
-                  <circle cx="51" cy="122" r="3" class="dot"/>
-                  <rect x="222" y="48" width="78" height="52" rx="6" class="dev"/>
-                  <rect x="228" y="54" width="66" height="40" rx="3" class="scr tv"/>
-                  <rect x="250" y="104" width="22" height="5" rx="2" class="dev"/>
-                  <path d="M82 92 C 130 40, 190 40, 214 74" class="link"/>
-                  <circle r="4" class="pkt p1"><animateMotion dur="2.4s" repeatCount="indefinite" path="M82 92 C 130 40, 190 40, 214 74"/></circle>
-                  <circle r="4" class="pkt p2"><animateMotion dur="2.4s" begin="0.8s" repeatCount="indefinite" path="M82 92 C 130 40, 190 40, 214 74"/></circle>
-                  <circle r="4" class="pkt p3"><animateMotion dur="2.4s" begin="1.6s" repeatCount="indefinite" path="M82 92 C 130 40, 190 40, 214 74"/></circle>
-                  <g class="tvtext"><rect x="236" y="62" width="30" height="5" rx="2.5"/><rect x="236" y="72" width="50" height="3" rx="1.5" class="faintfill"/><rect x="236" y="80" width="40" height="3" rx="1.5" class="faintfill"/></g>
-                </svg>
+              <div class="win">
+                <div class="isl castwrap">
+                  <div class="pop">
+                    <div class="pop-h">Cast to</div>
+                    <div class="dev d1"><i class="i">&#xe44a;</i><b>Kitchen speaker</b></div>
+                    <div class="dev d2"><i class="i">&#xeb5a;</i><b>Living room TV</b><em>Casting</em></div>
+                    <div class="dev d3"><i class="i">&#xe44a;</i><b>Bedroom Nest</b></div>
+                  </div>
+                </div>
+                <div class="pbar slim"><div class="b-meta"><img src="shots/cover-a.webp" alt=""><div><b>Guide song</b><span class="cs">Made-up Artist</span></div></div><div class="b-right"><i class="i cbtn">&#xeb5a;</i><i class="i">&#xe330;</i><i class="i">&#xe44a;</i></div></div>
               </div>
               <h3>Cast to the living room</h3>
               <p>Chromecasts, Google TVs and Nest speakers get Tonearm's own output as a live stream, so mixes and crossfades come along.</p>
             </article>
 
             <article class="demo rv" id="demo-offline">
-              <div class="stage off">
-                <div class="off-row">
-                  <div class="ring"><svg viewBox="0 0 44 44"><circle cx="22" cy="22" r="18" class="track"/><circle cx="22" cy="22" r="18" class="prog"/></svg><span class="tick"></span></div>
-                  <div class="off-meta"><b>Guide song</b><span>Kept on this device</span></div>
-                  <div class="eq" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+              <div class="win">
+                <div class="isl dl">
+                  <div class="dl-h"><b>Downloads</b><span class="net"><span class="net-on">Online</span><span class="net-off">No connection</span></span></div>
+                  <div class="dl-row"><img src="shots/cover-a.webp" alt=""><div class="t"><b class="pink">Guide song</b><span>Made-up Artist</span></div><div class="eq" aria-hidden="true"><i></i><i></i><i></i><i></i></div></div>
+                  <div class="dl-row"><img src="shots/cover-b.webp" alt=""><div class="t"><b>Next song</b><span>Another Artist</span></div><div class="ring r1"><svg viewBox="0 0 44 44"><circle cx="22" cy="22" r="18" class="tr"/><circle cx="22" cy="22" r="18" class="pr"/></svg><span class="tick"></span></div></div>
+                  <div class="dl-row"><img src="shots/cover-c.webp" alt=""><div class="t"><b>Third song</b><span>Another Artist</span></div><div class="ring r2"><svg viewBox="0 0 44 44"><circle cx="22" cy="22" r="18" class="tr"/><circle cx="22" cy="22" r="18" class="pr"/></svg><span class="tick"></span></div></div>
                 </div>
-                <div class="net"><span class="net-on">Online</span><span class="net-off">No connection</span></div>
               </div>
               <h3>Offline, still playing</h3>
               <p>Keep songs on the device. When the signal goes, the song carries on and the queue picks up where you left it.</p>
@@ -683,7 +742,7 @@
 
       // Crossfade: two rows of bars whose height follows each song's volume.
       function makeBars(id, n) { var box = document.getElementById(id), out = []; for (var i = 0; i < n; i++) { var b = document.createElement("i"); box.appendChild(b); out.push(b); } return out; }
-      var A = makeBars("bars-a", 28), B = makeBars("bars-b", 28);
+      var A = makeBars("bars-a", 12), B = makeBars("bars-b", 12);
       var pa = document.getElementById("pct-a"), pb = document.getElementById("pct-b"), head = document.getElementById("fade-head");
       var raf = 0, t0 = 0, fadeLive = false, LEN = 8000;
       function frame(now) {
