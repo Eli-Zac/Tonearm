@@ -180,6 +180,35 @@ pub fn pair_claim(code: &str, device: &str) -> Result<Account, String> {
     keep(&call("POST", "/v1/pair/claim", None, Some(body))?)
 }
 
+/// A QR code as rows of modules, `size` by `size`, true where dark. The
+/// apps draw it; they add the blank border themselves.
+pub struct Qr {
+    pub size: usize,
+    pub dark: Vec<bool>,
+}
+
+/// The QR code for a pairing code: what a phone scans to join without typing.
+pub fn pair_qr(code: &str) -> Option<Qr> {
+    let code = qrcode::QrCode::new(format!("tonearm://pair?code={}", code.trim()).as_bytes()).ok()?;
+    Some(Qr {
+        size: code.width(),
+        dark: code.to_colors().into_iter().map(|c| c == qrcode::Color::Dark).collect(),
+    })
+}
+
+/// The pairing code in what a scan read: the `tonearm://pair?code=` link a
+/// QR code carries, or a bare code. None for anything else.
+pub fn pair_code_from_scan(text: &str) -> Option<String> {
+    let text = text.trim();
+    let code = match text.split_once("code=") {
+        Some((head, code)) if head.starts_with("tonearm://pair") => code.split('&').next()?,
+        _ if !text.contains("://") => text,
+        _ => return None,
+    };
+    let clean: String = code.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_uppercase();
+    (clean.len() == 8).then(|| format!("{}-{}", &clean[..4], &clean[4..]))
+}
+
 /// Saves a sign-in the server gave.
 fn keep(answer: &Value) -> Result<Account, String> {
     let text = |key: &str| answer[key].as_str().map(str::to_string).ok_or("Unexpected answer from the server");
@@ -301,6 +330,21 @@ mod tests {
         if std::env::var("TONEARM_ACCOUNT_SERVER").is_err() {
             assert!(server().starts_with("https://"));
         }
+    }
+
+    #[test]
+    fn a_scan_gives_the_pairing_code() {
+        assert_eq!(pair_code_from_scan("tonearm://pair?code=TG2G-P6SE").as_deref(), Some("TG2G-P6SE"));
+        assert_eq!(pair_code_from_scan(" tg2gp6se ").as_deref(), Some("TG2G-P6SE"));
+        assert_eq!(pair_code_from_scan("https://example.com/?code=TG2GP6SE"), None);
+        assert_eq!(pair_code_from_scan("tonearm://pair?code=short"), None);
+    }
+
+    #[test]
+    fn a_pairing_qr_is_square() {
+        let qr = pair_qr("TG2G-P6SE").unwrap();
+        assert_eq!(qr.dark.len(), qr.size * qr.size);
+        assert!(qr.dark.iter().any(|&d| d) && qr.dark.iter().any(|&d| !d));
     }
 
     #[test]

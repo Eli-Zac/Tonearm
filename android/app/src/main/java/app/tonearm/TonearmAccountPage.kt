@@ -11,6 +11,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.platform.LocalContext
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
+import uniffi.tonearm_android.QrMatrix
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -31,6 +39,25 @@ internal fun TonearmAccountPage(core: Core, onToast: (String) -> Unit) {
         SignedOut(core, onToast) { account = it }
     } else {
         SignedIn(core, signedIn, onToast) { account = null }
+    }
+}
+
+/** A QR code, drawn white on black as a scanner likes it, with its blank border. */
+@Composable
+private fun QrView(qr: QrMatrix, modifier: Modifier = Modifier) {
+    val size = qr.size.toInt()
+    Canvas(modifier.background(Color.White, RoundedCornerShape(12.dp))) {
+        val quiet = 2
+        val module = this.size.width / (size + quiet * 2)
+        for (y in 0 until size) for (x in 0 until size) {
+            if (qr.dark[y * size + x]) {
+                drawRect(
+                    Color.Black,
+                    topLeft = Offset((x + quiet) * module, (y + quiet) * module),
+                    size = Size(module + 0.5f, module + 0.5f),
+                )
+            }
+        }
     }
 }
 
@@ -109,13 +136,38 @@ private fun SignedOut(core: Core, onToast: (String) -> Unit, onSignedIn: (Tonear
                 14.sp, lines = 4,
             )
             Field(pairCode, { pairCode = it.uppercase().filter { c -> c.isLetterOrDigit() || c == '-' }.take(9) }, "XXXX-XXXX")
-            PillButton(if (busy) "Joining…" else "Join") {
-                if (busy || pairCode.replace("-", "").length != 8) return@PillButton
-                busy = true
-                scope.launch {
-                    val signed = attempt(onToast) { core.accountPairClaim(pairCode) }
-                    busy = false
-                    if (signed != null) onSignedIn(signed)
+            val context = LocalContext.current
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                PillButton(if (busy) "Joining…" else "Join", primary = true) {
+                    if (busy || pairCode.replace("-", "").length != 8) return@PillButton
+                    busy = true
+                    scope.launch {
+                        val signed = attempt(onToast) { core.accountPairClaim(pairCode) }
+                        busy = false
+                        if (signed != null) onSignedIn(signed)
+                    }
+                }
+                PillButton("Scan a QR code") {
+                    if (busy) return@PillButton
+                    // Google's scanner screen reads it; no camera permission here.
+                    val options = GmsBarcodeScannerOptions.Builder()
+                        .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+                        .build()
+                    GmsBarcodeScanning.getClient(context, options).startScan()
+                        .addOnSuccessListener { barcode ->
+                            val code = core.accountScanCode(barcode.rawValue.orEmpty())
+                            if (code == null) {
+                                onToast("That QR code isn't a Tonearm pairing code.")
+                            } else {
+                                busy = true
+                                scope.launch {
+                                    val signed = attempt(onToast) { core.accountPairClaim(code) }
+                                    busy = false
+                                    if (signed != null) onSignedIn(signed)
+                                }
+                            }
+                        }
+                        .addOnFailureListener { onToast("Couldn't open the scanner: ${it.message ?: "unknown error"}") }
                 }
             }
         }
@@ -168,6 +220,8 @@ private fun SignedIn(core: Core, account: TonearmAccount, onToast: (String) -> U
                     scope.launch { attempt(onToast) { core.accountPairStart() }?.let { pairing = it } }
                 }
             } else {
+                val qr = remember(p.code) { core.accountPairQr(p.code) }
+                if (qr != null) QrView(qr, Modifier.size(200.dp))
                 Title(p.code, size = 32.sp, weight = FontWeight.ExtraBold)
                 Dim("Enter it on the other device within ${left / 60}:${(left % 60).toString().padStart(2, '0')}. It works once.", 14.sp, lines = 3)
                 PillButton("Done") { pairing = null }

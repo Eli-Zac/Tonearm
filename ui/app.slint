@@ -5300,6 +5300,8 @@ export component AppWindow inherits Window {
     // A pairing code for another device, with how long it has left.
     in property <string> tonearm-pair-code;
     in property <string> tonearm-pair-note;
+    // The QR code of that pairing code, for a phone to scan.
+    in property <image> tonearm-pair-qr;
     in property <[AccountDevice]> tonearm-devices;
     callback tonearm-open();
     callback tonearm-request-code(string);
@@ -6778,6 +6780,15 @@ export component AppWindow inherits Window {
                         about: root.tonearm-pair-code == ""
                             ? "Shows a code to enter on another device, so it joins this account without email."
                             : root.tonearm-pair-note;
+                        if root.tonearm-pair-code != "": HorizontalLayout {
+                            alignment: start;
+                            Image {
+                                source: root.tonearm-pair-qr;
+                                width: 200px;
+                                height: 200px;
+                                image-rendering: pixelated;
+                            }
+                        }
                         if root.tonearm-pair-code != "": Text {
                             text: root.tonearm-pair-code;
                             color: Theme.text;

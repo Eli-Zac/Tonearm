@@ -19,6 +19,7 @@ md5 = "0.7"
 rusqlite = { version = "0.43.0", features = ["bundled"] }
 # Runs YouTube's player script to solve stream link challenges.
 rquickjs = { version = "0.14", default-features = false }
+qrcode = { version = "0.15.0", default-features = false }
 
 # Secure connections: the system's own on the computer, rustls on Android,
 # where the system's is Java's and OpenSSL would have to be built.

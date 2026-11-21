@@ -35,6 +35,13 @@ pub struct Pairing {
     pub expires_in: u32,
 }
 
+/// A QR code: `size` by `size` modules, row by row, true where dark.
+#[derive(uniffi::Record, Clone)]
+pub struct QrMatrix {
+    pub size: u32,
+    pub dark: Vec<bool>,
+}
+
 fn of(account: account::Account) -> TonearmAccount {
     TonearmAccount { email: account.email }
 }
@@ -71,6 +78,16 @@ impl Tonearm {
     pub fn account_pair_start(&self) -> Result<Pairing, TonearmError> {
         let made = account::pair_start()?;
         Ok(Pairing { code: made.code, expires_in: made.expires_in })
+    }
+
+    /// The QR code for a pairing code, for another device to scan.
+    pub fn account_pair_qr(&self, code: String) -> Option<QrMatrix> {
+        account::pair_qr(&code).map(|qr| QrMatrix { size: qr.size as u32, dark: qr.dark })
+    }
+
+    /// The pairing code in what a QR scan read, or None if it isn't one.
+    pub fn account_scan_code(&self, text: String) -> Option<String> {
+        account::pair_code_from_scan(&text)
     }
 
     /// The account's devices, oldest first.

@@ -20,6 +20,30 @@ fn ago(millis: i64) -> String {
     }
 }
 
+/// A pairing code's QR code as a picture: black on white, a blank border of
+/// two modules, each module 8 pixels square.
+fn qr_image(code: &str) -> Option<Image> {
+    const QUIET: usize = 2;
+    const SCALE: usize = 8;
+    let qr = account::pair_qr(code)?;
+    let side = (qr.size + QUIET * 2) * SCALE;
+    let mut buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(side as u32, side as u32);
+    let pixels = buffer.make_mut_slice();
+    pixels.fill(slint::Rgba8Pixel { r: 255, g: 255, b: 255, a: 255 });
+    for y in 0..qr.size {
+        for x in 0..qr.size {
+            if !qr.dark[y * qr.size + x] {
+                continue;
+            }
+            for py in 0..SCALE {
+                let row = ((y + QUIET) * SCALE + py) * side + (x + QUIET) * SCALE;
+                pixels[row..row + SCALE].fill(slint::Rgba8Pixel { r: 0, g: 0, b: 0, a: 255 });
+            }
+        }
+    }
+    Some(Image::from_rgba8(buffer))
+}
+
 impl App {
     /// Shows who the Tonearm account is signed in as, or that it isn't. Reads
     /// the store only.
@@ -134,6 +158,9 @@ impl App {
                 Ok(made) => {
                     let generation = app.tonearm_pair.get() + 1;
                     app.tonearm_pair.set(generation);
+                    if let Some(image) = qr_image(&made.code) {
+                        app.ui.set_tonearm_pair_qr(image);
+                    }
                     app.ui.set_tonearm_pair_code(made.code.into());
                     app.ui.set_tonearm_pair_note(
                         format!(
