@@ -132,11 +132,12 @@ fun rememberSongTime(controller: MediaController, playing: Boolean, song: String
         time.longValue = 0
     }
     LaunchedEffect(controller, playing) {
-        var raw = controller.currentPosition
+        var raw = (controller.currentPosition - CarLag.ms()).coerceAtLeast(0)
         var stamp = -1L
         while (true) {
             withFrameNanos { frame ->
-                var reading = controller.currentPosition
+                // In the car the sound arrives a little after the phone's position.
+                var reading = (controller.currentPosition - CarLag.ms()).coerceAtLeast(0)
                 fresh?.let { (_, since) ->
                     val waited = (System.nanoTime() - since) / 1_000_000
                     if (reading < 1500 || waited > 2500) fresh = null else reading = 0

@@ -111,6 +111,10 @@ class PlaybackService : MediaLibraryService() {
         /** The car's browsing reaches the network, so it runs off the main thread. */
         private val work: ListeningExecutorService,
     ) : MediaLibrarySession.Callback {
+        override fun onDisconnected(session: MediaSession, controller: MediaSession.ControllerInfo) {
+            CarLag.disconnected(controller.uid)
+        }
+
         /** Everyone gets the usual commands, plus shuffle, repeat and like. */
         override fun onConnect(session: MediaSession, controller: MediaSession.ControllerInfo): MediaSession.ConnectionResult {
             val commands = MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS.buildUpon()
@@ -118,6 +122,7 @@ class PlaybackService : MediaLibraryService() {
                 .remove(SessionCommand.COMMAND_CODE_LIBRARY_SEARCH)
                 .apply { car.commands.forEach { add(it) } }
                 .build()
+            CarLag.connected(controller.uid, controller.packageName)
             return MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller)
                 .setAvailableSessionCommands(commands)
                 // Play, pause and skip for every controller. Media3 gives
