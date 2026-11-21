@@ -45,4 +45,9 @@ jobs:
             echo "::error::Set the CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID secrets first."
             exit 1
           fi
+          # A secret set from Windows can carry a byte order mark or a newline,
+          # which an HTTP header refuses: keep only the printable characters.
+          CLOUDFLARE_API_TOKEN="$(printf '%s' "$CLOUDFLARE_API_TOKEN" | LC_ALL=C tr -cd '[:alnum:]_-')"
+          CLOUDFLARE_ACCOUNT_ID="$(printf '%s' "$CLOUDFLARE_ACCOUNT_ID" | LC_ALL=C tr -cd '[:alnum:]')"
+          export CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID
           npx --yes wrangler@4 deploy
