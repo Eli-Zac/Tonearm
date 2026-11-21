@@ -10,7 +10,7 @@ use crate::store;
 use serde_json::{json, Value};
 use std::time::Duration;
 
-pub const DEFAULT_SERVER: &str = "https://tonearm.eli-zac.dev";
+pub const DEFAULT_SERVER: &str = "https://api.tonearm.eli-zac.dev";
 
 /// Where the account server is: the environment's choice, else the address
 /// the server last gave, else `DEFAULT_SERVER`.

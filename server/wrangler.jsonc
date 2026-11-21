@@ -8,7 +8,10 @@
   "name": "tonearm-server",
   "main": "src/index.ts",
   "compatibility_date": "2026-11-18",
+  // The old address keeps answering so installs built before the move work
+  // until they follow BASE_HOST (GET /v1/config). Drop it once they have.
   "routes": [
+    { "pattern": "api.tonearm.eli-zac.dev", "custom_domain": true },
     { "pattern": "tonearm.eli-zac.dev", "custom_domain": true }
   ],
   "d1_databases": [
@@ -21,7 +24,7 @@
   ],
   "vars": {
     // Public address of this server, and the sender of sign-in emails.
-    "BASE_HOST": "tonearm.eli-zac.dev",
+    "BASE_HOST": "api.tonearm.eli-zac.dev",
     "MAIL_FROM": "Tonearm <no-reply@tonearm.eli-zac.dev>"
     // MAIL_PROVIDER: "resend" or "log". Unset = resend when the RESEND_API_KEY
     // secret exists, otherwise "log" (codes are written to the Worker log).
