@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Tonearm</title>
-  <meta name="description" content="A native YouTube Music client for Windows and Android, written in Rust. No web view, no browser engine.">
+  <meta name="description" content="A YouTube Music client for Windows and Android, written in Rust. No browser engine, no web view, no waiting for a web page to finish becoming a music app.">
   <meta property="og:title" content="Tonearm">
   <meta property="og:description" content="A native YouTube Music client for Windows and Android, written in Rust.">
   <meta property="og:image" content="shots/now-playing.webp">
@@ -110,6 +110,35 @@
     .row .text li { padding-left: 20px; position: relative; }
     .row .text li::before { content: ""; position: absolute; left: 2px; top: .6em; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
     h3.more { font-weight: 800; font-size: 22px; letter-spacing: -.02em; margin: 64px 0 14px; }
+
+    .three { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: var(--gap); }
+    .potato { margin-top: 28px; background: var(--island); border: 1px solid var(--line); border-radius: var(--radius); padding: 24px; }
+    .potato h3 { margin: 0 0 14px; font-weight: 800; font-size: 24px; letter-spacing: -.02em; }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+    .chip { font: 600 15px Figtree, sans-serif; color: var(--text); background: var(--raised); border: 0; border-radius: 999px; padding: 10px 18px; cursor: pointer; transition: background .15s, transform .1s; }
+    .chip:hover { background: #26262d; }
+    .chip:active { transform: scale(.96); }
+    .chip.on { background: var(--text); color: var(--bg); }
+    .verdict { margin: 18px 0 6px; font-weight: 600; font-size: clamp(18px, 2.4vw, 24px); line-height: 1.3; letter-spacing: -.01em; min-height: 3.9em; }
+    .verdict.swap { animation: swap .3s ease both; }
+    @keyframes swap { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+    .fine { margin: 0; color: var(--faint); font-size: 13px; }
+
+    .phones { display: flex; gap: 20px; align-items: flex-end; overflow-x: auto; padding: 6px 2px 18px; scroll-snap-type: x proximity; }
+    .phone { flex: none; width: 170px; scroll-snap-align: start; }
+    .phone.big { width: 230px; }
+    .phone img, .phone video { width: 100%; display: block; aspect-ratio: 9 / 20; object-fit: cover; border-radius: 26px; border: 1px solid var(--line); background: var(--island); box-shadow: 0 30px 70px -35px #000; }
+    .phone.big video { box-shadow: 0 30px 90px -30px #ff4f6d55; }
+    .phone figcaption { text-align: center; }
+    ul.ticks { list-style: none; margin: 18px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px 28px; color: var(--dim); font-size: 15px; }
+    ul.ticks li { padding-left: 20px; position: relative; }
+    ul.ticks li::before { content: ""; position: absolute; left: 2px; top: .6em; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+
+    /* Things ease in as they scroll into view. */
+    .js .rv { opacity: 0; transform: translateY(18px); transition: opacity .6s ease, transform .6s ease; }
+    .js .rv.in { opacity: 1; transform: none; }
+    .hero-shot img { animation: float 7s ease-in-out infinite; }
+    @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-8px); } }
     .shots { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px var(--gap); }
     figure { margin: 0; }
     figure img { width: 100%; height: auto; display: block; border-radius: var(--radius); background: var(--bg); }
@@ -141,15 +170,18 @@
       .row, .row.flip { grid-template-columns: 1fr; gap: 18px; }
       .row.flip figure { order: 0; }
     }
-    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .btn { transition: none; } }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .btn, .chip { transition: none; } .hero-shot img, .verdict.swap { animation: none; } .js .rv { opacity: 1; transform: none; transition: none; } }
   </style>
 </head>
 <body>
+  <script>document.documentElement.classList.add("js");</script>
   <header class="top">
     <div class="bar">
       <a class="brand" href="#top"><img src="logo.svg" alt="">Tonearm</a>
       <nav id="nav">
+        <a href="#fast">Fast</a>
         <a href="#features">Features</a>
+        <a href="#android">Android</a>
         <a href="#download">Download</a>
         <a href="https://github.com/Eli-Zac/Tonearm">GitHub</a>
       </nav>
@@ -159,8 +191,8 @@
   <main>
       <section class="page hero" id="top">
         <div class="inner">
-          <h1>YouTube Music, <em>drawn natively</em>.</h1>
-          <p class="lead">Tonearm is a client for YouTube Music on Windows and Android, written in Rust. No web view and no browser engine, so it starts fast and stays small.</p>
+          <h1>YouTube Music, <em>without the browser</em>.</h1>
+          <p class="lead">Some music apps are a web browser wearing a trench coat. Tonearm is just the music app. It is written in Rust, draws its own screen, and opens quickly enough that you might think it crashed. It did not. That is just what fast looks like.</p>
           <div class="buttons">
             <a class="btn primary" id="get-windows" href="https://github.com/Eli-Zac/Tonearm/releases/latest"><i class="i fill">&#xe560;</i>Download for Windows</a>
             <a class="btn" id="get-android" href="https://github.com/Eli-Zac/Tonearm/releases/latest"><i class="i fill">&#xe1e0;</i>Download for Android</a>
@@ -170,13 +202,39 @@
         </div>
       </section>
 
+      <section class="page" id="fast">
+        <div class="inner">
+          <h2>Fast, which is a bit awkward for everyone else</h2>
+          <p class="sub">Most desktop music apps carry a whole web browser around so they can show you a list of songs. Tonearm skips the browser and draws the list itself. Less to load, less to keep in memory, and nothing to wait for while a page decides what it wants to be.</p>
+
+          <div class="three">
+            <div class="card rv"><div class="ic"><i class="i">&#xe3d0;</i></div><h3>No browser engine</h3><p>No Chromium, no Electron, no hidden tab running your playlists. The window you see is the app, all of it.</p></div>
+            <div class="card rv"><div class="ic"><i class="i">&#xe2a8;</i></div><h3>Built in Rust</h3><p>It has no garbage collector to nap in the middle of your chorus, and the compiler would not let us leak much memory even if we tried.</p></div>
+            <div class="card rv"><div class="ic"><i class="i">&#xe6a2;</i></div><h3>Starts like a light switch</h3><p>You click it, it is there. There is no loading logo, because there was no time to make one.</p></div>
+          </div>
+
+          <div class="potato rv">
+            <h3>Will it run on my&hellip;</h3>
+            <div class="chips" id="chips" role="tablist" aria-label="Devices">
+              <button class="chip on" data-k="potato">&#x1F954; Potato</button>
+              <button class="chip" data-k="laptop">Ancient laptop</button>
+              <button class="chip" data-k="phone">Cheap Android phone</button>
+              <button class="chip" data-k="fridge">Smart fridge</button>
+              <button class="chip" data-k="toaster">Toaster</button>
+            </div>
+            <p class="verdict" id="verdict" aria-live="polite"></p>
+            <p class="fine">Tonearm needs Windows or Android 8 or later. The rest of this panel is a joke, and we take no responsibility for anything you plug a vegetable into.</p>
+          </div>
+        </div>
+      </section>
+
       <section class="page" id="features">
         <div class="inner">
-          <h2>What it does</h2>
-          <p class="sub">Everything you'd expect from a music app, drawn by the app itself. Here is a closer look, with screenshots from the Windows app.</p>
+          <h2>What it does besides being fast</h2>
+          <p class="sub">All the things you would hope a music app does, and a few you probably would not. Screenshots are from the Windows app, taken while it was quietly sipping memory.</p>
 
           <div class="rows">
-            <article class="row">
+            <article class="row rv">
               <figure><img src="shots/now-playing.webp" alt="Now playing, full size: the album cover on the left, synced lyrics on the right with the current line in white" loading="lazy"></figure>
               <div class="text">
                 <div class="ic"><i class="i">&#xe75c;</i></div>
@@ -191,7 +249,7 @@
               </div>
             </article>
 
-            <article class="row flip">
+            <article class="row flip rv">
               <figure><img src="shots/home.webp" alt="Home with rows of new releases and recently played songs, and the Now playing panel beside it" loading="lazy"></figure>
               <div class="text">
                 <div class="ic"><i class="i fill">&#xe2c2;</i></div>
@@ -206,7 +264,7 @@
               </div>
             </article>
 
-            <article class="row">
+            <article class="row rv">
               <figure><img src="shots/search.webp" alt="Search suggestions listing queries, an artist and songs as you type" loading="lazy"></figure>
               <div class="text">
                 <div class="ic"><i class="i">&#xe30c;</i></div>
@@ -219,7 +277,7 @@
               </div>
             </article>
 
-            <article class="row flip">
+            <article class="row flip rv">
               <figure><img src="shots/artist.webp" alt="An artist page with a large banner, play and shuffle buttons, and a numbered list of popular songs" loading="lazy"></figure>
               <div class="text">
                 <div class="ic"><i class="i">&#xe4c2;</i></div>
@@ -233,7 +291,7 @@
               </div>
             </article>
 
-            <article class="row">
+            <article class="row rv">
               <figure><img src="shots/playback.webp" alt="The Playback settings page with Crossfade and Volume levelling, each with a drop-down" loading="lazy"></figure>
               <div class="text">
                 <div class="ic"><i class="i">&#xe422;</i></div>
@@ -247,7 +305,7 @@
               </div>
             </article>
 
-            <article class="row flip">
+            <article class="row flip rv">
               <figure><img src="shots/accounts.webp" alt="The Accounts page listing Tonearm, YouTube Music, Spotify, Last.fm and Discord" loading="lazy"></figure>
               <div class="text">
                 <div class="ic"><i class="i fill">&#xe1e0;</i></div>
@@ -262,22 +320,45 @@
             </article>
           </div>
 
-          <h3 class="more">And more</h3>
+          <h3 class="more">And the rest of the drawer</h3>
           <div class="features">
-            <div class="card"><div class="ic"><i class="i">&#xeb5a;</i></div><h3>Cast to your TV and speakers</h3><p>Chromecasts, Google TVs, Nest speakers and groups. Mixes and crossfades carry over, and a TV shows Tonearm's own screen with the song and lyrics.</p></div>
-            <div class="card"><div class="ic"><i class="i">&#xe028;</i></div><h3>Offline and resume</h3><p>Keep songs on your device, and pick up where you left off: the queue, the song and the position. Songs you play again start at once.</p></div>
-            <div class="card"><div class="ic"><i class="i">&#xe44a;</i></div><h3>In the car and on your wrist</h3><p>The phone app has Android Auto with Home, Explore, Library and Downloads, and controls on a Galaxy Watch.</p></div>
-            <div class="card"><div class="ic"><i class="i">&#xe64c;</i></div><h3>Made for Windows</h3><p>Media keys, the media flyout, play controls under the taskbar preview, and closing to the tray while it keeps playing.</p></div>
-            <div class="card"><div class="ic"><i class="i">&#xe6a2;</i></div><h3>Updates itself</h3><p>Both apps check the releases page and install the new version for you, after checking it against GitHub's own SHA-256.</p></div>
-            <div class="card"><div class="ic"><i class="i">&#xe270;</i></div><h3>Settings that stay out of the way</h3><p>Accounts, Playback, Customization, and Storage and history, each a short page of plain options.</p></div>
+            <div class="card rv"><div class="ic"><i class="i">&#xeb5a;</i></div><h3>Cast to your TV and speakers</h3><p>Chromecasts, Google TVs, Nest speakers and groups. Mixes and crossfades carry over, and a TV shows Tonearm's own screen with the song and lyrics.</p></div>
+            <div class="card rv"><div class="ic"><i class="i">&#xe028;</i></div><h3>Offline and resume</h3><p>Keep songs on your device, and pick up where you left off: the queue, the song and the position. Songs you play again start at once.</p></div>
+            <div class="card rv"><div class="ic"><i class="i">&#xe44a;</i></div><h3>In the car and on your wrist</h3><p>The phone app has Android Auto with Home, Explore, Library and Downloads, and controls on a Galaxy Watch.</p></div>
+            <div class="card rv"><div class="ic"><i class="i">&#xe64c;</i></div><h3>Made for Windows</h3><p>Media keys, the media flyout, play controls under the taskbar preview, and closing to the tray while it keeps playing.</p></div>
+            <div class="card rv"><div class="ic"><i class="i">&#xe6a2;</i></div><h3>Updates itself</h3><p>Both apps check the releases page and install the new version for you, after checking it against GitHub's own SHA-256.</p></div>
+            <div class="card rv"><div class="ic"><i class="i">&#xe270;</i></div><h3>Settings that stay out of the way</h3><p>Accounts, Playback, Customization, and Storage and history, each a short page of plain options.</p></div>
           </div>
+        </div>
+      </section>
+
+      <section class="page" id="android">
+        <div class="inner">
+          <h2>It is on your phone too</h2>
+          <p class="sub">The same Rust engine runs inside the phone app, so Android gets the same speed, the same crossfade, and the same lyrics that light up one syllable at a time. Karaoke night just got worse for your friends.</p>
+          <div class="phones">
+            <figure class="phone big rv">
+              <video src="shots/android-lyrics.mp4" poster="shots/android-lyrics-poster.webp" muted loop playsinline preload="metadata" autoplay aria-label="Lyrics on the phone app, moving along with the song"></video>
+              <figcaption>Lyrics, in motion</figcaption>
+            </figure>
+            <figure class="phone rv"><img src="shots/android-home.webp" alt="The phone app's Home with mood chips and rows of mixes" loading="lazy"><figcaption>Home</figcaption></figure>
+            <figure class="phone rv"><img src="shots/android-search.webp" alt="Search results on the phone, with songs and an artist" loading="lazy"><figcaption>Search</figcaption></figure>
+            <figure class="phone rv"><img src="shots/android-artist.webp" alt="An artist page on the phone with a full-bleed photo and a play button" loading="lazy"><figcaption>Artist pages</figcaption></figure>
+            <figure class="phone rv"><img src="shots/android-now-playing.webp" alt="Now playing on the phone with a big cover and the line being sung" loading="lazy"><figcaption>Now playing</figcaption></figure>
+          </div>
+          <ul class="ticks">
+            <li>Android Auto, so the car gets Home, Explore, Library and Downloads</li>
+            <li>Controls on a Galaxy Watch, for when your phone is somehow too far away</li>
+            <li>Offline downloads, so a tunnel is a mere suggestion</li>
+            <li>It updates itself from Settings, no store involved</li>
+          </ul>
         </div>
       </section>
 
       <section class="page" id="download">
         <div class="inner">
-          <h2>Download</h2>
-          <p class="sub">Free and open source. Both apps update themselves after the first install.</p>
+          <h2>Get it</h2>
+          <p class="sub">Free and open source. Both apps update themselves after the first install, so you can forget about them, which is how software should be.</p>
           <div class="downloads">
             <div class="card">
               <div class="ic"><i class="i fill">&#xe560;</i></div>
@@ -345,6 +426,42 @@
         });
       }, { rootMargin: "-40% 0px -55% 0px" });
       Object.keys(links).forEach(function (k) { var el = document.getElementById(k); if (el) io.observe(el); });
+    })();
+
+    // The "will it run on my" joke.
+    (function () {
+      var says = {
+        potato: "Not yet. We are in talks with the potato's lawyers, and the roadmap lists it under \u201cnever\u201d. It would be very fast, though.",
+        laptop: "Very likely. With no browser engine to haul around, there is much less for an old machine to be unhappy about.",
+        phone: "If it runs Android 8 or later, yes. The same Rust that makes the desktop quick is in there, minding the battery.",
+        fridge: "Only if it runs Android 8 or later, in which case technically yes. Please do not. The milk will judge your taste.",
+        toaster: "It will play the song while it burns your toast. Tonearm cannot help with the toast."
+      };
+      var out = document.getElementById("verdict");
+      var chips = document.querySelectorAll("#chips .chip");
+      function show(k) {
+        chips.forEach(function (c) { c.classList.toggle("on", c.getAttribute("data-k") === k); });
+        out.textContent = says[k];
+        out.classList.remove("swap"); void out.offsetWidth; out.classList.add("swap");
+      }
+      chips.forEach(function (c) { c.addEventListener("click", function () { show(c.getAttribute("data-k")); }); });
+      out.textContent = says.potato;
+    })();
+
+    // Ease things in as they scroll into view, and only play the phone video while it is on screen.
+    (function () {
+      var els = document.querySelectorAll(".rv");
+      if (!("IntersectionObserver" in window)) { els.forEach(function (e) { e.classList.add("in"); }); return; }
+      var io = new IntersectionObserver(function (entries) {
+        entries.forEach(function (e) { if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); } });
+      }, { rootMargin: "0px 0px -8% 0px" });
+      els.forEach(function (e) { io.observe(e); });
+      var v = document.querySelector(".phone video");
+      if (v) {
+        new IntersectionObserver(function (entries) {
+          entries.forEach(function (e) { if (e.isIntersecting) { var p = v.play(); if (p && p.catch) p.catch(function () {}); } else { v.pause(); } });
+        }, { threshold: 0.3 }).observe(v);
+      }
     })();
   </script>
 </body>
