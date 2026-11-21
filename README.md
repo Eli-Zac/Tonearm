@@ -46,10 +46,10 @@ over plain HTTPS, so they start fast and stay small in memory.
 
 | | |
 |---|---|
-| ![An artist page with a banner and a numbered list of popular songs](assets/screenshots/artist.webp) | ![Synced lyrics in a side panel, with the current line in focus](assets/screenshots/lyrics.webp) |
-| Artist pages | Synced lyrics |
-| ![Search suggestions with songs and artists as you type](assets/screenshots/search.webp) | ![The Now playing panel with the cover, lyrics and what plays next](assets/screenshots/queue-panel.webp) |
-| Search as you type | The Now playing panel |
+| ![An artist page with a banner and a numbered list of popular songs](assets/screenshots/artist.webp) | ![Home, with the Now playing panel and its lyrics at the side](assets/screenshots/home.webp) |
+| Artist pages | Home and the Now playing panel |
+| ![Search suggestions with songs and artists as you type](assets/screenshots/search.webp) | ![Settings: accounts, playback, customization and storage](assets/screenshots/settings.webp) |
+| Search as you type | Settings |
 
 Tonearm is young. Expect rough edges, and please report what breaks.
 
