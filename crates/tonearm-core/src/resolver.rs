@@ -104,21 +104,33 @@ fn note_path(which: u8) {
 
 /// Asks InnerTube directly, with no yt-dlp.
 struct Native {
-    http: ureq::Agent,
+    /// Replaced after a network failure: a change of network leaves its kept
+    /// connections dead.
+    http: std::sync::RwLock<ureq::Agent>,
     cookie: Mutex<Option<String>>,
 }
 
 impl Native {
     fn new() -> Self {
         Native {
-            http: crate::innertube::agent(Duration::from_secs(15)),
+            http: std::sync::RwLock::new(crate::innertube::agent(Duration::from_secs(15))),
             cookie: Mutex::new(None),
         }
     }
 
     fn attempt(&self, video_id: &str) -> Result<Stream, crate::innertube::player::Miss> {
         let cookie = self.cookie.lock().unwrap().clone();
-        crate::innertube::player::resolve(&self.http, cookie.as_deref(), video_id)
+        let http = self.http.read().unwrap().clone();
+        match crate::innertube::player::resolve(&http, cookie.as_deref(), video_id) {
+            // Network trouble may be the network having changed under a kept
+            // connection: once more on a fresh one.
+            Err(crate::innertube::player::Miss::Failed(_)) => {
+                let fresh = crate::innertube::agent(Duration::from_secs(15));
+                *self.http.write().unwrap() = fresh.clone();
+                crate::innertube::player::resolve(&fresh, cookie.as_deref(), video_id)
+            }
+            result => result,
+        }
     }
 }
 
@@ -141,7 +153,7 @@ impl Resolver for Native {
         // solved. Getting the player ready now saves the first song a few
         // seconds.
         if signing_in {
-            let http = self.http.clone();
+            let http = self.http.read().unwrap().clone();
             std::thread::spawn(move || {
                 if let Err(e) = crate::innertube::challenge::warm(&http) {
                     eprintln!("native resolver: warming the player failed: {e}");

@@ -143,11 +143,78 @@ impl App {
                         app.ui.set_tonearm_code_sent(false);
                         app.show_tonearm_account();
                         app.tonearm_refresh_devices();
+                        app.sync_settings_soon();
                     }
                     Err(message) => app.ui.set_tonearm_note(message.into()),
                 }
             });
         });
+    }
+
+    /// Brings this computer's shared settings and pins in step with the
+    /// account's, a moment from now so a change just made is on disk first.
+    /// Does nothing signed out.
+    pub(crate) fn sync_settings_soon(&self) {
+        if account::current().is_none() {
+            return;
+        }
+        std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(1500));
+            if let Ok(changed) = tonearm_core::settings_sync::sync() {
+                if !changed.is_empty() {
+                    on_ui(move |app| app.show_synced(&changed));
+                }
+            }
+        });
+    }
+
+    /// Syncs at start, then every few minutes while the app is open.
+    pub(crate) fn start_settings_sync(self: &Rc<Self>) {
+        self.sync_settings_soon();
+        let weak = Rc::downgrade(self);
+        self.settings_timer.start(TimerMode::Repeated, Duration::from_secs(300), move || {
+            if let Some(app) = weak.upgrade() {
+                app.sync_settings_soon();
+            }
+        });
+    }
+
+    /// Shows what a sync changed: the settings it reached and the pins.
+    fn show_synced(self: &Rc<Self>, keys: &[String]) {
+        use tonearm_core::settings;
+        for key in keys {
+            match key.as_str() {
+                "crossfade" => {
+                    self.crossfade.set(settings::crossfade());
+                    self.ui.set_crossfade_choice(settings::crossfade_choice() as i32);
+                    self.forget_plan();
+                }
+                "levelling" => {
+                    self.levelling.set(settings::levelling());
+                    self.ui.set_levelling_choice(settings::levelling());
+                    let generation = self.player.borrow().generation;
+                    self.apply_gain(generation);
+                }
+                "translate" => {
+                    self.translate.set(settings::translate());
+                    self.ui.set_translate_choice(settings::translate() as i32);
+                    self.translate_lyrics();
+                }
+                "cover-choices" => {
+                    let choices = settings::cover_choices();
+                    if choices != self.cover_choices.get() {
+                        self.cover_choices.set(choices);
+                        self.ui.set_panel_cover(choices.0);
+                        self.ui.set_wide_cover(choices.1);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if keys.iter().any(|k| k.starts_with("pin/")) {
+            *self.quick_access.borrow_mut() = tonearm_core::quick_access::QuickAccess::load();
+            self.show_quick_access();
+        }
     }
 
     /// Makes a pairing code for another device. It is shown until it runs out.

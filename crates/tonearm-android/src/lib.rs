@@ -30,6 +30,7 @@ mod profile;
 mod resume;
 mod search;
 mod settings;
+mod updates;
 pub use cast::{CastDevice, CastKind, CastState};
 pub use downloads::{DownloadMarks, DownloadProgress};
 pub use lyrics::{LyricLine, Lyrics, Syllable};

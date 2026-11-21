@@ -151,7 +151,7 @@ private fun Entries(
             is MenuAction.SongRadio -> host.play { core.playRadio(item) }
             is MenuAction.ArtistRadio -> host.play { core.playArtist(action.id, false) }
             is MenuAction.ArtistShuffle -> host.play { core.playArtist(action.id, true) }
-            is MenuAction.Like -> item.videoId?.let { id -> host.run { core.like(id); "Liked ${item.title}" } }
+            is MenuAction.Like -> item.videoId?.let { id -> host.run { core.like(id); LikeState.note(id, true); "Liked ${item.title}" } }
             is MenuAction.LikePlaying -> host.toggleLike()
             is MenuAction.Play -> host.play { core.playCollection(item, false) }
             is MenuAction.Shuffle -> host.play { core.playCollection(item, true) }

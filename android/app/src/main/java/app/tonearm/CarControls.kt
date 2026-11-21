@@ -31,9 +31,9 @@ class CarControls(private val core: Core, private val work: ListeningExecutorSer
 
     private var shuffle = false
     private var repeat = RepeatMode.OFF
-    /** Whether the song playing is liked; null until YouTube Music says. */
-    private var liked: Boolean? = null
+    /** Whether the song playing is liked, shared with the phone's own heart. */
     private var likedFor: String? = null
+    private val liked get() = LikeState.of(likedFor)
     private var shown: List<CommandButton> = emptyList()
     private var error = ""
 
@@ -131,12 +131,8 @@ class CarControls(private val core: Core, private val work: ListeningExecutorSer
             }
             LIKE -> {
                 val id = likedFor ?: return
-                val want = liked != true
-                liked = want
-                work.execute {
-                    // Back as it was if YouTube Music says no.
-                    if (runCatching { core.setLiked(id, want) }.isFailure) main.post { if (likedFor == id) liked = !want; update() }
-                }
+                // Fills at once, and goes back if YouTube Music says no.
+                work.execute { LikeState.flip(core, id); main.post { update() } }
             }
         }
         update()
@@ -150,15 +146,9 @@ class CarControls(private val core: Core, private val work: ListeningExecutorSer
             shuffle = p.shuffle
             repeat = p.repeat
             val id = core.nowPlaying()?.videoId
-            if (id != likedFor) {
-                likedFor = id
-                liked = null
-                if (id != null && core.signedIn()) {
-                    work.execute {
-                        val known = runCatching { core.isLiked(id) }.getOrNull()
-                        main.post { if (likedFor == id) { liked = known; update() } }
-                    }
-                }
+            likedFor = id
+            if (id != null && core.signedIn() && LikeState.of(id) == null) {
+                work.execute { LikeState.load(core, id); main.post { update() } }
             }
             update()
             val failed = if (p.state == PlayState.FAILED) p.error else ""

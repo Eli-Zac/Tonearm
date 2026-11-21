@@ -421,6 +421,8 @@ struct App {
     syncing: Cell<bool>,
     /// Syncs every pair now and then, while Tonearm is open.
     sync_timer: Timer,
+    /// Brings the shared settings and pins in step with the Tonearm account.
+    settings_timer: Timer,
     /// Looks for changed playlists every minute.
     check_timer: Timer,
     /// Waits a moment after a change made in Tonearm.
@@ -2288,6 +2290,7 @@ impl App {
             (added, pinned.serialize())
         };
         self.disk.run(move || quick_access::QuickAccess::save(text));
+        self.sync_settings_soon();
         self.show_quick_access();
         self.toast(if added {
             format!("Pinned {} to Quick access", item.title)
@@ -3366,6 +3369,7 @@ impl App {
         self.disk.run(move || {
             tonearm_core::settings::set_levelling(choice);
         });
+        self.sync_settings_soon();
         let generation = self.player.borrow().generation;
         self.apply_gain(generation);
     }
@@ -3429,6 +3433,7 @@ impl App {
             tonearm_core::settings::set_crossfade_choice(choice);
         });
         self.forget_plan();
+        self.sync_settings_soon();
     }
 
     /// A setting changed, so the mix into the next song is worked out again.
@@ -4034,6 +4039,7 @@ impl App {
         self.disk.run(move || {
             tonearm_core::settings::save_cover_choices(choices);
         });
+        self.sync_settings_soon();
         self.stop_canvas();
         let (title, artist, generation) = {
             let player = self.player.borrow();
@@ -4257,6 +4263,7 @@ impl App {
         self.disk.run(move || {
             tonearm_core::settings::set_translate(index as i32);
         });
+        self.sync_settings_soon();
         self.translate_lyrics();
     }
 
@@ -6016,6 +6023,7 @@ fn main() -> Result<(), slint::PlatformError> {
         spotify_copying: RefCell::default(),
         syncing: Cell::new(false),
         sync_timer: Timer::default(),
+        settings_timer: Timer::default(),
         check_timer: Timer::default(),
         soon_timer: Timer::default(),
         sync_waiting: RefCell::default(),
@@ -6241,6 +6249,7 @@ translate: Cell::new(load_translate()),
         .set_pinned(ModelRc::from(app.pinned_rows.borrow().model.clone()));
     app.show_quick_access();
     app.show_services();
+    app.start_settings_sync();
     app.ui.set_crossfade_choice(
         CROSSFADE_CHOICES
             .iter()

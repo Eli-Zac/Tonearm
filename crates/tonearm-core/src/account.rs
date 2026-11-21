@@ -308,10 +308,11 @@ pub(crate) fn call(method: &str, path: &str, token: Option<&str>, body: Option<V
 fn forget() {
     store::clear("account-token");
     store::clear("account");
+    crate::settings_sync::forget();
 }
 
 /// If the server says it lives elsewhere now, remembers that.
-fn follow_move() {
+pub(crate) fn follow_move() {
     let Ok(config) = call("GET", "/v1/config", None, None) else { return };
     let Some(host) = config["host"].as_str() else { return };
     let url = format!("https://{}", host.trim_matches('/'));

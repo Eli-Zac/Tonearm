@@ -110,6 +110,27 @@ impl Tonearm {
         Ok(account::remove_device(&id)?)
     }
 
+    /// Brings the shared settings in step with the account's. Gives the keys
+    /// that changed here (empty signed out, offline, or when nothing did).
+    /// The ones the engine holds are taken up at once. Blocks.
+    pub fn sync_settings(&self) -> Vec<String> {
+        let changed = tonearm_core::settings_sync::sync().unwrap_or_default();
+        for key in &changed {
+            match key.as_str() {
+                "crossfade" => {
+                    self.crossfade.store(tonearm_core::settings::crossfade(), std::sync::atomic::Ordering::SeqCst);
+                    self.forget_fade();
+                }
+                "levelling" => {
+                    self.levelling.store(tonearm_core::settings::levelling(), std::sync::atomic::Ordering::SeqCst);
+                    self.gained.store(0, std::sync::atomic::Ordering::SeqCst);
+                }
+                _ => {}
+            }
+        }
+        changed
+    }
+
     /// Signs this phone out of the Tonearm account.
     pub fn account_sign_out(&self) {
         account::sign_out();

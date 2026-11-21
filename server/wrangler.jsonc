@@ -8,11 +8,8 @@
   "name": "tonearm-server",
   "main": "src/index.ts",
   "compatibility_date": "2026-11-18",
-  // The old address keeps answering so installs built before the move work
-  // until they follow BASE_HOST (GET /v1/config). Drop it once they have.
   "routes": [
-    { "pattern": "api.tonearm.eli-zac.dev", "custom_domain": true },
-    { "pattern": "tonearm.eli-zac.dev", "custom_domain": true }
+    { "pattern": "api.tonearm.eli-zac.dev", "custom_domain": true }
   ],
   "d1_databases": [
     {

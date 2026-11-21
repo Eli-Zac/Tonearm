@@ -544,13 +544,16 @@ fn lastfm_call(
     params.push(("api_sig", format!("{:x}", md5::compute(signature))));
     params.push(("format", "json".into()));
     let form: Vec<(&str, &str)> = params.iter().map(|(k, v)| (*k, v.as_str())).collect();
-    let response = match http
-        .post("https://ws.audioscrobbler.com/2.0/")
-        .send_form(&form)
-    {
+    let send = |http: &ureq::Agent| http.post("https://ws.audioscrobbler.com/2.0/").send_form(&form);
+    let response = match send(http) {
         Ok(r) => r,
         Err(ureq::Error::Status(_, r)) => r,
-        Err(e) => return Err(format!("Last.fm is unreachable: {e}")),
+        // The network may have changed under a kept connection: once more on a fresh one.
+        Err(ureq::Error::Transport(_)) => match send(&crate::innertube::agent(Duration::from_secs(8))) {
+            Ok(r) => r,
+            Err(ureq::Error::Status(_, r)) => r,
+            Err(e) => return Err(format!("Last.fm is unreachable: {e}")),
+        },
     };
     let json: Value = response.into_json().map_err(|e| e.to_string())?;
     match json.get("message").and_then(Value::as_str) {

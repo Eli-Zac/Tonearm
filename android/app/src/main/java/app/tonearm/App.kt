@@ -97,30 +97,37 @@ fun App(core: Core, controller: MediaController?) {
             delay(1000)
         }
     }
+    // A newer release on the GitHub releases page: looked for at start, and said so once.
+    val appContext = LocalContext.current.applicationContext
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) { Updater.check(core, appContext) }
+        Updater.announce?.let { toast = "Tonearm $it is available. Update it in Settings."; Updater.announce = null }
+    }
+    // The shared settings follow the Tonearm account: now, then every few minutes.
+    LaunchedEffect(Unit) {
+        while (true) {
+            Prefs.syncSoon(core, wait = 0)
+            delay(5 * 60_000L)
+        }
+    }
     // Bumped when something is saved to the library or an artist followed,
     // so the library's pages load again and show it.
     var libraryEpoch by remember { mutableIntStateOf(0) }
     val now = rememberNowPlaying(controller, core)
     val playingId = now?.let { controller?.currentMediaItem?.mediaId }
     // Whether the song playing is liked: null until YouTube Music says.
-    var liked by remember { mutableStateOf<Boolean?>(null) }
+    // Shared with the notification's, the car's and the watch's heart.
+    val liked = LikeState.of(playingId)
     LaunchedEffect(playingId) {
-        liked = null
         val id = playingId ?: return@LaunchedEffect
-        liked = withContext(Dispatchers.IO) { runCatching { core.isLiked(id) }.getOrNull() }
+        withContext(Dispatchers.IO) { LikeState.load(core, id) }
     }
     // The heart: fills at once, and goes back if YouTube Music says no.
     fun flipLike() {
         val id = playingId ?: return
-        val want = liked != true
-        liked = want
         scope.launch {
-            try {
-                withContext(Dispatchers.IO) { core.setLiked(id, want) }
-            } catch (e: Exception) {
-                if (playingId == id) liked = !want
-                toast = e.message ?: "Couldn't change the like"
-            }
+            val failure = withContext(Dispatchers.IO) { LikeState.flip(core, id) }
+            if (failure != null) toast = failure.message ?: "Couldn't change the like"
         }
     }
 

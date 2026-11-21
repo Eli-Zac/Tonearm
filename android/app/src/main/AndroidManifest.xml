@@ -2,6 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Lets Tonearm hand its own update (from the GitHub releases page) to Android's installer. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <!-- Finding Cast devices on the Wi-Fi: asked for on Android 17 and up. -->
     <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
     <!-- Playing on with the app closed: a media playback service. -->
@@ -29,6 +31,11 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Android's answer to installing an update. -->
+        <receiver
+            android:name=".InstallResult"
+            android:exported="false" />
 
         <service
             android:name=".PlaybackService"

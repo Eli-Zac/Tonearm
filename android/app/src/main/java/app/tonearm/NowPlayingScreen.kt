@@ -481,7 +481,15 @@ fun Controls(now: NowPlaying, controller: MediaController, core: Core) {
         // Shuffle on the left and repeat on the right, as on the desktop,
         // each with a dot under it while on. The core mixes the queue
         // itself, so shuffle goes to it rather than through Media3.
+        // The notification's, the car's and the watch's shuffle change it
+        // too, so it follows the core.
         var shuffle by remember(core) { mutableStateOf(core.playback().shuffle) }
+        LaunchedEffect(core) {
+            while (true) {
+                shuffle = core.playback().shuffle
+                delay(500)
+            }
+        }
         ModeButton(Icons.shuffle, shuffle) {
             shuffle = !shuffle
             core.setShuffle(shuffle)

@@ -109,6 +109,19 @@ impl QuickAccess {
         }
     }
 
+    /// Adds the pin, or replaces the one for the same page.
+    pub fn put(&mut self, item: Item) {
+        match key(&item).and_then(|k| self.items.iter().position(|i| key(i) == Some(k))) {
+            Some(at) => self.items[at] = item,
+            None => self.items.push(item),
+        }
+    }
+
+    /// Removes the pin for a page.
+    pub fn remove(&mut self, id: &str) {
+        self.items.retain(|i| key(i) != Some(id));
+    }
+
     /// The list as text for `save`.
     pub fn serialize(&self) -> String {
         Value::Array(self.items.iter().map(Item::to_json).collect()).to_string()

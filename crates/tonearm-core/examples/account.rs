@@ -5,6 +5,7 @@
 //!   cargo run -p tonearm-core --example account -- <profile folder> devices
 //!   cargo run -p tonearm-core --example account -- <profile folder> start
 //!   cargo run -p tonearm-core --example account -- <profile folder> signout
+//!   ... set <key> <value> | get <key> | sync   (settings sync)
 
 use tonearm_core::{account, store};
 
@@ -72,10 +73,17 @@ fn main() {
             }
             Err(e) => println!("failed: {e}"),
         },
+        "set" => {
+            // set <key> <value>: writes a synced setting, as the app would.
+            let _ = store::save(arg(2), arg(3));
+            println!("set {}", arg(2));
+        }
+        "get" => println!("{} = {:?}", arg(2), store::load(arg(2))),
+        "sync" => println!("{:?}", tonearm_core::settings_sync::sync()),
         "signout" => {
             account::sign_out();
             println!("signed out");
         }
-        _ => println!("pair <code> | devices | start | signout"),
+        _ => println!("pair <code> | devices | start | set <key> <value> | get <key> | sync | signout"),
     }
 }

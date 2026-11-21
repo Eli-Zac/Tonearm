@@ -59,6 +59,18 @@ object Prefs {
         private set
     fun changed() { version++ }
 
+    /** Brings the shared settings in step with the Tonearm account a moment
+     *  from now (so a change just made is saved first), and redraws what
+     *  they changed. Does nothing signed out. */
+    fun syncSoon(core: Core, wait: Long = 1500) {
+        scope.launch {
+            delay(wait)
+            if (runCatching { core.syncSettings() }.getOrDefault(emptyList()).isNotEmpty()) {
+                withContext(Dispatchers.Main) { changed() }
+            }
+        }
+    }
+
     /** Work that outlives the page it started on, as linking Last.fm. */
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     /** The note above Connections, as the desktop's services-note. */
@@ -242,13 +254,37 @@ private fun RootPage(core: Core, onOpen: (String) -> Unit) {
         onOpen(SettingsPages.storage)
     }
     val context = LocalContext.current
-    val version = remember {
-        runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }.getOrNull() ?: ""
-    }
+    val version = remember { Updater.current(context) }
+    val scope = rememberCoroutineScope()
     Card {
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Title("Tonearm $version", size = 16.sp)
-            Dim("Updates come from the GitHub releases page.", 14.sp, lines = 4)
+            val state = Updater.state
+            val found = Updater.available
+            // The card keeps its height whatever it says.
+            Dim(
+                when {
+                    state is Updater.State.Failed -> state.message
+                    state is Updater.State.Checking -> "Checking for updates…"
+                    state is Updater.State.Downloading -> "Downloading Tonearm $found…"
+                    state is Updater.State.Installing -> "Installing Tonearm $found…"
+                    found != null -> "Tonearm $found is available."
+                    else -> "Updates come from the GitHub releases page."
+                },
+                14.sp,
+                lines = 4,
+            )
+            val busy = state is Updater.State.Checking || state is Updater.State.Downloading || state is Updater.State.Installing
+            Spacer(Modifier.height(6.dp))
+            if (found != null) {
+                PillButton(if (busy) "Updating…" else "Update to $found", primary = true) {
+                    if (!busy) scope.launch(Dispatchers.IO) { Updater.install(core, context) }
+                }
+            } else {
+                PillButton(if (busy) "Checking…" else "Check for updates") {
+                    if (!busy) scope.launch(Dispatchers.IO) { Updater.check(core, context, quiet = false) }
+                }
+            }
         }
     }
 }
@@ -349,7 +385,10 @@ private fun PlaybackPage(core: Core) {
             "As a song ends, the next one fades in while it fades out. Skipping a song still switches at once.",
             Modifier.padding(20.dp),
         ) {
-            Dropdown(remember { core.crossfadeChoices() }, "Crossfade") { core.setCrossfade(it.toUInt()) }
+            Dropdown(remember(Prefs.version) { core.crossfadeChoices() }, "Crossfade") {
+                core.setCrossfade(it.toUInt())
+                Prefs.syncSoon(core)
+            }
         }
     }
     Card {
@@ -358,7 +397,10 @@ private fun PlaybackPage(core: Core) {
             "Plays every song at about the same loudness, using YouTube's own measure of each one. Loud also lifts quiet songs a little.",
             Modifier.padding(20.dp),
         ) {
-            Dropdown(remember { core.levellingChoices() }, "Volume levelling") { core.setLevelling(it.toUInt()) }
+            Dropdown(remember(Prefs.version) { core.levellingChoices() }, "Volume levelling") {
+                core.setLevelling(it.toUInt())
+                Prefs.syncSoon(core)
+            }
         }
     }
 }
@@ -371,9 +413,10 @@ private fun CustomizationPage(core: Core) {
             "What Now playing shows for the cover. Animated cover is the album's moving cover from Apple Music, when it has one. Without a clip, the still cover shows.",
             Modifier.padding(20.dp),
         ) {
-            Dropdown(remember { core.coverChoices() }, "Now playing cover") {
+            Dropdown(remember(Prefs.version) { core.coverChoices() }, "Now playing cover") {
                 core.setCover(it.toUInt())
                 Prefs.changed()
+                Prefs.syncSoon(core)
             }
         }
     }
@@ -383,9 +426,10 @@ private fun CustomizationPage(core: Core) {
             "Shows a translation under each line of lyrics. The lyrics' own translation is used when they have one, and Google Translate otherwise.",
             Modifier.padding(20.dp),
         ) {
-            Dropdown(remember { core.translateChoices() }, "Translate lyrics") {
+            Dropdown(remember(Prefs.version) { core.translateChoices() }, "Translate lyrics") {
                 core.setTranslate(it.toUInt())
                 Prefs.changed()
+                Prefs.syncSoon(core)
             }
         }
     }

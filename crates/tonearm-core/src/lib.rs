@@ -33,6 +33,7 @@ pub mod resolver;
 pub mod services;
 pub mod session;
 pub mod settings;
+pub mod settings_sync;
 pub mod spotify;
 pub mod spotify_token;
 pub mod store;

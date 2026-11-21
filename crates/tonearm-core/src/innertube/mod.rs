@@ -38,7 +38,9 @@ struct Auth {
 }
 
 pub struct Client {
-    agent: ureq::Agent,
+    /// Replaced when a request fails to connect: after a change of network
+    /// its pooled connections are dead, and the first page would fail on them.
+    agent: RwLock<ureq::Agent>,
     auth: RwLock<Option<Auth>>,
 }
 
@@ -146,7 +148,7 @@ pub fn normalize_cookie(raw: &str) -> Option<String> {
 impl Client {
     pub fn new() -> Self {
         Client {
-            agent: agent(Duration::from_secs(20)),
+            agent: RwLock::new(agent(Duration::from_secs(20))),
             auth: RwLock::new(None),
         }
     }
@@ -170,13 +172,34 @@ impl Client {
         self.auth.read().unwrap().is_some()
     }
 
-    pub fn post(&self, endpoint: &str, mut body: Value) -> Result<Value, String> {
+    fn http(&self) -> ureq::Agent {
+        self.agent.read().unwrap().clone()
+    }
+
+    /// Starts over with no pooled connections.
+    fn reset_http(&self) {
+        *self.agent.write().unwrap() = agent(Duration::from_secs(20));
+    }
+
+    pub fn post(&self, endpoint: &str, body: Value) -> Result<Value, String> {
+        match self.post_once(endpoint, body.clone()) {
+            // The network may have changed under a kept connection: once more
+            // on a fresh one before giving up.
+            Err(e) if e.starts_with("Network error") => {
+                self.reset_http();
+                self.post_once(endpoint, body)
+            }
+            result => result,
+        }
+    }
+
+    fn post_once(&self, endpoint: &str, mut body: Value) -> Result<Value, String> {
         body["context"] = json!({"client": {
             "clientName": "WEB_REMIX", "clientVersion": CLIENT_VERSION, "hl": "en"
         }});
         let url = format!("{BASE}{endpoint}?prettyPrint=false");
         let mut request = self
-            .agent
+            .http()
             .post(&url)
             .set("User-Agent", USER_AGENT)
             .set("Origin", ORIGIN)
@@ -221,7 +244,7 @@ impl Client {
             .pointer("/playbackTracking/videostatsPlaybackUrl/baseUrl")
             .and_then(Value::as_str)
             .ok_or("YouTube Music gave no address to record the play at")?;
-        self.agent
+        self.http()
             .get(url)
             .query("ver", "2")
             .query("c", "WEB_REMIX")
@@ -439,7 +462,7 @@ impl Client {
             }},
         });
         let response: Value = self
-            .agent
+            .http()
             .post("https://www.youtube.com/youtubei/v1/player?prettyPrint=false")
             .send_json(body)
             .map_err(|e| format!("Network error: {e}"))?

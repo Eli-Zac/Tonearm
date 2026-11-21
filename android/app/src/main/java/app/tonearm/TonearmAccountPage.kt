@@ -125,7 +125,7 @@ private fun SignedOut(core: Core, onToast: (String) -> Unit, onSignedIn: (Tonear
                         scope.launch {
                             val signed = attempt(onToast) { core.accountSignIn(email.trim(), code) }
                             busy = false
-                            if (signed != null) onSignedIn(signed)
+                            if (signed != null) { onSignedIn(signed); Prefs.syncSoon(core, wait = 0) }
                         }
                     }
                     PillButton("Send again") {
@@ -157,7 +157,7 @@ private fun SignedOut(core: Core, onToast: (String) -> Unit, onSignedIn: (Tonear
                     scope.launch {
                         val signed = attempt(onToast) { core.accountPairClaim(pairCode) }
                         busy = false
-                        if (signed != null) onSignedIn(signed)
+                        if (signed != null) { onSignedIn(signed); Prefs.syncSoon(core, wait = 0) }
                     }
                 }
                 PillButton("Scan a QR code") {
@@ -176,7 +176,7 @@ private fun SignedOut(core: Core, onToast: (String) -> Unit, onSignedIn: (Tonear
                                 scope.launch {
                                     val signed = attempt(onToast) { core.accountPairClaim(code) }
                                     busy = false
-                                    if (signed != null) onSignedIn(signed)
+                                    if (signed != null) { onSignedIn(signed); Prefs.syncSoon(core, wait = 0) }
                                 }
                             }
                         }
