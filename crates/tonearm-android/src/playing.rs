@@ -182,10 +182,10 @@ impl Tonearm {
             seconds
         };
         if offline::saved_file(&playing).is_some() {
-            tonearm_core::analysis::request(&playing);
+            tonearm_core::analysis::request_at(&playing, tonearm_core::analysis::Priority::Playing);
         }
         if offline::saved_file(&video_id).is_some() {
-            tonearm_core::analysis::request(&video_id);
+            tonearm_core::analysis::request_at(&video_id, tonearm_core::analysis::Priority::Next);
         }
         let out = tonearm_core::library::analysis(&playing);
         let inn = tonearm_core::library::analysis(&video_id);

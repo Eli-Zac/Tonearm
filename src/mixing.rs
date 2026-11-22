@@ -190,6 +190,7 @@ impl App {
                     crate::analysis::Progress::Idle => 3,
                 }
             };
+            let fraction = if state == 1 { crate::analysis::fraction(video_id) } else { 0.0 };
             let next = songs.get(n + 1).and_then(|(_, i)| i.video_id.as_deref());
             // Out of mix mode the labels stay, so the rows can close the
             // gap under them smoothly rather than all at once.
@@ -207,6 +208,7 @@ impl App {
                 && data.camelot.as_str() == camelot
                 && data.mix.as_str() == mix
                 && data.analysis == state
+                && (data.analysis_progress - fraction).abs() < 0.005
             {
                 continue;
             }
@@ -215,6 +217,7 @@ impl App {
             data.camelot = camelot.into();
             data.mix = mix.into();
             data.analysis = state;
+            data.analysis_progress = fraction;
             rows.set_row_data(*row, data);
         }
         // Suggestions under the playlist: tempo and key too, but no chip.
@@ -263,18 +266,39 @@ impl App {
                     crate::analysis::Progress::Idle => 3,
                 }
             };
-            if data.bpm.as_str() == bpm && data.camelot.as_str() == camelot && data.analysis == state {
+            let fraction = if state == 1 { crate::analysis::fraction(&video_id) } else { 0.0 };
+            if data.bpm.as_str() == bpm
+                && data.camelot.as_str() == camelot
+                && data.analysis == state
+                && (data.analysis_progress - fraction).abs() < 0.005
+            {
                 continue;
             }
             data.key_color = key_color(&camelot);
             data.bpm = bpm.into();
             data.camelot = camelot.into();
             data.analysis = state;
+            data.analysis_progress = fraction;
             rows.set_row_data(row, data);
         }
     }
 
     // ---------------------------------------------------------------- editor
+
+    /// Hovering a queued or not yet analyzed song offers this: analyzes it
+    /// before anything else waiting. A song not on this computer has its
+    /// sound fetched first.
+    pub fn analyse_now(self: &Rc<Self>, id: usize) {
+        let Some(video_id) = self.page.borrow().items.get(id).and_then(|i| i.video_id.clone()) else {
+            return;
+        };
+        if crate::offline::saved_file(&video_id).is_some() {
+            crate::analysis::request_at(&video_id, crate::analysis::Priority::Now);
+        } else {
+            self.analyze_now(video_id);
+        }
+        self.refresh_mix_rows();
+    }
 
     /// The chip under a song: edits the transition into the song after it.
     pub fn edit_mix(self: &Rc<Self>, id: usize) {

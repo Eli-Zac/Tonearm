@@ -48,7 +48,11 @@ impl App {
                 .header
                 .as_ref()
                 .is_some_and(|h| h.kind == PageKind::Playlist && h.editable && h.playlist_id.is_some());
-            if !own || page.continuation.is_some() || page.recommend.is_some() {
+            // Still more to come: a next chunk waiting, or already asked for.
+            // Asking takes the token off the page, so a list sorted while it
+            // loads looks complete for a moment, and a section made then
+            // would sit in the middle with the rest of the songs after it.
+            if !own || page.continuation.is_some() || page.loading_more || page.recommend.is_some() {
                 return;
             }
         }
@@ -223,6 +227,29 @@ impl App {
                 Ok(()) => app.toast(format!("Added {} to this playlist", item.title)),
                 Err(message) => app.toast(message),
             });
+        });
+    }
+
+    /// Fetches one song's sound at once, for the analyzer to take before
+    /// anything else waiting.
+    pub fn analyze_now(&self, video_id: String) {
+        let Some(resolver) = self.resolver.clone() else {
+            return;
+        };
+        if crate::library::has_analysis(&video_id) {
+            return;
+        }
+        fetching().insert(video_id.clone());
+        let _ = std::thread::Builder::new().name("analyse-now".into()).spawn(move || {
+            let bytes = resolver
+                .resolve(&video_id)
+                .and_then(|stream| crate::audio::fetch_all(&stream.url, &stream.headers));
+            match bytes {
+                Ok(bytes) => crate::analysis::submit_at(&video_id, &bytes, crate::analysis::Priority::Now),
+                Err(message) => eprintln!("analyse now {video_id}: {message}"),
+            }
+            fetching().remove(&video_id);
+            on_ui(|app| app.refresh_mix_rows());
         });
     }
 

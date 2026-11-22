@@ -2968,7 +2968,7 @@ impl App {
         self.load_canvas(&item.title, &artist, generation);
         self.load_credits(item.video_id.clone(), generation);
         if let Some(video_id) = &item.video_id {
-            analysis::request(video_id);
+            analysis::request_at(video_id, analysis::Priority::Playing);
         }
         self.show_sound();
         if matches!(ui.get_panel(), 2 | 3) {
@@ -3471,6 +3471,13 @@ impl App {
         }
     }
 
+    /// The analyzer got a little further with a song.
+    fn analysis_step(&self) {
+        if self.ui.get_header().mixing {
+            self.refresh_mix_rows();
+        }
+    }
+
     /// The analyzer finished a song, or gave up on it.
     fn analysis_ready(&self, video_id: &str) {
         self.unanalyzed.borrow_mut().remove(video_id);
@@ -3730,7 +3737,7 @@ impl App {
             armed: false,
         });
         if let Some(path) = offline::local_file(&video_id) {
-            analysis::request(&video_id);
+            analysis::request_at(&video_id, analysis::Priority::Next);
             self.audio.prepare(audio::Input::File(path), token);
             return;
         }
@@ -6084,6 +6091,7 @@ translate: Cell::new(load_translate()),
     analysis::listen(|event| {
         on_ui(move |app| match event {
             analysis::Event::Started(id) => app.analysis_started(&id),
+            analysis::Event::Step(_) => app.analysis_step(),
             analysis::Event::Ready(id) => app.analysis_ready(&id),
         })
     });
@@ -6221,6 +6229,7 @@ translate: Cell::new(load_translate()),
     on!(on_toggle_mix, |app| app.toggle_mix());
     on!(on_download_page, |app| app.download_page());
     on!(on_edit_mix, |app, id| app.edit_mix(id as usize));
+    on!(on_analyse_now, |app, id| app.analyse_now(id as usize));
     on!(on_preview_mix, |app, id| app.preview_row_mix(id as usize));
     on!(on_mix_preview, |app| app.preview_editing());
     on!(on_mix_preset_picked, |app, i| app.mix_preset_picked(i as usize));

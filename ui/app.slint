@@ -105,6 +105,8 @@ export struct RowData {
     // Mix mode: 0 tempo and key known, 1 being analyzed, 2 waiting its
     // turn, 3 not on this computer yet, so analyzed once it plays.
     analysis: int,
+    // How far along the analysis is, 0 to 1, while it is being analyzed.
+    analysis-progress: float,
 }
 
 // The top of a detail page.
@@ -2017,6 +2019,9 @@ component SongRow inherits Rectangle {
     // How open the gap under the row is, 0 to 1, as mix mode turns on or off.
     in property <float> mix-level;
     in property <int> analysis;
+    in property <float> analysis-progress;
+    // The Analyse now button on a song that is queued or not yet analyzed.
+    callback analyse-now;
     // A suggestion: an Add button where the length would be.
     in property <bool> addable;
     callback add;
@@ -2221,29 +2226,44 @@ component SongRow inherits Rectangle {
             vertical-alignment: center;
         }
         // Not known yet: the tempo and key columns say why, as one.
-        if root.mixing && root.analysis != 0: HorizontalLayout {
+        if root.mixing && root.analysis != 0: Rectangle {
             width: 52px + 12px + 44px;
-            spacing: 6px;
-            if root.analysis == 1: Rectangle {
-                width: 22px;
-                for dot[i] in 3: Rectangle {
-                    x: i * 8px;
-                    y: (parent.height - self.height) / 2;
-                    width: 5px;
-                    height: 5px;
-                    border-radius: 2.5px;
-                    background: Theme.accent;
-                    // Each dot pulses a third of a turn after the last.
-                    opacity: 0.25 + 0.75 * max(0, sin((animation-tick() / 1s) * 360deg - i * 120deg));
-                }
+            // Queued or not yet analyzed: hovering offers to do it now. The
+            // label and the button take the same room, so nothing moves.
+            analyse-area := TouchArea {
+                enabled: root.analysis >= 2;
+                mouse-cursor: root.analysis >= 2 ? MouseCursor.pointer : MouseCursor.default;
+                clicked => { root.analyse-now(); }
             }
             Text {
-                text: root.analysis == 1 ? "Analysing" : root.analysis == 2 ? "Queued" : "After a play";
-                color: root.analysis == 1 ? Theme.text : Theme.faint;
+                x: 0;
+                width: parent.width;
+                height: parent.height;
+                text: root.analysis == 1 ? "Analysing " + round(root.analysis-progress * 100) + "%"
+                    : analyse-area.has-hover ? "Analyse now"
+                    : root.analysis == 2 ? "Queued" : "After a play";
+                color: root.analysis == 1 ? Theme.text : analyse-area.has-hover ? Theme.accent : Theme.faint;
                 font-size: 13px;
-                font-italic: root.analysis == 3;
+                font-italic: root.analysis == 3 && !analyse-area.has-hover;
                 vertical-alignment: center;
                 overflow: elide;
+            }
+            // The bar along the bottom of the cell while it is being analyzed.
+            if root.analysis == 1: Rectangle {
+                x: 0;
+                y: parent.height - 7px;
+                width: parent.width;
+                height: 3px;
+                border-radius: 1.5px;
+                background: Theme.faint.with-alpha(0.25);
+                Rectangle {
+                    x: 0;
+                    width: parent.width * clamp(root.analysis-progress, 0, 1);
+                    height: parent.height;
+                    border-radius: 1.5px;
+                    background: Theme.accent;
+                    animate width { duration: 350ms; easing: ease-out; }
+                }
             }
         }
         if root.mixing && root.analysis == 0: VerticalLayout {
@@ -4804,6 +4824,7 @@ export component AppWindow inherits Window {
     // The download button on a page's hero.
     callback download-page();
     callback edit-mix(int);
+    callback analyse-now(int);
     // Plays a song's end into the next through its transition.
     callback preview-mix(int);
     // The editor's play button: the same, with the choices on screen.
@@ -5871,6 +5892,8 @@ export component AppWindow inherits Window {
                                 mix-label: row.mix;
                                 mix-level: row.style >= 2 ? root.mix-level : 0;
                                 analysis: row.analysis;
+                                analysis-progress: row.analysis-progress;
+                                analyse-now => { root.analyse-now(row.item.id); }
                                 edit-mix => { root.edit-mix(row.item.id); }
                                 preview-mix => { root.preview-mix(row.item.id); }
                                 activated => { root.item-activated(row.item.id); }
