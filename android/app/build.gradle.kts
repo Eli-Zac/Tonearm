@@ -16,9 +16,9 @@ android {
         minSdk = 26
         targetSdk = 37
         // A release build gets both from the tag (see .github/workflows/android.yml):
-        // -PversionName=0.11.0 -PversionCode=1100.
+        // -PversionName=0.11.1 -PversionCode=1101.
         versionCode = (project.findProperty("versionCode") as String?)?.toInt() ?: 1
-        versionName = (project.findProperty("versionName") as String?) ?: "0.11.0"
+        versionName = (project.findProperty("versionName") as String?) ?: "0.11.1"
     }
 
     // The release key lives in the environment, never in the repository:
