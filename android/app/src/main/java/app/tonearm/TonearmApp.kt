@@ -11,6 +11,8 @@ import uniffi.tonearm_android.Tonearm
 class TonearmApp : Application() {
     val core: Tonearm by lazy {
         TonearmNative.init(this)
+        // Before the core starts: it finds Discord's library already loaded.
+        DiscordHost.install(this)
         Tonearm(filesDir.absolutePath).also {
             // How the account's device list names this phone: the name the
             // user gave it in Settings, and its make and model.

@@ -19,6 +19,45 @@ extern "C" {
     fn dlsym(handle: *mut c_void, name: *const u8) -> *mut c_void;
 }
 
+#[link(name = "log")]
+extern "C" {
+    fn __android_log_write(priority: i32, tag: *const u8, text: *const u8) -> i32;
+}
+
+/// Writes a line to logcat under the tag `TonearmDiscord`, at info priority.
+fn log(line: &str) {
+    let mut text: Vec<u8> = line.bytes().filter(|b| *b != 0).collect();
+    text.push(0);
+    // SAFETY: both strings are NUL terminated and outlive the call.
+    unsafe { __android_log_write(4, b"TonearmDiscord\0".as_ptr(), text.as_ptr()) };
+}
+
+/// The loaded API, for the callbacks the SDK makes with no context of ours.
+static API: std::sync::OnceLock<Api> = std::sync::OnceLock::new();
+
+/// The SDK's own log lines.
+unsafe extern "C" fn on_log(message: Text, severity: i32, _: *mut c_void) {
+    // SAFETY: the SDK gives UTF-8 bytes and their length, valid for the call.
+    let bytes = unsafe { std::slice::from_raw_parts(message.ptr, message.size) };
+    log(&format!("sdk[{severity}] {}", String::from_utf8_lossy(bytes)));
+}
+
+/// The connection to the Discord app changing.
+unsafe extern "C" fn on_status(status: i32, error: i32, detail: i32, _: *mut c_void) {
+    log(&format!("status {status} error {error} detail {detail}"));
+}
+
+/// How an update of the presence went. Only a failure is worth a line.
+unsafe extern "C" fn on_result(result: Obj, _: *mut c_void) {
+    if let Some(api) = API.get() {
+        // SAFETY: `result` is valid for the call.
+        let (ok, code) = unsafe { ((api.ClientResult_Successful)(result), (api.ClientResult_ErrorCode)(result)) };
+        if !ok {
+            log(&format!("update failed, code {code}"));
+        }
+    }
+}
+
 /// Every SDK object is one pointer wide and opaque to us.
 #[repr(C)]
 struct Object {
@@ -82,7 +121,28 @@ api! {
     Client_Drop: unsafe extern "C" fn(Obj),
     Client_SetApplicationId: unsafe extern "C" fn(Obj, u64),
     Client_ClearRichPresence: unsafe extern "C" fn(Obj),
-    Client_UpdateRichPresence: unsafe extern "C" fn(Obj, Obj, *const c_void, *const c_void, *mut c_void),
+    Client_UpdateRichPresence: unsafe extern "C" fn(
+        Obj,
+        Obj,
+        Option<unsafe extern "C" fn(Obj, *mut c_void)>,
+        *const c_void,
+        *mut c_void,
+    ),
+    Client_AddLogCallback: unsafe extern "C" fn(
+        Obj,
+        unsafe extern "C" fn(Text, i32, *mut c_void),
+        *const c_void,
+        *mut c_void,
+        i32,
+    ),
+    Client_SetStatusChangedCallback: unsafe extern "C" fn(
+        Obj,
+        unsafe extern "C" fn(i32, i32, i32, *mut c_void),
+        *const c_void,
+        *mut c_void,
+    ),
+    ClientResult_Successful: unsafe extern "C" fn(Obj) -> bool,
+    ClientResult_ErrorCode: unsafe extern "C" fn(Obj) -> i32,
     Activity_Init: unsafe extern "C" fn(Obj),
     Activity_Drop: unsafe extern "C" fn(Obj),
     // The one setter that takes its text by value, not by pointer.
@@ -121,8 +181,12 @@ impl Discord {
         // SAFETY: `client` is a fresh object that Client_Init fills in.
         unsafe {
             (api.Client_Init)(&mut *client);
+            (api.Client_AddLogCallback)(&mut *client, on_log, std::ptr::null(), std::ptr::null_mut(), 2);
+            (api.Client_SetStatusChangedCallback)(&mut *client, on_status, std::ptr::null(), std::ptr::null_mut());
             (api.Client_SetApplicationId)(&mut *client, id);
         }
+        let _ = API.set(api);
+        log("connected the client");
         Some(Discord { api, client })
     }
 
@@ -173,13 +237,7 @@ impl Discord {
                 (api.ActivityAssets_Drop)(&mut assets);
             }
 
-            (api.Client_UpdateRichPresence)(
-                client,
-                &mut activity,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-            );
+            (api.Client_UpdateRichPresence)(client, &mut activity, Some(on_result), std::ptr::null(), std::ptr::null_mut());
             (api.Activity_Drop)(&mut activity);
         }
         Some(())
