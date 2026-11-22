@@ -1,15 +1,15 @@
 //! Time synced lyrics.
 //!
-//! We ask the same public services the BitChord client asks, in the same
-//! order, and stop at the first one that has the track:
+//! We ask a few public services, in this order, and stop at the first one
+//! that has the track:
 //!
 //! 1. lrc.red, syllable timed TTML filed by ISRC
 //! 2. BetterLyrics, the same kind of TTML matched on title and artist
 //! 3. LRCLIB, whole line timings
 //! 4. YouTube Music's own Lyrics tab, plain text
 //!
-//! BitChord also asks LyricsPlus. Its community mirrors were down when we
-//! built this, so it is not wired in yet.
+//! LyricsPlus is another such service. Its community mirrors were down when
+//! we built this, so it is not wired in yet.
 
 use crate::innertube::{agent, Client};
 use serde_json::Value;

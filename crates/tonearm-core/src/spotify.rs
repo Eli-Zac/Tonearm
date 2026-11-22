@@ -7,8 +7,7 @@
 //! web player itself asks: its GraphQL endpoint, "pathfinder", where each
 //! query is named and known by a hash. When Spotify changes a query its
 //! hash stops working, the library says so, and the hashes below need
-//! updating from the web player. (BitChord, another YouTube Music client,
-//! showed the way.)
+//! updating from the web player.
 //!
 //! Tonearm plays from YouTube Music, so each song is then matched to its
 //! YouTube Music song (see `find`), and the matches are kept on disk so a
