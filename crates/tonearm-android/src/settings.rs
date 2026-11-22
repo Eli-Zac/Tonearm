@@ -50,6 +50,12 @@ pub struct Connections {
     pub spotify_linked: bool,
     /// The sp_dc cookie of a Spotify web sign in is set.
     pub canvas_linked: bool,
+    /// Discord shows what is playing.
+    pub discord_on: bool,
+    /// This build has a Discord application of its own.
+    pub discord_builtin: bool,
+    /// What Discord shows after "Listening to": 0 the artist, 1 the song, 2 Tonearm.
+    pub discord_status: u32,
 }
 
 /// The song cache sizes Settings offers, as the desktop's dropdown.
@@ -176,7 +182,47 @@ impl Tonearm {
             spotify_secret: s.spotify_secret.clone(),
             spotify_linked: !s.spotify_id.is_empty() && !s.spotify_secret.is_empty(),
             canvas_linked: !s.spotify_cookie.is_empty(),
+            discord_on: !s.discord_id().is_empty(),
+            discord_builtin: !services::DISCORD_APP.is_empty(),
+            discord_status: match s.discord_status.as_str() {
+                "song" => 1,
+                "app" => 2,
+                _ => 0,
+            },
         }
+    }
+
+    /// Turns Discord on or off. `app` is the user's own application ID, for
+    /// a build without one of its own, and is ignored when turning off.
+    pub fn discord_toggle(&self, app: String) -> Result<(), TonearmError> {
+        {
+            let mut s = self.service_settings.lock().unwrap();
+            if s.discord_id().is_empty() {
+                let app = app.trim().to_string();
+                if services::DISCORD_APP.is_empty() && app.parse::<u64>().is_err() {
+                    return Err("Enter your Discord application ID first.".to_string().into());
+                }
+                s.discord_on = "1".into();
+                s.discord_app = if services::DISCORD_APP.is_empty() { app } else { String::new() };
+            } else {
+                s.discord_on.clear();
+                s.discord_app.clear();
+            }
+        }
+        self.apply_services();
+        Ok(())
+    }
+
+    /// Picks what Discord shows after "Listening to": 0 the artist, 1 the
+    /// song, 2 Tonearm.
+    pub fn set_discord_status(&self, choice: u32) {
+        self.service_settings.lock().unwrap().discord_status = match choice {
+            1 => "song",
+            2 => "app",
+            _ => "artist",
+        }
+        .to_string();
+        self.apply_services();
     }
 
     /// Starts linking Last.fm: gives the page to open, where the user

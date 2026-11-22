@@ -41,6 +41,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val core = (application as TonearmApp).core
+        // Loads Discord's native library and gives it the activity it binds
+        // to the Discord app with. The core then finds the library loaded.
+        com.discord.socialsdk.DiscordSocialSdkInit.setEngineActivity(this)
         // Light status bar icons on the dark background.
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),

@@ -88,6 +88,7 @@ object SettingsPages {
     const val youtube = "tonearm:settings/youtube"
     const val spotify = "tonearm:settings/spotify"
     const val lastfm = "tonearm:settings/lastfm"
+    const val discord = "tonearm:settings/discord"
     const val playback = "tonearm:settings/playback"
     const val customization = "tonearm:settings/customization"
     const val storage = "tonearm:settings/storage"
@@ -100,6 +101,7 @@ object SettingsPages {
 private val brandYouTube = Color(0xFFFF0000)
 internal val brandLastfm = Color(0xFFD51007)
 internal val brandSpotify = Color(0xFF1DB954)
+private val brandDiscord = Color(0xFF5865F2)
 private val card = Color(0x0AFFFFFF)
 private val pressedCard = Color(0x14FFFFFF)
 
@@ -128,6 +130,7 @@ fun SettingsScreen(
                 SettingsPages.youtube -> "YouTube Music"
                 SettingsPages.spotify -> "Spotify"
                 SettingsPages.lastfm -> "Last.fm"
+                SettingsPages.discord -> "Discord"
                 SettingsPages.playback -> "Playback"
                 SettingsPages.customization -> "Customization"
                 SettingsPages.storage -> "Storage and history"
@@ -141,6 +144,7 @@ fun SettingsScreen(
                 SettingsPages.youtube -> AccountPage(core, onOpen)
                 SettingsPages.spotify -> ConnectionsPage(core, onOpen, spotify = true)
                 SettingsPages.lastfm -> ConnectionsPage(core, onOpen, spotify = false)
+                SettingsPages.discord -> DiscordPage(core)
                 SettingsPages.playback -> PlaybackPage(core)
                 SettingsPages.customization -> CustomizationPage(core)
                 SettingsPages.storage -> StoragePage(core, onToast)
@@ -236,11 +240,16 @@ private fun AccountsPage(core: Core, onOpen: (String) -> Unit) {
         logo = R.drawable.logo_lastfm,
         brand = brandLastfm,
     ) { onOpen(SettingsPages.lastfm) }
+    SubpageRow(
+        title = "Discord",
+        subtitle = if (connections.discordOn) "On" else "Off",
+        logo = R.drawable.logo_discord,
+        brand = brandDiscord,
+    ) { onOpen(SettingsPages.discord) }
 }
 
 @Composable
 private fun RootPage(core: Core, onOpen: (String) -> Unit) {
-    // Discord stays on the desktop, which it has to be running beside.
     SubpageRow(title = "Accounts", subtitle = "Tonearm, YouTube Music, Spotify and Last.fm", icon = Icons.artist) {
         onOpen(SettingsPages.accounts)
     }
@@ -570,6 +579,64 @@ private fun ConnectionsPage(core: Core, onOpen: (String) -> Unit, spotify: Boole
                 shown = core.connections()
             },
         )
+    }
+}
+
+/** Discord Rich Presence. It needs no sign in here: the Discord app on this
+ *  phone shows what Tonearm tells it. */
+@Composable
+private fun DiscordPage(core: Core) {
+    val context = LocalContext.current
+    var shown by remember { mutableStateOf(core.connections()) }
+    val c = shown
+    var appId by remember { mutableStateOf("") }
+    // Discord has to be on the phone, and signed in, for anything to show.
+    val installed = remember {
+        runCatching { context.packageManager.getPackageInfo("com.discord", 0); true }.getOrDefault(false)
+    }
+    Section(
+        title = "Discord",
+        logo = R.drawable.logo_discord,
+        brand = brandDiscord,
+        about = "Shows what you are listening to on your Discord profile. It needs the Discord app on this phone, signed in." +
+            if (c.discordBuiltin) "" else " This build has no Discord application of its own. Enter an application ID from discord.com/developers, with the Social SDK enabled.",
+    ) {
+        if (!c.discordBuiltin && !c.discordOn) {
+            Field(appId, { appId = it }, "Discord application ID")
+        }
+        AccountRow(
+            linked = c.discordOn,
+            title = if (c.discordOn) "On" else "Off",
+            subtitle = when {
+                !installed -> "The Discord app is not installed on this phone."
+                c.discordOn -> "Your status shows from the next song."
+                else -> "Turn on to show your songs on Discord."
+            },
+            linkText = "Turn on",
+            unlinkText = "Turn off",
+            onLink = {
+                try {
+                    core.discordToggle(appId)
+                } catch (e: Exception) {
+                    Prefs.servicesNote = e.message ?: "Couldn't turn Discord on"
+                }
+                shown = core.connections()
+            },
+            onUnlink = {
+                core.discordToggle("")
+                Prefs.servicesNote = "Discord is off"
+                shown = core.connections()
+            },
+        )
+        SettingRow(
+            "Listening to",
+            "What Discord repeats after Listening to in the member list.",
+        ) {
+            ChoiceDropdown("Listening to", listOf("Artist", "Song", "Tonearm"), c.discordStatus.toInt()) {
+                core.setDiscordStatus(it.toUInt())
+                shown = core.connections()
+            }
+        }
     }
 }
 

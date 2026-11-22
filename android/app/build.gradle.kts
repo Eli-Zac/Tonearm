@@ -19,6 +19,11 @@ android {
         // -PversionName=0.12.0 -PversionCode=1200.
         versionCode = (project.findProperty("versionCode") as String?)?.toInt() ?: 1
         versionName = (project.findProperty("versionName") as String?) ?: "0.12.0"
+        // The core is built for these two. Discord's SDK also carries 32-bit
+        // libraries, which would otherwise ship without a core beside them.
+        ndk {
+            abiFilters += listOf("arm64-v8a", "x86_64")
+        }
     }
 
     // The release key lives in the environment, never in the repository:
@@ -98,4 +103,7 @@ dependencies {
     // Scans a pairing QR code in Google's own scanner screen, so Tonearm
     // needs no camera permission.
     implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
+    // Discord's Social SDK, for Rich Presence through the Discord app. Its
+    // notices are in libs/DISCORD-SDK-NOTICES.txt.
+    implementation(files("libs/discord_partner_sdk.aar"))
 }

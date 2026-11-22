@@ -9,6 +9,7 @@
 //! most Last.fm libraries already hold.
 
 use serde_json::{json, Value};
+#[cfg(not(target_os = "android"))]
 use std::io::{Read, Write};
 use std::sync::mpsc::{channel, Sender};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -177,8 +178,19 @@ impl Services {
                     current: None,
                     started: 0,
                 };
+                #[cfg(not(target_os = "android"))]
                 for event in rx {
                     worker.handle(event);
+                }
+                // The Discord SDK on Android runs its callbacks when asked.
+                #[cfg(target_os = "android")]
+                loop {
+                    match rx.recv_timeout(Duration::from_millis(250)) {
+                        Ok(event) => worker.handle(event),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                    worker.idle();
                 }
             })
             .expect("cannot start the services thread");
@@ -371,34 +383,43 @@ impl Worker {
             "song" => 2,
             _ => 1,
         };
-        let activity = self.current.as_ref().zip(self.showing).map(|(m, start)| {
-            let mut activity = json!({
-                "type": 2,
-                "status_display_type": display,
-                "details": pad(&m.title),
-                "state": pad(&m.artist),
-                "timestamps": {"start": start * 1000},
-            });
-            if m.seconds > 0.0 {
-                activity["timestamps"]["end"] = json!((start + m.seconds as u64) * 1000);
-            }
-            if m.art.starts_with("https://") {
-                activity["assets"] = json!({"large_image": m.art});
-                if !m.album.is_empty() {
-                    activity["assets"]["large_text"] = json!(pad(&m.album));
-                }
-            }
-            activity
+        let presence = self.current.as_ref().zip(self.showing).map(|(m, start)| Presence {
+            title: pad(&m.title),
+            artist: pad(&m.artist),
+            album: if m.album.is_empty() { String::new() } else { pad(&m.album) },
+            art: if m.art.starts_with("https://") { m.art.clone() } else { String::new() },
+            start,
+            end: (m.seconds > 0.0).then(|| start + m.seconds as u64),
+            display,
         });
-        let frame = json!({
-            "cmd": "SET_ACTIVITY",
-            "args": {"pid": std::process::id(), "activity": activity},
-            "nonce": unix_now().to_string(),
-        });
-        if discord.send(1, &frame).is_none() {
+        if discord.set(presence.as_ref()).is_none() {
             self.discord = None; // Discord closed. We reconnect on the next track.
         }
     }
+
+    /// Gives the Discord SDK on Android its turn to run callbacks.
+    #[cfg(target_os = "android")]
+    fn idle(&mut self) {
+        if let Some(discord) = &self.discord {
+            discord.run_callbacks();
+        }
+    }
+}
+
+/// What Discord shows, whichever way it gets there.
+pub(crate) struct Presence {
+    pub title: String,
+    pub artist: String,
+    /// Empty when the album is not known.
+    pub album: String,
+    /// An https cover URL, or empty for none.
+    pub art: String,
+    /// Unix seconds.
+    pub start: u64,
+    pub end: Option<u64>,
+    /// 0 repeats the application name in the member list, 1 the state
+    /// line (the artist), 2 the details line (the song).
+    pub display: u8,
 }
 
 /// Discord rejects text shorter than two characters.
@@ -613,18 +634,54 @@ pub fn open_browser(url: &str) {
 
 // ---------------------------------------------------------------- Discord
 
+#[cfg(target_os = "android")]
+use crate::discord_android::Discord;
+
 /// Discord's local IPC. A frame is an opcode, a length, then JSON.
+#[cfg(not(target_os = "android"))]
 struct Discord(Box<dyn ReadWrite>);
 
+#[cfg(not(target_os = "android"))]
 trait ReadWrite: Read + Write + Send {}
+#[cfg(not(target_os = "android"))]
 impl<T: Read + Write + Send> ReadWrite for T {}
 
+#[cfg(not(target_os = "android"))]
 impl Discord {
     fn connect(app: &str) -> Option<Self> {
         let pipe = (0..10).find_map(open_pipe)?;
         let mut discord = Discord(pipe);
         discord.send(0, &json!({"v": 1, "client_id": app}))?;
         Some(discord)
+    }
+
+    /// Shows the track, or clears the status when `presence` is None.
+    fn set(&mut self, presence: Option<&Presence>) -> Option<()> {
+        let activity = presence.map(|p| {
+            let mut activity = json!({
+                "type": 2,
+                "status_display_type": p.display,
+                "details": p.title,
+                "state": p.artist,
+                "timestamps": {"start": p.start * 1000},
+            });
+            if let Some(end) = p.end {
+                activity["timestamps"]["end"] = json!(end * 1000);
+            }
+            if !p.art.is_empty() {
+                activity["assets"] = json!({"large_image": p.art});
+                if !p.album.is_empty() {
+                    activity["assets"]["large_text"] = json!(p.album);
+                }
+            }
+            activity
+        });
+        let frame = json!({
+            "cmd": "SET_ACTIVITY",
+            "args": {"pid": std::process::id(), "activity": activity},
+            "nonce": unix_now().to_string(),
+        });
+        self.send(1, &frame)
     }
 
     /// Writes one frame and reads the reply, which keeps the pipe drained.
@@ -645,7 +702,7 @@ impl Discord {
     }
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, not(target_os = "android")))]
 fn open_pipe(index: u32) -> Option<Box<dyn ReadWrite>> {
     let path = format!(r"\\.\pipe\discord-ipc-{index}");
     let file = std::fs::OpenOptions::new()
@@ -656,7 +713,7 @@ fn open_pipe(index: u32) -> Option<Box<dyn ReadWrite>> {
     Some(Box::new(file))
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "android")))]
 fn open_pipe(index: u32) -> Option<Box<dyn ReadWrite>> {
     let folder = std::env::var("XDG_RUNTIME_DIR")
         .or_else(|_| std::env::var("TMPDIR"))

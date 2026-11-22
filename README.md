@@ -153,6 +153,10 @@ Release builds carry Tonearm's own Discord application and Last.fm keys,
 so you only press Connect. Discord needs no sign in. Last.fm opens a page
 in your browser where you approve Tonearm.
 
+On Android, Discord is under Settings, Accounts. It uses Discord's Social
+SDK (`android/app/libs`, with its notices beside it), so the Discord app
+must be installed and signed in on the phone.
+
 Spotify is optional, and needs a client ID and client secret of your own
 from developer.spotify.com. With them, Tonearm looks each track up on
 Spotify and reports Spotify's title, artist and album to Last.fm and

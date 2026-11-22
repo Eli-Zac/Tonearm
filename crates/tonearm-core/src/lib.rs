@@ -32,6 +32,8 @@ pub mod queue;
 pub mod quick_access;
 pub mod releases;
 pub mod resolver;
+#[cfg(target_os = "android")]
+mod discord_android;
 pub mod services;
 pub mod session;
 pub mod settings;
