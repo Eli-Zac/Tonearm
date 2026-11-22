@@ -391,11 +391,24 @@ private fun PlaybackPage(core: Core) {
     Card {
         SettingRow(
             "Crossfade",
-            "As a song ends, the next one fades in while it fades out. Skipping a song still switches at once.",
+            "As a song ends, the next one fades in while it fades out.",
             Modifier.padding(20.dp),
         ) {
             Dropdown(remember(Prefs.version) { core.crossfadeChoices() }, "Crossfade") {
                 core.setCrossfade(it.toUInt())
+                Prefs.syncSoon(core)
+            }
+        }
+    }
+    Card {
+        SettingRow(
+            "Crossfade when you change songs",
+            "Skipping, going back or playing another song fades into it over the crossfade length, instead of switching at once. Needs a crossfade length above.",
+            Modifier.padding(20.dp),
+        ) {
+            val on = remember(Prefs.version) { core.crossfadeManual() }
+            ChoiceDropdown("Crossfade when you change songs", listOf("Off", "On"), if (on) 1 else 0) {
+                core.setCrossfadeManual(it == 1)
                 Prefs.syncSoon(core)
             }
         }

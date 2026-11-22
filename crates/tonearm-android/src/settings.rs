@@ -102,6 +102,17 @@ impl Tonearm {
         self.forget_fade();
     }
 
+    /// Whether a song changed by hand (skip, previous, another picked to
+    /// play) crossfades with the length above, rather than cutting.
+    pub fn crossfade_manual(&self) -> bool {
+        self.crossfade_manual.load(Ordering::SeqCst)
+    }
+
+    pub fn set_crossfade_manual(&self, on: bool) {
+        core::set_crossfade_manual(on);
+        self.crossfade_manual.store(on, Ordering::SeqCst);
+    }
+
     pub fn levelling_choices(&self) -> Choices {
         choices(&core::LEVELLING_NAMES, self.levelling.load(Ordering::SeqCst) as usize)
     }

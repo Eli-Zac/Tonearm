@@ -158,6 +158,8 @@ pub struct Tonearm {
     /// Crossfade length in seconds, zero for off, and the levelling choice,
     /// as saved in Settings.
     crossfade: AtomicU32,
+    /// Songs changed by hand crossfade too, not only where one ends.
+    crossfade_manual: AtomicBool,
     /// The current queue came from a playlist with mix mode on.
     mix_mode: AtomicBool,
     /// Settings and timing for an editor preview queue.
@@ -253,6 +255,7 @@ impl Tonearm {
             recent: Mutex::new(None),
             translated: Mutex::new(HashMap::new()),
             crossfade: AtomicU32::new(tonearm_core::settings::crossfade()),
+            crossfade_manual: AtomicBool::new(tonearm_core::settings::crossfade_manual()),
             mix_mode: AtomicBool::new(false),
             preview_mix: Mutex::new(None),
             playlist_origin: Mutex::new(None),
@@ -977,6 +980,9 @@ impl Tonearm {
             .filter(|(id, _)| *id == song.video_id)
             .map(|(_, ms)| ms);
         self.note.lock().unwrap().clear();
+        // A song changed by hand while another plays crossfades into it,
+        // when Settings say so. Not a song put back, which has a place.
+        let fade = if start.is_some() { None } else { self.manual_fade_seconds() };
         self.loading.store(true, Ordering::SeqCst);
         // A downloaded or cached copy needs no link and no network, so a
         // download plays with no connection at all.
@@ -1007,6 +1013,15 @@ impl Tonearm {
                     }
                 }
             }
+        };
+        let input = match fade {
+            Some(seconds) => match self.fade_into(input, seconds, request) {
+                playing::Faded::Done | playing::Faded::Superseded => return Ok(()),
+                // It could not mix (the old song ran out, or the new one
+                // would not open in time): it starts the plain way.
+                playing::Faded::Cut(input) => input,
+            },
+            None => input,
         };
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         // A seek held for the last song is not this one's place.

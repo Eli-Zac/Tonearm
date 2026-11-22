@@ -276,6 +276,16 @@ struct FadeNext {
     armed: bool,
 }
 
+/// A song chosen by hand, being opened in the background to crossfade into.
+struct HandFade {
+    /// Names it to the audio engine: the same token `fade_next` holds.
+    token: u64,
+    /// Its place in the queue.
+    index: usize,
+    /// When it was asked for, to give up on it and cut instead.
+    since: Instant,
+}
+
 /// The mix from one song into the next, and the settings it came from.
 struct Planned {
     from: String,
@@ -457,6 +467,10 @@ struct App {
     play_hold: audio::PlayHold,
     /// Seconds a song crossfades into the next one over. Zero is off.
     crossfade: Cell<u32>,
+    /// Songs changed by hand crossfade too, not only where one ends.
+    crossfade_manual: Cell<bool>,
+    /// The song chosen by hand that is being opened to crossfade into.
+    hand_fade: RefCell<Option<HandFade>>,
     /// Songs' analyses read from the library, by video id.
     analyses: RefCell<HashMap<String, Rc<analysis::Analysis>>>,
     /// Songs looked for in the library and not found, so the next tick does
@@ -2819,7 +2833,110 @@ impl App {
         });
     }
 
+    /// Plays the song at `index`. While another song plays and Settings say
+    /// so, it crossfades into it as a mix at a song's end does; otherwise it
+    /// starts at once.
     fn play_index(self: &Rc<Self>, index: usize) {
+        if !self.fade_to_index(index) {
+            self.start_index(index);
+        }
+    }
+
+    /// Begins opening the song at `index` to crossfade into. False when it
+    /// should simply start: the setting is off, nothing is playing, too
+    /// little of the playing song is left to fade, or it is the song playing.
+    fn fade_to_index(self: &Rc<Self>, index: usize) -> bool {
+        let seconds = self.crossfade.get() as f32;
+        if !self.crossfade_manual.get() || seconds <= 0.0 {
+            return false;
+        }
+        let status = &self.audio.status;
+        if status.state.load(Ordering::SeqCst) != audio::PLAYING {
+            return false;
+        }
+        let duration = status.duration_ms.load(Ordering::SeqCst) as f32 / 1000.0;
+        let left = duration - status.position_ms.load(Ordering::SeqCst) as f32 / 1000.0;
+        if duration <= 0.0 || left < SHORTEST_FADE {
+            return false;
+        }
+        let (video_id, generation) = {
+            let player = self.player.borrow();
+            let Some(item) = player.queue.get(index) else {
+                return false;
+            };
+            if index == player.index {
+                return false;
+            }
+            let Some(id) = item.video_id.clone() else {
+                return false;
+            };
+            // A song put back from last time starts where it was left.
+            if player.resume_at.as_ref().is_some_and(|(at, _)| *at == id) {
+                return false;
+            }
+            (id, player.generation)
+        };
+        // A song armed to follow would start in this one's place.
+        if self.fade_next.borrow().as_ref().is_some_and(|n| n.armed) {
+            self.audio.unfollow();
+        }
+        self.prepare_next(generation, index, video_id);
+        *self.hand_fade.borrow_mut() = Some(HandFade {
+            token: self.fade_token.get(),
+            index,
+            since: Instant::now(),
+        });
+        true
+    }
+
+    /// Mixes into the song chosen by hand once it has opened, or gives up on
+    /// it and starts it the plain way. Returns whether the player moved on.
+    fn hand_fade_check(self: &Rc<Self>) -> bool {
+        let pending = self.hand_fade.borrow().as_ref().map(|h| (h.token, h.index, h.since));
+        let Some((token, index, since)) = pending else {
+            return false;
+        };
+        let status = &self.audio.status;
+        if status.prepared.load(Ordering::SeqCst) != token {
+            if since.elapsed() > Duration::from_secs(8) {
+                self.hand_fade.borrow_mut().take();
+                self.fade_next.borrow_mut().take();
+                self.start_index(index);
+                return true;
+            }
+            return false;
+        }
+        self.hand_fade.borrow_mut().take();
+        // The playing song went on meanwhile: what is left of it now.
+        let duration = status.duration_ms.load(Ordering::SeqCst) as f32 / 1000.0;
+        let left = duration - status.position_ms.load(Ordering::SeqCst) as f32 / 1000.0;
+        if duration <= 0.0 || left < SHORTEST_FADE {
+            self.fade_next.borrow_mut().take();
+            self.start_index(index);
+            return true;
+        }
+        let seconds = (self.crossfade.get() as f32).min(left);
+        let plan = transition::plan(
+            transition::Settings::auto(None, None, false),
+            None,
+            duration as f64,
+            None,
+            seconds as f64,
+        );
+        let next_duration = self
+            .fade_next
+            .borrow()
+            .as_ref()
+            .filter(|n| n.token == token)
+            .map_or(0.0, |n| n.duration);
+        self.crossfade_into(index, token, plan, next_duration);
+        true
+    }
+
+    /// Starts the song at `index` at once, in place of the one playing.
+    fn start_index(self: &Rc<Self>, index: usize) {
+        // Any song being opened to fade into was for the last choice.
+        self.hand_fade.borrow_mut().take();
         let Some((item, generation, near_end)) = self.show_track(index) else {
             return;
         };
@@ -3433,6 +3550,15 @@ impl App {
             tonearm_core::settings::set_crossfade_choice(choice);
         });
         self.forget_plan();
+        self.sync_settings_soon();
+    }
+
+    fn set_crossfade_manual_choice(&self, choice: i32) {
+        let on = choice == 1;
+        self.crossfade_manual.set(on);
+        self.disk.run(move || {
+            tonearm_core::settings::set_crossfade_manual(on);
+        });
         self.sync_settings_soon();
     }
 
@@ -4621,8 +4747,17 @@ impl App {
                 }
                 _ => {}
             }
-            if playing && self.crossfade_check(generation, duration) {
-                return;
+            if playing {
+                // A song chosen by hand is opened first and mixed into when
+                // ready; the end of the song can't also pick the next one.
+                let moved = if self.hand_fade.borrow().is_some() {
+                    self.hand_fade_check()
+                } else {
+                    self.crossfade_check(generation, duration)
+                };
+                if moved {
+                    return;
+                }
             }
             // The audio thread reports position ten times a second. Between
             // reports we run our own clock so lyrics move smoothly.
@@ -6049,6 +6184,8 @@ fn main() -> Result<(), slint::PlatformError> {
         seek_hold: audio::SeekHold::default(),
         play_hold: audio::PlayHold::default(),
         crossfade: Cell::new(load_crossfade()),
+        crossfade_manual: Cell::new(tonearm_core::settings::crossfade_manual()),
+        hand_fade: RefCell::new(None),
         analyses: RefCell::new(HashMap::new()),
         unanalyzed: RefCell::new(HashSet::new()),
         planned: RefCell::new(None),
@@ -6218,6 +6355,7 @@ translate: Cell::new(load_translate()),
     on!(on_cache_choice_changed, |app, choice| app.set_cache_choice(choice));
     on!(on_clear_cache, |app| app.clear_cache());
     on!(on_crossfade_choice_changed, |app, choice| app.set_crossfade_choice(choice));
+    on!(on_crossfade_manual_choice_changed, |app, choice| app.set_crossfade_manual_choice(choice));
     on!(on_panel_cover_changed, |app, choice| {
         let wide = app.cover_choices.get().1;
         app.set_cover_choice(choice, wide);
@@ -6265,6 +6403,7 @@ translate: Cell::new(load_translate()),
             .position(|&c| c == app.crossfade.get())
             .unwrap_or(0) as i32,
     );
+    app.ui.set_crossfade_manual_choice(i32::from(app.crossfade_manual.get()));
     app.ui.set_translate_choice(app.translate.get() as i32);
     app.ui.set_levelling_choice(app.levelling.get());
     let (panel_cover, wide_cover) = app.cover_choices.get();

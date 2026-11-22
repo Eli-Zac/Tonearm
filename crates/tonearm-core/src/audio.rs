@@ -38,6 +38,7 @@ pub const ENDED: u32 = 4;
 pub const FAILED: u32 = 5;
 
 /// Where a track's bytes come from.
+#[derive(Clone)]
 pub enum Input {
     /// Streamed over HTTP. With a video id, a download that finishes is
     /// kept in the offline cache.

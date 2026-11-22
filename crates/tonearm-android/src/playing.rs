@@ -27,6 +27,36 @@ const MIX_LEAD: f32 = 0.5;
 /// A fade shorter than this, left after a late start, is not worth it.
 const SHORTEST_FADE: f32 = 0.5;
 
+#[cfg(target_os = "android")]
+#[link(name = "log")]
+extern "C" {
+    fn __android_log_write(priority: i32, tag: *const u8, text: *const u8) -> i32;
+}
+
+/// A line in logcat under the tag `Tonearm`, for what a skip did. Nothing
+/// off Android, where the bindings are generated.
+fn log(line: &str) {
+    #[cfg(target_os = "android")]
+    {
+        let mut text: Vec<u8> = line.bytes().filter(|b| *b != 0).collect();
+        text.push(0);
+        // SAFETY: both strings are NUL terminated and outlive the call.
+        unsafe { __android_log_write(4, b"Tonearm\0".as_ptr(), text.as_ptr()) };
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = line;
+}
+
+/// How a song chosen by hand got on.
+pub(crate) enum Faded {
+    /// The old song is mixing into it.
+    Done,
+    /// A newer request took over.
+    Superseded,
+    /// No mix: start it the plain way. Gives the input back.
+    Cut(audio::Input),
+}
+
 /// The song opened ahead, to crossfade or follow into.
 pub(crate) struct FadeNext {
     /// Names it to the audio engine.
@@ -159,6 +189,72 @@ impl Tonearm {
         let plan = transition::plan(settings, None, duration as f64, None, left.min(seconds) as f64);
         self.fade.lock().unwrap().take();
         self.mix_into(token, index, plan);
+    }
+
+    /// How long a song started by hand crossfades from the one playing, in
+    /// seconds, or None when it should simply start: the setting is off, the
+    /// crossfade is off, nothing is playing, or too little of the old song is
+    /// left to fade. A short song left shortens the fade to what it has.
+    pub(crate) fn manual_fade_seconds(&self) -> Option<f32> {
+        if !self.crossfade_manual.load(Ordering::SeqCst) {
+            return None;
+        }
+        let seconds = self.crossfade.load(Ordering::SeqCst) as f32;
+        let status = &self.audio.status;
+        if seconds <= 0.0 || status.state.load(Ordering::SeqCst) != audio::PLAYING {
+            return None;
+        }
+        let duration = status.duration_ms.load(Ordering::SeqCst) as f32 / 1000.0;
+        let left = duration - status.position_ms.load(Ordering::SeqCst) as f32 / 1000.0;
+        (duration > 0.0 && left >= SHORTEST_FADE).then(|| seconds.min(left))
+    }
+
+    /// Opens `input` in the background and mixes the playing song into it,
+    /// as a song chosen by hand does. The queue has already moved to it.
+    /// Waits for it to open, but gives way to a newer request.
+    pub(crate) fn fade_into(&self, input: audio::Input, seconds: f32, request: u64) -> Faded {
+        // A song armed to follow would start in this one's place.
+        if self.fade.lock().unwrap().take().is_some_and(|n| n.armed) {
+            self.audio.unfollow();
+        }
+        let token = self.fade_token.fetch_add(1, Ordering::SeqCst) + 1;
+        self.audio.prepare(input.clone(), token);
+        let status = &self.audio.status;
+        let waited = std::time::Instant::now();
+        while status.prepared.load(Ordering::SeqCst) != token {
+            if self.request.load(Ordering::SeqCst) != request {
+                log("manual fade: superseded by a newer request");
+                return Faded::Superseded;
+            }
+            if waited.elapsed() > std::time::Duration::from_secs(8) {
+                log("manual fade: the song did not open in time, cutting");
+                return Faded::Cut(input);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(40));
+        }
+        // The old song went on playing meanwhile: what is left of it now.
+        let duration = status.duration_ms.load(Ordering::SeqCst) as f32 / 1000.0;
+        let left = duration - status.position_ms.load(Ordering::SeqCst) as f32 / 1000.0;
+        if status.state.load(Ordering::SeqCst) != audio::PLAYING || duration <= 0.0 || left < SHORTEST_FADE {
+            log("manual fade: nothing left of the old song, cutting");
+            return Faded::Cut(input);
+        }
+        let seconds = seconds.min(left);
+        log(&format!(
+            "manual fade: mixing over {seconds:.1} s, opened in {} ms, {left:.1} s of the old song left",
+            waited.elapsed().as_millis()
+        ));
+        let plan = transition::plan(
+            transition::Settings::auto(None, None, false),
+            None,
+            duration as f64,
+            None,
+            seconds as f64,
+        );
+        let index = self.queue.lock().unwrap().index();
+        self.mix_into(token, index, plan);
+        self.loading.store(false, Ordering::SeqCst);
+        Faded::Done
     }
 
     /// Plays the saved or automatic transition for a mixed playlist.

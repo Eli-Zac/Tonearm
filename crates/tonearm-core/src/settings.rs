@@ -30,6 +30,17 @@ pub fn set_crossfade_choice(choice: i32) -> u32 {
     seconds
 }
 
+/// Whether a song changed by hand (skip, previous, picking another to play)
+/// crossfades with the length above rather than cutting. Off when not saved.
+pub fn crossfade_manual() -> bool {
+    store::load("crossfade-manual").is_some_and(|text| text.trim() == "1")
+}
+
+/// Saves whether songs changed by hand crossfade.
+pub fn set_crossfade_manual(on: bool) {
+    let _ = store::save("crossfade-manual", if on { "1" } else { "0" });
+}
+
 /// Volume levelling choices in Settings: the loudness each aims for, in
 /// LKFS, and how far it may lift a quiet song, in dB. Off is first.
 pub const LEVELLING: [(f32, f32); 4] = [(0.0, 0.0), (-19.0, 0.0), (-14.0, 0.0), (-11.0, 4.0)];

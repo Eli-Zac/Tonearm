@@ -17,7 +17,7 @@ use std::sync::Mutex;
 
 /// Settings kept in the store under their own name, the same on desktop and
 /// phone. Things about one device (close to tray, menu collapsed) stay out.
-const KEYS: [&str; 4] = ["crossfade", "levelling", "translate", "cover-choices"];
+const KEYS: [&str; 5] = ["crossfade", "crossfade-manual", "levelling", "translate", "cover-choices"];
 /// A pin is the key `pin/<page id>` holding the item as JSON.
 const PIN: &str = "pin/";
 const STATE: &str = "sync-state";

@@ -121,6 +121,10 @@ impl Tonearm {
                     self.crossfade.store(tonearm_core::settings::crossfade(), std::sync::atomic::Ordering::SeqCst);
                     self.forget_fade();
                 }
+                "crossfade-manual" => {
+                    self.crossfade_manual
+                        .store(tonearm_core::settings::crossfade_manual(), std::sync::atomic::Ordering::SeqCst);
+                }
                 "levelling" => {
                     self.levelling.store(tonearm_core::settings::levelling(), std::sync::atomic::Ordering::SeqCst);
                     self.gained.store(0, std::sync::atomic::Ordering::SeqCst);

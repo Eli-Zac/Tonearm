@@ -24,7 +24,8 @@ over plain HTTPS, so they start fast and stay small in memory.
 * Your library, liked songs and playlists, once you sign in
 * A queue you can drag to reorder, radio, smart shuffle, and autoplay when
   the queue runs out
-* Crossfade, volume levelling and a sleep timer
+* Crossfade, which can also apply when you skip or pick another song,
+  volume levelling and a sleep timer
 * Casting to Chromecasts, Google TVs, Nest speakers and speaker groups,
   with mixes and crossfades intact
 * Synced lyrics, timed by the syllable where the source allows, with duet

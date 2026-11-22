@@ -5311,6 +5311,9 @@ export component AppWindow inherits Window {
     // Index into the crossfade lengths: off, 1, 2, 3, 4, 6, 8, 10, 12 s.
     in-out property <int> crossfade-choice: 0;
     callback crossfade-choice-changed(int);
+    // 0 off, 1 on: songs changed by hand crossfade with that length too.
+    in-out property <int> crossfade-manual-choice: 0;
+    callback crossfade-manual-choice-changed(int);
     // What each view shows for the cover. Panel: Spotify Canvas, Animated
     // cover or Static cover. Expanded: Animated cover or Static cover.
     in-out property <int> panel-cover: 1;
@@ -6556,11 +6559,28 @@ export component AppWindow inherits Window {
                             padding: 20px;
                             SettingRow {
                                 title: "Crossfade";
-                                subtitle: "As a song ends, the next one fades in while it fades out. Skipping a song still switches at once.";
+                                subtitle: "As a song ends, the next one fades in while it fades out.";
                                 Dropdown {
                                     options: ["Off", "1 s", "2 s", "3 s", "4 s", "6 s", "8 s", "10 s", "12 s"];
                                     selected <=> root.crossfade-choice;
                                     changed(i) => { root.crossfade-choice-changed(i); }
+                                }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        max-width: 880px;
+                        border-radius: 12px;
+                        background: #ffffff0a;
+                        HorizontalLayout {
+                            padding: 20px;
+                            SettingRow {
+                                title: "Crossfade when you change songs";
+                                subtitle: "Skipping, going back or playing another song fades into it over the crossfade length, instead of switching at once. Needs a crossfade length above.";
+                                Dropdown {
+                                    options: ["Off", "On"];
+                                    selected <=> root.crossfade-manual-choice;
+                                    changed(i) => { root.crossfade-manual-choice-changed(i); }
                                 }
                             }
                         }

@@ -189,6 +189,10 @@ impl App {
                     self.ui.set_crossfade_choice(settings::crossfade_choice() as i32);
                     self.forget_plan();
                 }
+                "crossfade-manual" => {
+                    self.crossfade_manual.set(settings::crossfade_manual());
+                    self.ui.set_crossfade_manual_choice(i32::from(settings::crossfade_manual()));
+                }
                 "levelling" => {
                     self.levelling.set(settings::levelling());
                     self.ui.set_levelling_choice(settings::levelling());
