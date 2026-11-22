@@ -184,6 +184,8 @@ impl Discord {
             (api.Client_AddLogCallback)(&mut *client, on_log, std::ptr::null(), std::ptr::null_mut(), 2);
             (api.Client_SetStatusChangedCallback)(&mut *client, on_status, std::ptr::null(), std::ptr::null_mut());
             (api.Client_SetApplicationId)(&mut *client, id);
+            // Start from nothing, whatever an earlier run left behind.
+            (api.Client_ClearRichPresence)(&mut *client);
         }
         let _ = API.set(api);
         log("connected the client");

@@ -213,6 +213,15 @@ impl Tonearm {
         Ok(())
     }
 
+    /// Clears what Discord shows, for when playback is being shut down: the
+    /// status would otherwise stay on the last song. Waits a moment for the
+    /// clear to reach the Discord app before the process can end.
+    pub fn end_presence(&self) {
+        *self.presence.lock().unwrap() = (None, std::time::Instant::now());
+        self.services.send(services::Event::Stopped);
+        std::thread::sleep(std::time::Duration::from_millis(400));
+    }
+
     /// Picks what Discord shows after "Listening to": 0 the artist, 1 the
     /// song, 2 Tonearm.
     pub fn set_discord_status(&self, choice: u32) {

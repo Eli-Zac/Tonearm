@@ -180,6 +180,10 @@ pub struct Tonearm {
     lastfm_token: Mutex<String>,
     /// How long the song playing has played, for scrobbling and history.
     listen: Mutex<listen::Listen>,
+    /// What Discord was last told, so it can be kept true: the start it was
+    /// given for the song (Unix seconds; None while it shows nothing), and
+    /// when that was.
+    presence: Mutex<(Option<u64>, std::time::Instant)>,
     /// What was played and opened, kept on the phone.
     taste: Mutex<history::History>,
     /// The account signed in, once asked for.
@@ -261,6 +265,7 @@ impl Tonearm {
             service_settings: Mutex::new(service_settings),
             lastfm_token: Mutex::new(String::new()),
             listen: Mutex::new(listen::Listen::default()),
+            presence: Mutex::new((None, std::time::Instant::now())),
             taste: Mutex::new(history::History::load()),
             account: Mutex::new(None),
             resume_at: Mutex::new(None),

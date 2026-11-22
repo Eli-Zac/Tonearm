@@ -9,6 +9,14 @@ use std::sync::Arc;
 use tonearm_core::listen::Moment;
 use tonearm_core::{audio, history, offline, services, transition};
 
+/// Now, in Unix seconds, as Discord's timer counts.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// How long before the fade the next song starts opening. Its link and
 /// first bytes can take a while to come.
 const PREPARE_AHEAD: f32 = 30.0;
@@ -367,6 +375,12 @@ impl Tonearm {
                         seconds,
                         art: song.cover.clone(),
                     }));
+                    // Discord has the song as starting now. If it is not at
+                    // its top, `keep_presence_true` corrects that at once.
+                    let long_ago = std::time::Instant::now()
+                        .checked_sub(std::time::Duration::from_secs(60))
+                        .unwrap_or_else(std::time::Instant::now);
+                    *self.presence.lock().unwrap() = (Some(unix_now()), long_ago);
                 }
                 Moment::Scrobble => self.services.send(services::Event::Scrobble),
                 Moment::Counted => {
@@ -384,12 +398,41 @@ impl Tonearm {
                         });
                     }
                 }
-                Moment::Paused => self.services.send(services::Event::Paused),
+                Moment::Paused => {
+                    self.services.send(services::Event::Paused);
+                    *self.presence.lock().unwrap() = (None, std::time::Instant::now());
+                }
                 Moment::Resumed => {
                     let position = self.audio.status.position_ms.load(Ordering::SeqCst) as f32 / 1000.0;
                     self.services.send(services::Event::Resumed { position });
+                    *self.presence.lock().unwrap() =
+                        (Some(unix_now().saturating_sub(position as u64)), std::time::Instant::now());
                 }
             }
+        }
+        self.keep_presence_true(playing);
+    }
+
+    /// Keeps what Discord shows true to what is playing, whatever happened
+    /// since it was last told: a seek, a stall, a song begun partway in, or
+    /// a pause or end that was missed. Discord is only told when it is wrong,
+    /// and no more than once in two seconds, as it limits how often a status
+    /// may change.
+    fn keep_presence_true(&self, playing: bool) {
+        let mut shown = self.presence.lock().unwrap();
+        if !playing {
+            if shown.0.take().is_some() {
+                self.services.send(services::Event::Paused);
+                shown.1 = std::time::Instant::now();
+            }
+            return;
+        }
+        let position = self.audio.status.position_ms.load(Ordering::SeqCst) as f32 / 1000.0;
+        let start = unix_now().saturating_sub(position as u64);
+        let wrong = shown.0.map_or(true, |s| s.abs_diff(start) > 2);
+        if wrong && shown.1.elapsed() >= std::time::Duration::from_secs(2) {
+            self.services.send(services::Event::Resumed { position });
+            *shown = (Some(start), std::time::Instant::now());
         }
     }
 

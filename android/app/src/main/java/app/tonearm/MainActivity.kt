@@ -11,8 +11,10 @@ import androidx.core.content.ContextCompat
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -20,7 +22,10 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.media3.common.MediaMetadata
@@ -31,6 +36,8 @@ import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.MoreExecutors
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 @UnstableApi
 class MainActivity : ComponentActivity() {
@@ -139,16 +146,40 @@ fun rememberNowPlaying(controller: MediaController?, core: uniffi.tonearm_androi
 }
 
 /** The song playing, in an island above the tabs, as on the desktop.
- *  Tapping it opens Now Playing. */
+ *  Tapping it opens Now Playing. Swiping it left skips to the next song and
+ *  right goes back to the one before, as the buttons do. */
 @Composable
 fun MiniPlayer(now: NowPlaying, controller: MediaController, onOpen: () -> Unit) {
     val progress = if (now.duration > 0) (now.position.toFloat() / now.duration).coerceIn(0f, 1f) else 0f
+    // How far the island has been dragged. It follows the finger, then
+    // springs back; a long enough drag also skips.
+    val drag = remember { Animatable(0f) }
+    val scope = rememberCoroutineScope()
+    val reach = with(LocalDensity.current) { 56.dp.toPx() }
     Column(
         Modifier
             .padding(horizontal = 8.dp, vertical = 6.dp)
+            .offset { IntOffset(drag.value.roundToInt(), 0) }
             .fillMaxWidth()
             .clip(RoundedCornerShape(Tonearm.radius))
             .background(Tonearm.island)
+            .pointerInput(controller) {
+                detectHorizontalDragGestures(
+                    onDragStart = { scope.launch { drag.stop() } },
+                    onDragEnd = {
+                        val moved = drag.value
+                        if (moved <= -reach) controller.seekToNext()
+                        else if (moved >= reach) controller.seekToPrevious()
+                        scope.launch { drag.animateTo(0f) }
+                    },
+                    onDragCancel = { scope.launch { drag.animateTo(0f) } },
+                    onHorizontalDrag = { change, amount ->
+                        change.consume()
+                        // Resists a little: it is a nudge, not a slide away.
+                        scope.launch { drag.snapTo(drag.value + amount * 0.6f) }
+                    },
+                )
+            }
             .clickable(onClick = onOpen),
     ) {
         Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {

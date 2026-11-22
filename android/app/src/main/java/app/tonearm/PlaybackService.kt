@@ -250,6 +250,8 @@ class PlaybackService : MediaLibraryService() {
     }
 
     override fun onDestroy() {
+        // Discord would keep showing the last song otherwise.
+        runCatching { (application as TonearmApp).core.endPresence() }
         devices?.let { (getSystemService(AUDIO_SERVICE) as AudioManager).unregisterAudioDeviceCallback(it) }
         devices = null
         controls?.stop()
