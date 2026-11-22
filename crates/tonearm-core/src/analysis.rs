@@ -17,15 +17,16 @@
 //! 6. Bars: the beat in four where the bass hits and the chords change.
 //! 7. Key: the song's pitch classes against the Krumhansl key profiles.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Sender};
 use std::sync::{Mutex, OnceLock};
 
 /// What the analyzer tells the app. Sent from its thread.
 pub enum Event {
     /// It started on a song.
     Started(String),
+    /// It got a little further with a song: see `fraction`.
+    Step(String),
     /// It finished a song, or gave up on it.
     Ready(String),
 }
@@ -37,8 +38,15 @@ pub fn listen(listener: impl Fn(Event) + Send + Sync + 'static) {
     EVENTS.set(listener);
 }
 
-/// Bump when the analysis changes, so every song is worked out again.
-pub const ANALYZER_VERSION: u32 = 3;
+/// Bump when the analysis changes, so every song is worked out again. 4 is
+/// the analysis with its bar starts from the neural network, so only a build
+/// that has the network makes it. One without (the phone's) makes 3, and
+/// counts a 4 from elsewhere as done.
+pub const ANALYZER_VERSION: u32 = if cfg!(feature = "beat-model") { 4 } else { 3 };
+/// The oldest analysis still used for mixing, until the song is analyzed
+/// again. Version 4 added bar starts from a neural network, where before
+/// they were guessed from the rhythm, and wrong now and then.
+pub const OLDEST_USABLE: u32 = 3;
 
 /// The rate analysis runs at, about. The real one depends on the song.
 const TARGET_RATE: f32 = 11_025.0;
@@ -51,6 +59,9 @@ const CHROMA_HOP: usize = 1024;
 /// Tempos looked for, in BPM.
 const SLOWEST: f32 = 60.0;
 const FASTEST: f32 = 200.0;
+/// A stretch of a steady song whose fitted tempo is within this share of
+/// the song's is taken to have the song's tempo.
+const STEADY_TEMPO: f64 = 0.04;
 /// A beat more than this far off the grid, in seconds, is off it.
 const ON_GRID: f32 = 0.035;
 /// Spectral flux peaks this many seconds before the hit that causes it,
@@ -183,13 +194,28 @@ impl Analysis {
         if near.len() >= 8 {
             (a, beat) = fit(&near)?;
         }
+        let on_grid = |a: f64, beat: f64| {
+            picked.iter().filter(|(k, t)| (t - (a + beat * k)).abs() < ON_GRID as f64).count()
+        };
+        let mut on = on_grid(a, beat);
+        // A song with a steady tempo overall keeps it here, when that fits
+        // the beats about as well: beats tracked a little ragged over a
+        // short stretch would otherwise give a tempo a few percent off.
+        // Only where the beats sit is fitted then. A song whose tempo really
+        // drifts fits much worse at the song's tempo, and keeps its own.
+        let global = self.beat();
+        if self.steady() && (beat / global - 1.0).abs() <= STEADY_TEMPO {
+            let mut offsets: Vec<f64> = picked.iter().map(|(k, t)| t - global * k).collect();
+            offsets.sort_by(f64::total_cmp);
+            let offset = offsets[offsets.len() / 2];
+            let at_global = on_grid(offset, global);
+            if at_global + picked.len() / 20 >= on {
+                (a, beat, on) = (offset, global, at_global);
+            }
+        }
         if !(60.0 / FASTEST as f64..=60.0 / SLOWEST as f64).contains(&beat) {
             return None;
         }
-        let on = picked
-            .iter()
-            .filter(|(k, t)| (t - (a + beat * k)).abs() < ON_GRID as f64)
-            .count();
         let downbeat = match self.downbeat_near((from + to) / 2.0, (to - from) / 2.0 + MARGIN) {
             // The bar found there, on the grid of the part.
             Some(t) => a + beat * ((t - a) / beat).round(),
@@ -257,16 +283,52 @@ enum Audio {
     File(PathBuf),
 }
 
+/// How soon a song is analyzed. The analyzer takes the most urgent first,
+/// and those as urgent in the order asked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Priority {
+    /// Asked for by hand.
+    Now,
+    /// The song playing.
+    Playing,
+    /// The song to play next.
+    Next,
+    /// Anything else: a playlist's songs, suggestions.
+    Later,
+}
+
+struct Job {
+    video_id: String,
+    audio: Audio,
+    priority: Priority,
+}
+
 struct Worker {
-    tx: Sender<(String, Audio)>,
-    /// Songs waiting or under way, so none is done twice at once.
-    busy: HashSet<String>,
+    /// Songs waiting, most urgent first.
+    pending: VecDeque<Job>,
     /// The song under way.
     current: Option<String>,
     /// Songs whose audio would not analyze, so they are not tried again
-    /// until the next start.
+    /// until the next start, or until one is asked for by hand.
     failed: HashSet<String>,
 }
+
+impl Worker {
+    /// Puts a job in line, or moves a waiting one up if this is more urgent.
+    fn enqueue(&mut self, job: Job) {
+        if let Some(at) = self.pending.iter().position(|j| j.video_id == job.video_id) {
+            if self.pending[at].priority <= job.priority {
+                return;
+            }
+            self.pending.remove(at);
+        }
+        let at = self.pending.partition_point(|j| j.priority <= job.priority);
+        self.pending.insert(at, job);
+    }
+}
+
+/// Wakes the analysis thread when a job arrives.
+static WAKE: std::sync::Condvar = std::sync::Condvar::new();
 
 /// Where a song is in the analyzer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -282,50 +344,97 @@ pub fn progress(video_id: &str) -> Progress {
     let worker = worker();
     if worker.current.as_deref() == Some(video_id) {
         Progress::Working
-    } else if worker.busy.contains(video_id) {
+    } else if worker.pending.iter().any(|j| j.video_id == video_id) {
         Progress::Waiting
     } else {
         Progress::Idle
     }
 }
 
+/// How far the analyzer is with a song, 0 to 1. 0 when it is not working
+/// on it.
+pub fn fraction(video_id: &str) -> f32 {
+    if worker().current.as_deref() == Some(video_id) {
+        STEP.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0
+    } else {
+        0.0
+    }
+}
+
+/// The analyzer's progress with the song under way, in thousandths.
+static STEP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+thread_local! {
+    /// The part of the whole job (from, to) the step being worked on fills.
+    static STAGE: std::cell::Cell<(f32, f32)> = const { std::cell::Cell::new((0.0, 1.0)) };
+}
+
+/// Says how far the song under way has got, 0 to 1 of the whole job. Only
+/// says so to the app every couple of percent.
+fn report(fraction: f32) {
+    let now = (fraction.clamp(0.0, 1.0) * 1000.0) as u32;
+    let before = STEP.swap(now, std::sync::atomic::Ordering::Relaxed);
+    if now.abs_diff(before) >= 20 {
+        let current = worker().current.clone();
+        if let Some(id) = current {
+            EVENTS.emit(Event::Step(id));
+        }
+    }
+}
+
+/// How far through the step being worked on, 0 to 1.
+fn report_stage(x: f32) {
+    let (from, to) = STAGE.with(|s| s.get());
+    report(from + (to - from) * x.clamp(0.0, 1.0));
+}
+
 fn worker() -> std::sync::MutexGuard<'static, Worker> {
     static WORKER: OnceLock<Mutex<Worker>> = OnceLock::new();
     WORKER
         .get_or_init(|| {
-            let (tx, rx) = mpsc::channel::<(String, Audio)>();
             std::thread::Builder::new()
                 .name("analysis".into())
-                .spawn(move || {
-                    for (video_id, audio) in rx {
-                        worker().current = Some(video_id.clone());
-                        EVENTS.emit(Event::Started(video_id.clone()));
-                        let result = match audio {
-                            Audio::Bytes(bytes) => analyze_source(Box::new(std::io::Cursor::new(bytes))),
-                            Audio::File(path) => std::fs::File::open(&path)
-                                .map_err(|e| e.to_string())
-                                .and_then(|file| analyze_source(Box::new(file))),
-                        };
-                        let failed = result.is_err();
-                        match result {
-                            Ok(analysis) => {
-                                crate::library::save_analysis(&video_id, &analysis);
+                .spawn(move || loop {
+                    let job = {
+                        let mut waiting = worker();
+                        loop {
+                            if let Some(job) = waiting.pending.pop_front() {
+                                waiting.current = Some(job.video_id.clone());
+                                break job;
                             }
-                            Err(message) => eprintln!("analysis of {video_id}: {message}"),
+                            waiting = WAKE.wait(waiting).unwrap_or_else(|e| e.into_inner());
                         }
-                        EVENTS.emit(Event::Ready(video_id.clone()));
+                    };
+                    let video_id = job.video_id;
+                    STEP.store(0, std::sync::atomic::Ordering::Relaxed);
+                    EVENTS.emit(Event::Started(video_id.clone()));
+                    let result = match job.audio {
+                        Audio::Bytes(bytes) => analyze_source(Box::new(std::io::Cursor::new(bytes))),
+                        Audio::File(path) => std::fs::File::open(&path)
+                            .map_err(|e| e.to_string())
+                            .and_then(|file| analyze_source(Box::new(file))),
+                    };
+                    let failed = result.is_err();
+                    match result {
+                        Ok(analysis) => {
+                            crate::library::save_analysis(&video_id, &analysis);
+                        }
+                        Err(message) => eprintln!("analysis of {video_id}: {message}"),
+                    }
+                    // Not current any more before the app hears of it, so
+                    // it finds the song done.
+                    {
                         let mut done = worker();
-                        done.busy.remove(&video_id);
                         done.current = None;
                         if failed {
                             done.failed.insert(video_id.clone());
                         }
                     }
+                    EVENTS.emit(Event::Ready(video_id));
                 })
                 .expect("cannot start the analysis thread");
             Mutex::new(Worker {
-                tx,
-                busy: HashSet::new(),
+                pending: VecDeque::new(),
                 current: None,
                 failed: HashSet::new(),
             })
@@ -342,30 +451,52 @@ pub fn set_enabled(on: bool) {
     ENABLED.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
-fn queue(video_id: &str, audio: impl FnOnce() -> Option<Audio>) {
+fn queue(video_id: &str, priority: Priority, audio: impl FnOnce() -> Option<Audio>) {
     if !ENABLED.load(std::sync::atomic::Ordering::Relaxed) || crate::library::has_analysis(video_id) {
         return;
     }
     let mut worker = worker();
-    if worker.busy.contains(video_id) || worker.failed.contains(video_id) {
+    if worker.current.as_deref() == Some(video_id) {
         return;
     }
-    let Some(audio) = audio() else {
+    // Asked for by hand, a song that failed is tried again.
+    if priority == Priority::Now {
+        worker.failed.remove(video_id);
+    }
+    if worker.failed.contains(video_id) {
         return;
+    }
+    // Already waiting: only moved up. Its audio is already held.
+    let audio = match worker.pending.iter().position(|j| j.video_id == video_id) {
+        Some(at) => std::mem::replace(&mut worker.pending[at].audio, Audio::Bytes(Vec::new())),
+        None => match audio() {
+            Some(audio) => audio,
+            None => return,
+        },
     };
-    worker.busy.insert(video_id.to_string());
-    let _ = worker.tx.send((video_id.to_string(), audio));
+    worker.enqueue(Job { video_id: video_id.to_string(), audio, priority });
+    drop(worker);
+    WAKE.notify_one();
 }
 
 /// Analyzes a song from its saved file, if it has one and no analysis yet.
 pub fn request(video_id: &str) {
-    queue(video_id, || crate::offline::saved_file(video_id).map(Audio::File));
+    request_at(video_id, Priority::Later);
+}
+
+/// As `request`, and moves a song already waiting up to `priority`.
+pub fn request_at(video_id: &str, priority: Priority) {
+    queue(video_id, priority, || crate::offline::saved_file(video_id).map(Audio::File));
 }
 
 /// Analyzes a song from a whole copy of its file just fetched, if it has
 /// no analysis yet.
 pub fn submit(video_id: &str, bytes: &[u8]) {
-    queue(video_id, || Some(Audio::Bytes(bytes.to_vec())));
+    submit_at(video_id, bytes, Priority::Later);
+}
+
+pub fn submit_at(video_id: &str, bytes: &[u8], priority: Priority) {
+    queue(video_id, priority, || Some(Audio::Bytes(bytes.to_vec())));
 }
 
 // ---------------------------------------------------------------- decoding
@@ -394,43 +525,68 @@ pub fn analyze_file(path: &std::path::Path) -> Result<Analysis, String> {
 }
 
 fn analyze_source(source: Box<dyn symphonia::core::io::MediaSource>) -> Result<Analysis, String> {
-    let (samples, rate) = decode_mono(source)?;
+    // How much of the whole job each step is: decoding, the rhythm and key,
+    // then the network for the bars where there is one.
+    let model = cfg!(feature = "beat-model");
+    let (decoded, rhythm_done) = (0.10, if model { 0.40 } else { 1.0 });
+    report(0.01);
+    let (native, native_rate) = decode_mono(source)?;
+    let (samples, rate) = decimate(&native, native_rate);
     if samples.len() < (rate * 10.0) as usize {
         return Err("too short to analyze".into());
     }
-    Ok(analyze(&samples, rate))
+    report(decoded);
+    STAGE.with(|s| s.set((decoded, rhythm_done)));
+    #[allow(unused_mut)]
+    let mut analysis = analyze(&samples, rate);
+    report(rhythm_done);
+    // Which beat starts each bar, which the rhythm alone cannot tell: from
+    // a neural network where there is one. The bars found from the rhythm
+    // stay when it finds nothing.
+    #[cfg(feature = "beat-model")]
+    if let Some(bars) = crate::beat_model::bars(&native, native_rate, &analysis.beats, &|x| {
+        report(rhythm_done + (1.0 - rhythm_done) * x)
+    }) {
+        analysis.grid_start = bars[0];
+        analysis.downbeats = bars;
+    }
+    Ok(analysis)
 }
 
-/// The song in mono at about `TARGET_RATE`, and the rate it came out at.
+/// The song in mono at its own rate, and that rate.
 fn decode_mono(source: Box<dyn symphonia::core::io::MediaSource>) -> Result<(Vec<f32>, f32), String> {
     use rodio::Source;
     // Rate zero keeps the song's own rate, with no resampling.
     let track = crate::decode::Track::open(source, 0)?;
     let channels = track.channels().max(1) as usize;
     let rate = track.source_rate().max(1) as f32;
-    // Averaging is a rough low pass, but enough for onsets and pitch.
-    let factor = (rate / TARGET_RATE).round().max(1.0) as usize;
-    let mut out = Vec::with_capacity(track.total_duration().map_or(0, |d| {
-        (d.as_secs_f32() * rate) as usize / factor + 1
-    }));
+    let mut out = Vec::with_capacity(track.total_duration().map_or(0, |d| (d.as_secs_f32() * rate) as usize + 1));
     let (mut sum, mut count) = (0.0f32, 0usize);
-    let scale = 1.0 / (channels * factor) as f32;
+    let scale = 1.0 / channels as f32;
     for sample in track {
         sum += sample;
         count += 1;
-        if count == channels * factor {
+        if count == channels {
             out.push(sum * scale);
             sum = 0.0;
             count = 0;
         }
     }
-    Ok((out, rate / factor as f32))
+    Ok((out, rate))
+}
+
+/// The song at about `TARGET_RATE`, and the rate it came out at. Averaging
+/// is a rough low pass, but enough for onsets and pitch.
+fn decimate(mono: &[f32], rate: f32) -> (Vec<f32>, f32) {
+    let factor = (rate / TARGET_RATE).round().max(1.0) as usize;
+    let out = mono.chunks_exact(factor).map(|c| c.iter().sum::<f32>() / factor as f32).collect();
+    (out, rate / factor as f32)
 }
 
 // ------------------------------------------------------------------- FFT
 
 /// A radix 2 complex FFT of one fixed size.
-struct Fft {
+pub(crate) struct Fft {
     n: usize,
     cos: Vec<f32>,
     sin: Vec<f32>,
@@ -438,7 +594,7 @@ struct Fft {
 }
 
 impl Fft {
-    fn new(n: usize) -> Fft {
+    pub(crate) fn new(n: usize) -> Fft {
         assert!(n.is_power_of_two());
         let bits = n.trailing_zeros();
         let reverse = (0..n)
@@ -453,7 +609,7 @@ impl Fft {
         }
     }
 
-    fn run(&self, re: &mut [f32], im: &mut [f32]) {
+    pub(crate) fn run(&self, re: &mut [f32], im: &mut [f32]) {
         let n = self.n;
         for i in 0..n {
             let j = self.reverse[i];
@@ -549,6 +705,7 @@ fn analyze(samples: &[f32], rate: f32) -> Analysis {
         bands.push(energy.map(f32::sqrt));
     });
 
+    report_stage(0.4);
     let onsets = normalized(&flux);
     let lows = normalized(&low_flux);
     // Each likely tempo, tracked. The one whose beats keep best to a grid
@@ -564,7 +721,9 @@ fn analyze(samples: &[f32], rate: f32) -> Analysis {
     }
     let (beats, (bpm, offset, bpm_confidence)) = best.unwrap_or_default();
 
+    report_stage(0.7);
     let chroma = chroma_frames(samples, rate);
+    report_stage(0.85);
     let chroma_time = |i: usize| (i * CHROMA_HOP + CHROMA_FRAME / 2) as f32 / rate;
     let beat = 60.0 / bpm;
     let first = beats.first().copied().unwrap_or(0.0);
@@ -1176,6 +1335,47 @@ mod tests {
         out
     }
 
+    fn job(id: &str, priority: Priority) -> Job {
+        Job { video_id: id.into(), audio: Audio::Bytes(Vec::new()), priority }
+    }
+
+    fn order(w: &Worker) -> Vec<&str> {
+        w.pending.iter().map(|j| j.video_id.as_str()).collect()
+    }
+
+    fn worker_with_nothing() -> Worker {
+        Worker { pending: VecDeque::new(), current: None, failed: HashSet::new() }
+    }
+
+    #[test]
+    fn the_playing_song_goes_ahead_of_a_whole_playlist() {
+        let mut w = worker_with_nothing();
+        for id in ["a", "b", "c", "d"] {
+            w.enqueue(job(id, Priority::Later));
+        }
+        w.enqueue(job("next", Priority::Next));
+        w.enqueue(job("playing", Priority::Playing));
+        assert_eq!(order(&w), ["playing", "next", "a", "b", "c", "d"]);
+        // By hand goes first of all, and those as urgent keep the order asked.
+        w.enqueue(job("click1", Priority::Now));
+        w.enqueue(job("click2", Priority::Now));
+        assert_eq!(&order(&w)[..3], ["click1", "click2", "playing"]);
+    }
+
+    #[test]
+    fn a_waiting_song_moves_up_but_never_down() {
+        let mut w = worker_with_nothing();
+        for id in ["a", "b", "c"] {
+            w.enqueue(job(id, Priority::Later));
+        }
+        w.enqueue(job("c", Priority::Next));
+        assert_eq!(order(&w), ["c", "a", "b"]);
+        // Asked for again, less urgently, it stays where it is.
+        w.enqueue(job("c", Priority::Later));
+        assert_eq!(order(&w), ["c", "a", "b"]);
+        assert_eq!(w.pending.len(), 3);
+    }
+
     #[test]
     fn fft_matches_a_plain_dft() {
         let n = 16;
@@ -1315,6 +1515,24 @@ fn analyze_folder() {
             ),
             Err(e) => eprintln!("{}: {e}", path.display()),
         }
+    }
+}
+
+/// Analyzes the songs in `TONEARM_REANALYZE` (`id=file` pairs, `|` apart)
+/// and saves them in the library, as the analyzer does:
+/// `cargo test reanalyze_songs --features beat-model -- --ignored --nocapture`.
+#[cfg(test)]
+#[test]
+#[ignore]
+fn reanalyze_songs() {
+    let Ok(list) = std::env::var("TONEARM_REANALYZE") else {
+        return;
+    };
+    for pair in list.split('|') {
+        let (id, file) = pair.split_once('=').unwrap();
+        let a = analyze_file(std::path::Path::new(file)).unwrap();
+        crate::library::save_analysis(id, &a);
+        eprintln!("{id}: {:.2} BPM, {} beats, {} bars, saved", a.bpm, a.beats.len(), a.downbeats.len());
     }
 }
 

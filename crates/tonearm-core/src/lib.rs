@@ -10,6 +10,8 @@ pub mod analysis;
 pub mod animated_art;
 pub mod audio;
 pub mod backdrop;
+#[cfg(feature = "beat-model")]
+pub mod beat_model;
 pub mod cast;
 pub mod decode;
 pub mod explore;
@@ -37,6 +39,7 @@ pub mod settings_sync;
 pub mod spotify;
 pub mod spotify_token;
 pub mod store;
+pub mod structure;
 pub mod suggest;
 pub mod sync;
 pub mod syncing;

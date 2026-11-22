@@ -277,6 +277,8 @@ an issue first so we can talk it through.
 Tonearm is free software under the GNU General Public License, version 3.
 See [LICENSE](LICENSE).
 
-Tonearm uses Slint under its GPLv3 licence. The icons are from
+Tonearm uses Slint under its GPLv3 licence. Bar starts are found with the
+Beat This! model, under the MIT licence, run through ONNX Runtime; see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The icons are from
 [Phosphor](https://phosphoricons.com), under the MIT licence in
 `ui/icons-LICENSE.txt`.

@@ -101,15 +101,16 @@ fn blob_to_floats(bytes: &[u8]) -> Vec<f32> {
         .collect()
 }
 
-/// A song's analysis from the current analyzer. None when it has none, or
-/// only one from an older analyzer, which is due to be redone.
+/// A song's analysis: from the current analyzer, or from an older one that
+/// is still good enough to mix with, until it is redone. None when it has
+/// none.
 pub fn analysis(video_id: &str) -> Option<Analysis> {
     let guard = db();
     let db = guard.as_ref()?;
     db.query_row(
         "SELECT length, bpm, bpm_confidence, grid_start, beats, key, key_confidence, waveform
-         FROM analysis WHERE video_id = ?1 AND analyzer_version = ?2",
-        params![video_id, ANALYZER_VERSION],
+         FROM analysis WHERE video_id = ?1 AND analyzer_version >= ?2",
+        params![video_id, crate::analysis::OLDEST_USABLE],
         |row| {
             // The beats, then a NaN, then the downbeats, so the table needs
             // no new column and older copies of Tonearm can still open it.
@@ -140,7 +141,7 @@ pub fn analysis(video_id: &str) -> Option<Analysis> {
     .flatten()
 }
 
-/// Whether a song has an analysis from the current analyzer.
+/// Whether a song has an analysis from the current analyzer, or a newer one.
 pub fn has_analysis(video_id: &str) -> bool {
     let guard = db();
     let Some(db) = guard.as_ref() else {
@@ -149,7 +150,7 @@ pub fn has_analysis(video_id: &str) -> bool {
         return true;
     };
     db.query_row(
-        "SELECT 1 FROM analysis WHERE video_id = ?1 AND analyzer_version = ?2",
+        "SELECT 1 FROM analysis WHERE video_id = ?1 AND analyzer_version >= ?2",
         params![video_id, ANALYZER_VERSION],
         |_| Ok(()),
     )
@@ -205,13 +206,13 @@ pub fn summaries(video_ids: &[String]) -> HashMap<String, Summary> {
     };
     let Ok(mut query) = db.prepare_cached(
         "SELECT bpm, bpm_confidence, length(beats) / 4, key, key_confidence
-         FROM analysis WHERE video_id = ?1 AND analyzer_version = ?2",
+         FROM analysis WHERE video_id = ?1 AND analyzer_version >= ?2",
     ) else {
         return found;
     };
     for id in video_ids {
         let row = query
-            .query_row(params![id, ANALYZER_VERSION], |row| {
+            .query_row(params![id, crate::analysis::OLDEST_USABLE], |row| {
                 let (bpm, confidence, beats): (f32, f32, i64) = (row.get(0)?, row.get(1)?, row.get(2)?);
                 Ok(Summary {
                     bpm,

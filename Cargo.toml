@@ -11,7 +11,7 @@ publish = false
 members = ["crates/tonearm-core", "crates/tonearm-android"]
 
 [dependencies]
-tonearm-core = { path = "crates/tonearm-core" }
+tonearm-core = { path = "crates/tonearm-core", features = ["beat-model"] }
 slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-skia", "raw-window-handle-06", "unstable-winit-030"] }
 ureq = { version = "2.12", default-features = false, features = ["json", "gzip", "native-tls", "proxy-from-env"] }
 native-tls = "0.2"

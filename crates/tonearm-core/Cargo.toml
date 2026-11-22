@@ -7,6 +7,11 @@ license = "GPL-3.0-only"
 repository = "https://github.com/Eli-Zac/tonearm"
 publish = false
 
+[features]
+# Finds which beat of each bar is the first with a neural network (Beat This!),
+# through ONNX Runtime. Off for the phone, which does not analyze songs.
+beat-model = ["dep:ort"]
+
 [dependencies]
 serde_json = "1"
 sha1 = "0.10"
@@ -20,6 +25,8 @@ rusqlite = { version = "0.43.0", features = ["bundled"] }
 # Runs YouTube's player script to solve stream link challenges.
 rquickjs = { version = "0.14", default-features = false }
 qrcode = { version = "0.15.0", default-features = false }
+# Statically linked. No GPU providers, which come with copy-dylibs.
+ort = { version = "=2.0.0-rc.15", optional = true, default-features = false, features = ["std", "download-binaries", "tls-native", "api-31"] }
 
 # Secure connections: the system's own on the computer, rustls on Android,
 # where the system's is Java's and OpenSSL would have to be built.
