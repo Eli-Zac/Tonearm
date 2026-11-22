@@ -5,3 +5,7 @@
 __pycache__/
 /tonearm-setup.exe
 .wrangler/
+
+# Discord's Social SDK is proprietary: CI reads it from a private repo, and a
+# local build takes it from Discord's SDK download.
+android/app/libs/discord_partner_sdk.aar

@@ -10,6 +10,8 @@ name: Android release
 #   ANDROID_KEYSTORE_PASSWORD  its password
 #   ANDROID_KEY_ALIAS          the key's alias
 #   ANDROID_KEY_PASSWORD       the key's password
+#   PRIVATE_ASSETS_KEY         a read-only deploy key for Eli-Zac/tonearm-private,
+#                              which holds Discord's Social SDK
 #
 # A manual run with publish off builds and keeps the APK as a workflow
 # artifact only, to try the build without touching a release.
@@ -39,6 +41,21 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      # Discord's Social SDK is proprietary, so it is not in this public
+      # repository. A private repository holds it, read with a deploy key.
+      - name: Fetch the Discord Social SDK
+        uses: actions/checkout@v4
+        with:
+          repository: Eli-Zac/tonearm-private
+          ssh-key: ${{ secrets.PRIVATE_ASSETS_KEY }}
+          path: private-assets
+
+      - name: Put the Discord Social SDK in place
+        shell: bash
+        run: |
+          cp private-assets/discord_partner_sdk.aar android/app/libs/discord_partner_sdk.aar
+          rm -rf private-assets
 
       - name: Work out the version
         id: version
