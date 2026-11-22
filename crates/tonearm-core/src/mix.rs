@@ -1351,7 +1351,18 @@ fn render_mix() {
     const RATE: u32 = 44_100;
     let open = |path: &str| crate::decode::Track::open(Box::new(std::fs::File::open(path).unwrap()), RATE).unwrap();
     let analyze = |path: &str| crate::analysis::analyze_file(std::path::Path::new(path)).unwrap();
-    let (a, b) = (analyze(out_path), analyze(in_path));
+    let (mut a, mut b) = (analyze(out_path), analyze(in_path));
+    // Bar starts from elsewhere, as JSON files of {"downbeats": [seconds]},
+    // in place of the analyzer's: TONEARM_DOWNBEATS="<out json>|<in json>".
+    if let Ok(files) = std::env::var("TONEARM_DOWNBEATS") {
+        for (analysis, file) in [&mut a, &mut b].into_iter().zip(files.split('|')) {
+            let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
+            let bars: Vec<f32> = json["downbeats"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap() as f32).collect();
+            eprintln!("{file}: {} bars in place of {}", bars.len(), analysis.downbeats.len());
+            analysis.grid_start = bars[0];
+            analysis.downbeats = bars;
+        }
+    }
     eprintln!("out {:.2} BPM ({:.2}), in {:.2} BPM ({:.2})", a.bpm, a.bpm_confidence, b.bpm, b.bpm_confidence);
     let out_track = open(out_path);
     let length = rodio::Source::total_duration(&out_track).unwrap().as_secs_f64();
@@ -1360,11 +1371,23 @@ fn render_mix() {
         .into_iter()
         .find(|p| p.name().eq_ignore_ascii_case(&preset))
         .unwrap_or(crate::transition::Preset::Blend);
-    let settings = crate::transition::Settings::preset(preset);
+    // "auto" mixes as Auto does in the app, which can keep the new song's key.
+    let settings = if std::env::var("TONEARM_MIX_PRESET").is_ok_and(|p| p.eq_ignore_ascii_case("auto")) {
+        crate::transition::Settings::auto(Some(&a), Some(&b), true)
+    } else {
+        crate::transition::Settings::preset(preset)
+    };
+    eprintln!("  settings: {settings:?}");
     let plan = crate::transition::plan(settings, Some(&a), length, Some(&b), 8.0);
     assert!(plan.out_at.is_some(), "these two cannot be beat matched");
     let at = plan.out_at.unwrap();
     eprintln!("mix at {at:.2}s of {length:.0}s, into {:.2}s, {:.1}s long", plan.in_from, plan.length);
+    eprintln!(
+        "  speed of the new song {:.4} (out {:.2} BPM, in {:.2} BPM whole song)",
+        plan.lanes.iter().find(|l| l.param == Param::Speed).and_then(|l| l.value(0.0)).unwrap_or(1.0),
+        a.bpm,
+        b.bpm
+    );
     let lead = 12.0;
     let seconds = lead + plan.length + 20.0;
     // The mix, and each song alone through the same plan, to measure.
@@ -1392,8 +1415,22 @@ fn render_mix() {
         let from = (lead * RATE as f64) as usize;
         s[from..from + (plan.length * RATE as f64) as usize].to_vec()
     };
-    let (a_curve, frame_rate) = crate::analysis::onset_curve(&window(mono(&render(true, false))), RATE as f32);
-    let (b_curve, _) = crate::analysis::onset_curve(&window(mono(&render(false, true))), RATE as f32);
+    let (full_out, full_in) = (mono(&render(true, false)), mono(&render(false, true)));
+    // The whole of each, not only the mix, and where the mix is in them.
+    for (name, stem) in [("out", &full_out), ("in", &full_in)] {
+        let bytes: Vec<u8> = stem.iter().flat_map(|x| x.to_le_bytes()).collect();
+        std::fs::write(format!("{wav}.{name}.full.f32"), bytes).unwrap();
+    }
+    std::fs::write(format!("{wav}.timing.txt"), format!("{lead} {}", plan.length)).unwrap();
+    let (out_stem, in_stem) = (window(full_out.clone()), window(full_in.clone()));
+    // Each song's part of the mix on its own, as raw mono f32 at RATE, for
+    // looking at kicks and snares separately.
+    for (name, stem) in [("out", &out_stem), ("in", &in_stem)] {
+        let bytes: Vec<u8> = stem.iter().flat_map(|x| x.to_le_bytes()).collect();
+        std::fs::write(format!("{wav}.{name}.f32"), bytes).unwrap();
+    }
+    let (a_curve, frame_rate) = crate::analysis::onset_curve(&out_stem, RATE as f32);
+    let (b_curve, _) = crate::analysis::onset_curve(&in_stem, RATE as f32);
     let score = |lag: i32| -> f32 {
         (0..a_curve.len() as i32)
             .filter_map(|i| Some(a_curve[i as usize] * *b_curve.get((i + lag).max(0) as usize)?))
@@ -1401,11 +1438,40 @@ fn render_mix() {
     };
     let lags: Vec<(i32, f32)> = (-12..=12).map(|l| (l, score(l))).collect();
     let best = lags.iter().max_by(|x, y| x.1.total_cmp(&y.1)).unwrap();
+    // A wide look, a beat and a half either side, because the fine search
+    // above cannot tell a beat out from a beat in.
+    let wide_reach = (1.5 * 60.0 / a.bpm as f64 * frame_rate as f64) as i32;
+    let wide: Vec<(i32, f32)> = (-wide_reach..=wide_reach).map(|l| (l, score(l))).collect();
+    let wide_best = wide.iter().max_by(|x, y| x.1.total_cmp(&y.1)).unwrap();
+    let at_zero = score(0);
+    eprintln!(
+        "  wide search (a beat is {:.0} ms): strongest at {:+.0} ms; at 0 ms the fit is {:.0}% of that",
+        60_000.0 / a.bpm,
+        wide_best.0 as f32 * 1000.0 / frame_rate,
+        100.0 * at_zero / wide_best.1.max(1e-9)
+    );
+    // Strong peaks one beat apart say whether it could just as well be a beat off.
+    let beat_frames = (60.0 / a.bpm as f64 * frame_rate as f64).round() as i32;
+    for k in [-2, -1, 1, 2] {
+        eprintln!(
+            "    fit at {:+} beats: {:.0}% of the fit at 0",
+            k,
+            100.0 * score(k * beat_frames) / at_zero.max(1e-9)
+        );
+    }
     eprintln!(
         "onsets of the song coming in sit {:+.0} ms from the song going out (one frame is {:.1} ms)",
         best.0 as f32 * 1000.0 / frame_rate,
         1000.0 / frame_rate
     );
+    // The same, over the first and the last third of the mix, to show drift.
+    for (name, from, to) in [("first third", 0, a_curve.len() / 3), ("last third", a_curve.len() * 2 / 3, a_curve.len())] {
+        let part = |lag: i32| -> f32 {
+            (from..to).filter_map(|i| Some(a_curve[i] * *b_curve.get((i as i32 + lag).max(0) as usize)?)).sum()
+        };
+        let best = (-40..=40).map(|l| (l, part(l))).max_by(|x, y| x.1.total_cmp(&y.1)).unwrap();
+        eprintln!("  {name}: {:+.0} ms", best.0 as f32 * 1000.0 / frame_rate);
+    }
     let samples: Vec<i16> = render(true, true)
         .into_iter()
         .map(|s| (s.clamp(-1.0, 1.0) * 32767.0) as i16)

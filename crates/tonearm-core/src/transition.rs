@@ -15,6 +15,7 @@
 
 use crate::analysis::{Analysis, LocalGrid};
 use crate::mix::{Curve, Effect, EffectKind, Lane, Param, Side, Transition};
+use crate::structure;
 
 /// Default transition length for a mixed playlist when crossfade is off.
 pub const MIX_MODE_SECONDS: f64 = 8.0;
@@ -311,13 +312,18 @@ impl Settings {
     /// blend with a bass swap. Others get a smooth fade, since a bass swap
     /// on drums that do not line up sounds like a mistake.
     pub fn auto(out: Option<&Analysis>, inn: Option<&Analysis>, beat_match: bool) -> Settings {
-        let matched = beat_match
-            && match (out, inn) {
-                (Some(a), Some(b)) => timing(a, f64::MAX, b, 8.0, 0).is_ok(),
-                _ => false,
-            };
-        let mut settings = if matched {
-            Settings::preset(Preset::Blend)
+        let timing = match (out, inn) {
+            (Some(a), Some(b)) if beat_match => timing(a, f64::MAX, b, 8.0, 0).ok(),
+            _ => None,
+        };
+        let mut settings = if let Some(t) = timing {
+            let mut blend = Settings::preset(Preset::Blend);
+            // The new song plays at a different speed to match, which on its
+            // own changes its pitch. Past a percent or so that puts it out of
+            // tune with the old song through the mix (4% is most of a
+            // semitone), so it keeps its key.
+            blend.key_lock = (t.speed - 1.0).abs() > KEY_LOCK_ABOVE;
+            blend
         } else {
             let mut fade = Settings::preset(Preset::Fade);
             fade.beatmatch = beat_match;
@@ -398,6 +404,19 @@ const MOST_STRETCH: f64 = 0.06;
 /// Skipping all of it would lose too much, so it fades in instead.
 const LATEST_FIRST_BEAT: f64 = 30.0;
 
+/// How far from the end of the old song, or from the start of the new
+/// one, to look for a section to mix at, in seconds.
+const SECTION_REACH: f64 = 45.0;
+/// A song's tempo where it comes in is at its own if it is within this
+/// share of the whole song's.
+const OWN_TEMPO: f64 = 0.02;
+/// How firmly a change in the sound must show to count as a section.
+const SECTION_FIRM: f32 = 0.5;
+
+/// Auto keeps the new song's key when its speed changes by more than this
+/// share, about 17 cents of pitch.
+const KEY_LOCK_ABOVE: f64 = 0.01;
+
 /// How long a cut takes, so the swap does not click.
 const CUT: f64 = 0.02;
 
@@ -469,6 +488,11 @@ fn timing(out: &Analysis, out_length: f64, inn: &Analysis, seconds: f64, bars: u
     // From the end of the beat back, the last stretch that keeps a steady
     // beat for the whole mix.
     let mut end = (last + last_beat).min(out_length);
+    // Not into a slow fade out or a silent end: the mix finishes while the
+    // song is still at full strength.
+    if let Some(tail) = structure::edges(out).tail.filter(|&t| t > room * 0.5) {
+        end = end.min(tail);
+    }
     let mut steady_somewhere = false;
     let mut found = None;
     while end > room * 0.5 {
@@ -478,14 +502,40 @@ fn timing(out: &Analysis, out_length: f64, inn: &Analysis, seconds: f64, bars: u
         };
         steady_somewhere = true;
         let beats = if bars > 0 { 4.0 * bars as f64 } else { mix_beats(rough.beat, seconds) };
-        let at = rough.downbeat_before(end - beats * rough.beat);
+        let span = beats * rough.beat;
+        // The old song's last section finishes as the mix does: the latest
+        // section start it can end on, not too far before its end, whose
+        // mix keeps a steady beat. `end` steps back a second at a time, so
+        // a section start up to a beat past it counts. A section start the
+        // beat is not steady for is passed over for the one before it.
+        let sections =
+            structure::section_starts(out, SECTION_FIRM, (end - SECTION_REACH).max(room * 0.5 + span), end + rough.beat);
+        let mut from_section = None;
+        for &b in sections.iter().rev() {
+            let at = b - span;
+            if at < room * 0.5 {
+                break;
+            }
+            if let Some(part) = steady_part(out, at, at + span) {
+                // On the beat, and on a bar start when one is near, so the
+                // two songs' bars line up.
+                let at = part.nearest_beat(structure::on_a_bar(out, at, 2.0 * part.beat));
+                from_section = Some((at, beats * part.beat, part.beat));
+                break;
+            }
+        }
+        if from_section.is_some() {
+            found = from_section;
+            break;
+        }
+        // No section: the latest downbeat that lets the mix finish by `end`.
+        let at = rough.downbeat_before(end - span);
         if at < room * 0.5 {
             break;
         }
-        if let Some(part) = steady_part(out, at, at + beats * rough.beat) {
+        if let Some(part) = steady_part(out, at, at + span) {
             // Measured over the mix itself, which is a little different.
-            let at = part.nearest_downbeat(at);
-            found = Some((at, beats * part.beat, part.beat));
+            found = Some((part.nearest_downbeat(at), beats * part.beat, part.beat));
             break;
         }
         end = at;
@@ -493,14 +543,34 @@ fn timing(out: &Analysis, out_length: f64, inn: &Analysis, seconds: f64, bars: u
     let Some((out_at, length, beat)) = found else {
         return Err(if steady_somewhere { Unmatched::BeatEndsEarly } else { Unmatched::NoBeat });
     };
-    let first = inn.grid_start as f64;
+    // Where the new song's music starts: not in its silence.
+    let first = (inn.grid_start as f64).max(structure::edges(inn).start);
     if !(0.0..=LATEST_FIRST_BEAT).contains(&first) {
         return Err(Unmatched::BeatStartsLate);
     }
-    let start = steady_part(inn, first, first + length).ok_or(Unmatched::NoBeat)?;
-    let mut in_from = start.nearest_downbeat(first);
-    if in_from < 0.0 {
-        in_from += 4.0 * start.beat;
+    // The new song comes in at the start of a section where its beat stays
+    // steady for the whole mix: its first one, if it opens loosely, with an
+    // ad lib or a beatless intro, the first after that. Without sections, at
+    // its first downbeat after any silence.
+    let sections = structure::section_starts(inn, SECTION_FIRM, first - 0.3, first + SECTION_REACH);
+    // One at the song's own tempo is preferred: where the tempo is off, as
+    // in an intro that runs slower or faster than the rest, the new song
+    // would have to settle to its real tempo after the mix.
+    let own_tempo = |g: &LocalGrid| (g.beat / inn.beat() - 1.0).abs() <= OWN_TEMPO;
+    let entry = sections
+        .iter()
+        .find_map(|&b| steady_part(inn, b, b + length).filter(own_tempo).map(|g| (b, g)))
+        .or_else(|| sections.iter().find_map(|&b| steady_part(inn, b, b + length).map(|g| (b, g))));
+    let (start, mut in_from) = match entry {
+        Some((b, part)) => (part, part.nearest_beat(structure::on_a_bar(inn, b, 2.0 * part.beat))),
+        None => {
+            let start = steady_part(inn, first, first + length).ok_or(Unmatched::NoBeat)?;
+            (start, start.nearest_downbeat(first))
+        }
+    };
+    let bar = 4.0 * start.beat;
+    while in_from < first - 0.25 * start.beat {
+        in_from += bar;
     }
     let speed = speed_for(beat, start.beat);
     if (speed - 1.0).abs() > MOST_STRETCH {
@@ -628,10 +698,13 @@ pub fn plan(
     // A cut swaps in an instant: on the downbeat where a blend would have
     // finished, so the new song's first downbeat lands on the old song's.
     let cut = settings.volume == Volume::Cut;
+    // Not beat matched: the new song starts where its music does, after any
+    // silence, and the old one is left before a slow fade or silent end.
+    let unmatched_in = || inn.map_or(0.0, |a| structure::edges(a).start) + settings.in_shift.max(0.0);
     let (mut out_at, in_from, length, beat) = match matched {
         Some(t) if cut => (Some(t.out_at + t.length), t.in_from, CUT, t.beat),
         Some(t) => (Some(t.out_at), t.in_from, t.length, t.beat),
-        None if cut => (None, settings.in_shift.max(0.0), CUT, 0.5),
+        None if cut => (unmatched_out_at(out, out_length, CUT), unmatched_in(), CUT, 0.5),
         None => {
             // Bars at the old song's own tempo, or at 120 bpm before it is
             // analyzed.
@@ -639,14 +712,14 @@ pub fn plan(
                 0 => seconds.max(0.5),
                 bars => 4.0 * bars as f64 * out.map_or(0.5, Analysis::beat),
             };
-            (None, settings.in_shift.max(0.0), length, length / 16.0)
+            (unmatched_out_at(out, out_length, length), unmatched_in(), length, length / 16.0)
         }
     };
     // Moved by hand, not beat matched: by as much as dragged, and the old
     // song must last through the mix.
     if matched.is_none() && settings.out_shift != 0.0 {
         let latest = (out_length - length).max(0.0);
-        out_at = Some((latest + settings.out_shift).clamp(0.0, latest));
+        out_at = Some((out_at.unwrap_or(latest) + settings.out_shift).clamp(0.0, latest));
     }
     let mut lanes = Vec::new();
     lanes.extend(volume_lanes(settings.volume, length));
@@ -671,6 +744,23 @@ pub fn plan(
         _ => None,
     };
     Transition { out_at, in_from, length, lanes, effect, out_loop, key_lock }
+}
+
+/// Where a mix `length` seconds long starts in a song that is not beat
+/// matched, when the song fades out slowly or goes quiet before its end:
+/// so it finishes about where the fade begins, on a section start if one
+/// is near. None leaves it to start `length` before the end.
+fn unmatched_out_at(out: Option<&Analysis>, out_length: f64, length: f64) -> Option<f64> {
+    let out = out?;
+    let room = out_length.min(out.length as f64);
+    let tail = structure::edges(out).tail.filter(|&t| t > room * 0.5)?;
+    let latest = (out_length - length).max(0.0);
+    let mut end = tail + length * 0.25;
+    if let Some(section) = structure::last_boundary(out, (end - 20.0).max(room * 0.5), end, SECTION_FIRM) {
+        end = section;
+    }
+    let at = (end - length).min(latest);
+    (at > room * 0.25 && at < latest - 1.0).then_some(at)
 }
 
 /// Chooses the saved setting, or Auto's pick when none was saved.
@@ -1036,6 +1126,16 @@ mod tests {
     }
 
     #[test]
+    fn auto_keeps_the_key_when_the_tempos_are_a_few_percent_apart() {
+        let out = steady(142.0, 0.4, 200.0);
+        // 4% apart: out of tune by most of a semitone without it.
+        assert!(Settings::auto(Some(&out), Some(&steady(148.0, 0.4, 200.0)), true).key_lock);
+        // Hardly apart, and with nothing to match: no need.
+        assert!(!Settings::auto(Some(&out), Some(&steady(142.5, 0.4, 200.0)), true).key_lock);
+        assert!(!Settings::auto(None, None, true).key_lock);
+    }
+
+    #[test]
     fn key_lock_holds_only_when_the_speed_changes() {
         let out = steady(128.0, 0.0, 200.0);
         let mut s = Settings::preset(Preset::Blend);
@@ -1107,5 +1207,78 @@ mod tests {
         // Saved by an older version, by place in the menus.
         let old = r#"{"preset":"rise","volume":1,"eq":1,"filter":1,"beatmatch":true}"#;
         assert_eq!(Settings::from_json(old), Some(Settings::preset(Preset::Rise)));
+    }
+
+    /// Looks at the mix between two songs in this computer's library. Run
+    /// with `PROBE_FROM=<id> PROBE_TO=<id> cargo test probe_mix -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn probe_mix() {
+        let (from, to) = (std::env::var("PROBE_FROM").unwrap(), std::env::var("PROBE_TO").unwrap());
+        let (a, b) = (crate::library::analysis(&from).unwrap(), crate::library::analysis(&to).unwrap());
+        let length = a.length as f64;
+        let (settings, plan) = plan_between(&from, &to, true, Some(&a), length, Some(&b), 8.0, None);
+        println!("settings {settings:?}");
+        println!("plan out_at {:?} in_from {:.3} length {:.3}", plan.out_at, plan.in_from, plan.length);
+        println!("why not matched: {:?}", why_unmatched(Some(&a), length, Some(&b), 8.0, 0));
+        for end in [214.0, 206.0, 198.0, 190.0, 180.0, 170.0, 150.0, 120.0] {
+            let g = a.local(end - 8.0, end);
+            println!(
+                "out local {end:.0}: {}",
+                g.map_or("none".to_string(), |g| format!(
+                    "beat {:.4} ({:.2} bpm, global {:.2}) conf {:.2} on {} beats",
+                    g.beat,
+                    60.0 / g.beat,
+                    a.bpm,
+                    g.confidence,
+                    g.beats
+                ))
+            );
+        }
+        let g = b.local(0.0, 8.0);
+        println!("in local 0-8: {:?}", g);
+        for (name, song, times) in [("out", &a, [170.0, 178.7, 187.9, 197.0, 204.2]), ("in", &b, [1.6, 7.9, 13.6, 27.1, 36.8])] {
+            for t in times {
+                let g = song.local(t, t + 9.0);
+                println!(
+                    "{name} steady stretch {t:.1}-{:.1}: {}",
+                    t + 9.0,
+                    g.map_or("none".to_string(), |g| format!("conf {:.2} on {} beats, beat {:.4}", g.confidence, g.beats, g.beat))
+                );
+            }
+        }
+        println!("edges out {:?} in {:?}", structure::edges(&a), structure::edges(&b));
+        println!(
+            "steady out {} (conf {:.2}, {} beats) in {} (conf {:.2}, {} beats); last beat {:.1}s of {:.1}s",
+            a.steady(),
+            a.bpm_confidence,
+            a.beats.len(),
+            b.steady(),
+            b.bpm_confidence,
+            b.beats.len(),
+            a.beats.last().copied().unwrap_or(0.0),
+            a.length
+        );
+        println!("edges out {:?} in {:?}", structure::edges(&a), structure::edges(&b));
+        let show = |name: &str, a: &Analysis| {
+            let found: Vec<String> = structure::boundaries(a).iter().map(|b| format!("{:.1}s({:.2})", b.time, b.strength)).collect();
+            println!("sections {name}: {}", found.join(" "));
+        };
+        show("out", &a);
+        show("in", &b);
+        // Where a time falls among the beats and found bars of a song.
+        let place = |a: &Analysis, t: f64| {
+            let beat = a.beats.iter().map(|&x| x as f64).min_by(|x, y| (x - t).abs().total_cmp(&(y - t).abs())).unwrap();
+            let down = a.downbeats.iter().map(|&x| x as f64).min_by(|x, y| (x - t).abs().total_cmp(&(y - t).abs())).unwrap_or(f64::NAN);
+            // Tracked beats between the nearest found downbeat at or before the beat and the beat.
+            let earlier = a.downbeats.iter().map(|&x| x as f64).filter(|&d| d <= beat + 0.05).last().unwrap_or(f64::NAN);
+            let k = a.beats.iter().filter(|&&x| (x as f64) >= earlier - 0.05 && (x as f64) < beat - 0.05).count();
+            format!("t {t:.3}: nearest beat {beat:.3} ({:+.3}), nearest found downbeat {down:.3} ({:+.3}), beat {} of the bar", beat - t, down - t, k + 1)
+        };
+        if let Some(at) = plan.out_at {
+            println!("OUT {}", place(&a, at));
+        }
+        println!("IN  {}", place(&b, plan.in_from));
+        println!("out grid_start {:.3} bpm {:.2}; in grid_start {:.3} bpm {:.2}", a.grid_start, a.bpm, b.grid_start, b.bpm);
     }
 }
