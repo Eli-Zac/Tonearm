@@ -16,9 +16,9 @@ android {
         minSdk = 26
         targetSdk = 37
         // A release build gets both from the tag (see .github/workflows/android.yml):
-        // -PversionName=0.13.4 -PversionCode=1304.
+        // -PversionName=0.13.5 -PversionCode=1305.
         versionCode = (project.findProperty("versionCode") as String?)?.toInt() ?: 1
-        versionName = (project.findProperty("versionName") as String?) ?: "0.13.4"
+        versionName = (project.findProperty("versionName") as String?) ?: "0.13.5"
         // The core is built for these two. Discord's SDK also carries 32-bit
         // libraries, which would otherwise ship without a core beside them.
         ndk {
