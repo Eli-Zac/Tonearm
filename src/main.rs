@@ -5712,6 +5712,60 @@ fn probe(args: &[String]) {
             println!("took {:?}", started.elapsed());
             return;
         }
+        // `--probe jam [link]`: the Spotify Jam the account is in, and with a
+        // Jam's link, that Jam's details. Read only: joins nothing. Tokens
+        // and links are blanked out of what it prints.
+        "jam" => {
+            let http = innertube::agent(Duration::from_secs(15));
+            let cookie = services::Settings::load().spotify_cookie;
+            let jam = tonearm_core::spotify_jam::redacted;
+            match tonearm_core::spotify_jam::current(&http, &cookie) {
+                Ok(v) => println!("current: {:#}", jam(&v)),
+                Err(e) => println!("current: error: {e}"),
+            }
+            if !arg(1).is_empty() {
+                match tonearm_core::spotify_jam::join_token(&http, arg(1)) {
+                    Ok(token) => match tonearm_core::spotify_jam::info(&http, &cookie, &token) {
+                        Ok(v) => println!("info: {:#}", jam(&v)),
+                        Err(e) => println!("info: error: {e}"),
+                    },
+                    Err(e) => println!("link: error: {e}"),
+                }
+            }
+            return;
+        }
+        // `--probe jamjoin <link>`: joins a Spotify Jam, shows what Spotify
+        // answers, then leaves it again. This one acts: the account shows up
+        // in the Jam, able to control it, for a few seconds.
+        "jamjoin" => {
+            use tonearm_core::spotify_jam as jam;
+            let http = innertube::agent(Duration::from_secs(15));
+            let cookie = services::Settings::load().spotify_cookie;
+            let token = match jam::join_token(&http, arg(1)) {
+                Ok(token) => token,
+                Err(e) => return println!("link: error: {e}"),
+            };
+            let joined = match jam::join(&http, &cookie, &token) {
+                Ok(v) => v,
+                Err(e) => return println!("join: error: {e}"),
+            };
+            println!("join: {:#}", jam::redacted(&joined));
+            std::thread::sleep(Duration::from_secs(3));
+            match jam::current(&http, &cookie) {
+                Ok(v) => println!("current: {:#}", jam::redacted(&v)),
+                Err(e) => println!("current: error: {e}"),
+            }
+            let id = joined["session_id"].as_str().unwrap_or("");
+            match jam::leave(&http, &cookie, id) {
+                Ok(v) => println!("leave: ok {:#}", jam::redacted(&v)),
+                Err(e) => println!("leave: error: {e}"),
+            }
+            match jam::current(&http, &cookie) {
+                Ok(v) => println!("after leaving: {:#}", jam::redacted(&v)),
+                Err(e) => println!("after leaving: {e}"),
+            }
+            return;
+        }
         // `--probe spsync <spotify browse id> <youtube playlist id>`: what
         // the first sync of the two would do, without pairing or changing
         // either.

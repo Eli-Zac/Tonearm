@@ -40,6 +40,7 @@ pub mod settings;
 pub mod settings_sync;
 pub mod sleep;
 pub mod spotify;
+pub mod spotify_jam;
 pub mod spotify_token;
 pub mod store;
 pub mod structure;
