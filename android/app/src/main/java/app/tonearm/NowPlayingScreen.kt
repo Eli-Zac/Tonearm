@@ -66,7 +66,7 @@ fun NowPlayingScreen(
     core: Core,
     panel: Panel,
     onPanel: (Panel) -> Unit,
-    /** A song's menu, from a long press in the queue. */
+    /** A song's menu, from a long press in the queue or the dots at the top. */
     onMenu: (Item) -> Unit,
     /** The Cast devices, and the button that opens the Devices sheet. */
     cast: CastState? = null,
@@ -178,16 +178,23 @@ fun NowPlayingScreen(
                 Spacer(Modifier.weight(1f))
                 Dim("Now playing", 13.sp)
                 Spacer(Modifier.weight(1f))
-                // With the lyrics or queue up, an X opposite the arrow goes
-                // back to the cover. Its room is always kept, so the title
-                // never shifts; it fades with the panels.
+                // Opposite the arrow: on the cover, the song's menu, as a long
+                // press in the queue opens it; with the lyrics or queue up, an
+                // X that goes back to the cover. One fades into the other in
+                // the same room, so the title never shifts.
                 val showX by animateFloatAsState(if (panel != Panel.Cover) 1f else 0f, tween(220), label = "x")
                 Box(
-                    Modifier.size(40.dp).clip(CircleShape)
-                        .graphicsLayer { alpha = showX }
-                        .then(if (panel != Panel.Cover) Modifier.clickable { onPanel(Panel.Cover) } else Modifier),
+                    Modifier.size(40.dp).clip(CircleShape).clickable {
+                        if (panel != Panel.Cover) onPanel(Panel.Cover)
+                        else playing?.let { onMenu(it.asItem()) }
+                    },
                     contentAlignment = Alignment.Center,
-                ) { CloseMark() }
+                ) {
+                    Box(Modifier.graphicsLayer { alpha = showX }) { CloseMark() }
+                    Box(Modifier.graphicsLayer { alpha = 1f - showX }) {
+                        Icon(Icons.dots, size = 24.sp, filled = true)
+                    }
+                }
             }
             // The cover stays put under the lyrics and queue, only hidden,
             // so its moving cover keeps playing rather than loading again
