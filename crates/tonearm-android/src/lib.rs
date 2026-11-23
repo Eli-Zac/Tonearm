@@ -337,8 +337,12 @@ impl Tonearm {
 
     // ---------------------------------------------------------------- pages
 
+    /// Home as the desktop lays it out: Jump back in, Made for you, Recently
+    /// played and New releases, then YouTube Music's own shelves.
     pub fn home(&self) -> Result<Page, TonearmError> {
-        self.browse("FEmusic_home".into(), None)
+        let parts = tonearm_core::home::fetch(&self.client);
+        let composed = tonearm_core::home::compose(parts, &self.taste.lock().unwrap())?;
+        Ok(pages::page(&composed))
     }
 
     /// Explore: new releases, the region's top songs as a numbered list,
