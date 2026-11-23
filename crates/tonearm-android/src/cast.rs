@@ -52,8 +52,11 @@ struct Casting {
     volume: f32,
     /// Counts casts, so word from one that has ended is ignored.
     generation: u64,
-    /// The lyrics the device has, by video id and line count.
+    /// The lyrics the device has, as `lyrics_key` names them.
     lyrics_sent: Option<String>,
+    /// The song and language the cast last had translated itself, so each
+    /// is asked for once.
+    translation_asked: Option<String>,
     /// The song whose lyrics the cast last asked for itself, so each is
     /// asked for once.
     lyrics_asked: Option<String>,
@@ -293,10 +296,41 @@ impl Tonearm {
         let status = &self.audio.status;
         let position = status.position_ms.load(Ordering::SeqCst).saturating_sub(status.lag_ms.load(Ordering::SeqCst));
         let playing = status.state.load(Ordering::SeqCst) == tonearm_core::audio::PLAYING;
-        let lines: Option<(String, Vec<cast::LyricLine>)> = self.lyrics.lock().unwrap().get(&song.video_id).filter(|l| l.synced).map(|found| {
-            let translated = found.lines.iter().filter(|l| !l.translation.is_empty()).count();
+        let found = self.lyrics.lock().unwrap().get(&song.video_id).filter(|l| l.synced).cloned();
+        let lines: Option<(String, Vec<cast::LyricLine>)> = found.map(|mut found| {
+            // Translated into the language picked in Settings now, so the
+            // device follows the setting while casting.
+            let target = crate::translate_target();
+            let missing = tonearm_core::lyrics::official_translations(&mut found.lines, target);
+            if !missing.is_empty() {
+                let cached = self.translated.lock().unwrap().get(&(song.video_id.clone(), target.to_string())).cloned();
+                match cached {
+                    Some(done) => {
+                        for (line, done) in found.lines.iter_mut().zip(&done.lines) {
+                            line.translation = done.translation.clone();
+                        }
+                    }
+                    None => {
+                        let wanted = format!("{}/{target}", song.video_id);
+                        let ask = with(|c| {
+                            let new = c.translation_asked.as_deref() != Some(wanted.as_str());
+                            if new {
+                                c.translation_asked = Some(wanted);
+                            }
+                            new
+                        });
+                        if ask {
+                            let me = self.clone();
+                            let id = song.video_id.clone();
+                            std::thread::spawn(move || {
+                                me.translated_lyrics(id);
+                            });
+                        }
+                    }
+                }
+            }
             (
-                format!("{}/{}/{translated}", song.video_id, found.lines.len()),
+                cast::lyrics_key(&song.video_id, &found),
                 found
                     .lines
                     .iter()

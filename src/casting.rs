@@ -30,12 +30,6 @@ pub struct Casting {
     lyrics_sent: Option<String>,
 }
 
-/// Names a song's lyrics as found, so they go again once translated.
-fn lyrics_key(id: &str, found: &crate::lyrics::Lyrics) -> String {
-    let translated = found.lines.iter().filter(|l| !l.translation.is_empty()).count();
-    format!("{id}/{}/{translated}", found.lines.len())
-}
-
 /// What this computer is called on the network, for the device to show.
 fn computer_name() -> String {
     std::env::var("COMPUTERNAME")
@@ -226,7 +220,7 @@ impl App {
         // The song's synced lyrics, once they're found.
         let lyrics = self.lyrics.borrow();
         if let Some(found) = lyrics.found.as_ref().filter(|f| f.synced && lyrics.generation == player.generation) {
-            let key = lyrics_key(&id, found);
+            let key = cast::lyrics_key(&id, found);
             if casting.lyrics_sent.as_deref() != Some(key.as_str()) {
                 let lines: Vec<cast::LyricLine> = found
                     .lines

@@ -128,6 +128,18 @@ pub struct LyricLine {
     pub align: u8,
 }
 
+/// Names a song's lyrics as they stand, translations and all, so they go
+/// to the device again whenever a translation comes, goes or changes
+/// language.
+pub fn lyrics_key(id: &str, found: &crate::lyrics::Lyrics) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for line in &found.lines {
+        line.translation.hash(&mut hasher);
+    }
+    format!("{id}/{}/{:x}", found.lines.len(), hasher.finish())
+}
+
 /// Cast messages stop at 64 KB. Lyrics larger than this lose their
 /// syllable timing, then their translations, then their backing vocals,
 /// then don't go at all.

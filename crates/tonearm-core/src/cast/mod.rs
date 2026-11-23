@@ -21,7 +21,7 @@ mod stream;
 pub use find::Finder;
 #[cfg(not(windows))]
 pub use find::{lost, seen};
-pub use session::{status, Event, LyricLine, NowPlaying, Session};
+pub use session::{lyrics_key, status, Event, LyricLine, NowPlaying, Session};
 pub use stream::{Feed, Pipe};
 #[cfg(test)]
 pub use stream::Server;
