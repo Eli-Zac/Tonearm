@@ -210,10 +210,14 @@ pub struct Settings {
     /// Seconds the song coming in starts later in itself, from its first
     /// downbeat, or from its top when not beat matched.
     pub in_shift: f64,
-    /// How many bars the mix lasts, or 0 for about as long as the
-    /// crossfade setting says.
+    /// How many bars the mix lasts. 0 is Auto: `AUTO_BARS` bars when the
+    /// songs are beat matched, as in a mix, else as long as the crossfade
+    /// setting says.
     pub bars: u32,
 }
+
+/// How many bars an Auto length mix lasts.
+pub const AUTO_BARS: u32 = 4;
 
 /// The lengths in the editor's menu.
 pub const LENGTH_CHOICES: [(u32, &str); 5] = [
@@ -456,23 +460,13 @@ fn speed_for(out_beat: f64, in_beat: f64) -> f64 {
         .unwrap_or(1.0)
 }
 
-/// How many beats long a mix about `seconds` long is: a whole number of bars.
-fn mix_beats(beat: f64, seconds: f64) -> f64 {
-    [4.0, 8.0, 16.0, 32.0]
-        .into_iter()
-        .min_by(|a, b| {
-            let off = |n: f64| (n * beat / seconds.max(1.0)).ln().abs();
-            off(*a).total_cmp(&off(*b))
-        })
-        .unwrap_or(16.0)
-}
-
 fn steady_part(a: &Analysis, from: f64, to: f64) -> Option<LocalGrid> {
     a.local(from, to).filter(LocalGrid::steady)
 }
 
 /// Beat matched timing from `out`, `out_length` seconds long, into `inn`,
-/// about `seconds` long, or exactly `bars` bars when that is not 0.
+/// exactly `bars` bars long, or `AUTO_BARS` when that is 0. `seconds` is the
+/// stretch of steady beat to look for before the end.
 ///
 /// The mix starts on a downbeat of the song going out, as late as lets it
 /// finish before that song's beat stops, and where its beat is steady. The
@@ -501,7 +495,7 @@ fn timing(out: &Analysis, out_length: f64, inn: &Analysis, seconds: f64, bars: u
             continue;
         };
         steady_somewhere = true;
-        let beats = if bars > 0 { 4.0 * bars as f64 } else { mix_beats(rough.beat, seconds) };
+        let beats = 4.0 * if bars > 0 { bars } else { AUTO_BARS } as f64;
         let span = beats * rough.beat;
         // The old song's last section finishes as the mix does: the latest
         // section start it can end on, not too far before its end, whose
@@ -709,7 +703,10 @@ pub fn plan(
             // Bars at the old song's own tempo, or at 120 bpm before it is
             // analyzed.
             let length = match settings.bars {
-                0 => seconds.max(0.5),
+                // In a mix Auto is the same number of bars as when matched.
+                // Outside one, a crossfade lasts as long as its setting says.
+                0 if !settings.beatmatch => seconds.max(0.5),
+                0 => 4.0 * AUTO_BARS as f64 * out.map_or(0.5, Analysis::beat),
                 bars => 4.0 * bars as f64 * out.map_or(0.5, Analysis::beat),
             };
             (unmatched_out_at(out, out_length, length), unmatched_in(), length, length / 16.0)
@@ -1061,9 +1058,26 @@ mod tests {
         let wobbly = song(wobbly, 128.0, 0.0, 200.0);
         assert!(plan(fade, Some(&out), 200.0, Some(&wobbly), 8.0).out_at.is_none());
         assert!(why_unmatched(Some(&out), 200.0, Some(&wobbly), 8.0, 0).is_some());
-        // And without analyses it is a plain fade of the length asked.
-        let plain = plan(fade, None, 200.0, None, 6.0);
+        // And without analyses a plain crossfade, which does not beat match,
+        // is a fade of the length asked.
+        let mut crossfade = fade;
+        crossfade.beatmatch = false;
+        let plain = plan(crossfade, None, 200.0, None, 6.0);
         assert_eq!((plain.out_at, plain.length), (None, 6.0));
+    }
+
+    #[test]
+    fn an_auto_length_mix_is_four_bars_whatever_the_crossfade_setting() {
+        let (a, b) = (steady(128.0, 0.0, 200.0), steady(126.0, 0.0, 200.0));
+        let auto = Settings::auto(Some(&a), Some(&b), true);
+        assert_eq!(auto.bars, 0);
+        for seconds in [4.0, 8.0, 30.0] {
+            let p = plan(auto, Some(&a), 200.0, Some(&b), seconds);
+            assert!((p.length - 16.0 * a.beat()).abs() < 0.2, "{seconds}: {}", p.length);
+        }
+        // Not analysed, in a mix: four bars at 120 bpm.
+        let blind = plan(Settings::auto(None, None, true), None, 200.0, None, 30.0);
+        assert_eq!(blind.length, 8.0);
     }
 
     #[test]
