@@ -7833,6 +7833,14 @@ export component AppWindow inherits Window {
                         property <length> ox: self.lx * self.oe + (-self.c - 24px - self.lx) * self.ol;
                         property <length> oy: self.cy * min(1, self.oe);
                         property <length> ix: (self.width + 24px) + (self.rx - self.width - 24px) * self.ie - self.rx * self.il;
+                        // Each cover's size and top as drawn below, which
+                        // the light round its border follows while they
+                        // scale.
+                        property <length> ow: self.width + (self.c - self.width) * self.oe;
+                        property <length> oh: self.height + (self.c - self.height) * self.oe;
+                        property <length> iy: self.cy - self.cy * min(1, self.il);
+                        property <length> iw: self.c + (self.width - self.c) * min(1, self.il);
+                        property <length> ih: self.c + (self.height - self.c) * min(1, self.il);
                         // Rays of light falling from beneath the covers, as
                         // stage lights: two from each, one leaning out and
                         // one more upright, each sweeping slowly from side
@@ -7948,13 +7956,15 @@ export component AppWindow inherits Window {
                                 property <int> j: mod(i, 40);
                                 property <float> fade: 1 - self.j / 40;
                                 property <length> x0: self.k == 0 ? mixbox.ox : mixbox.ix;
-                                property <length> y0: self.k == 0 ? mixbox.oy : mixbox.cy;
+                                property <length> y0: self.k == 0 ? mixbox.oy : mixbox.iy;
+                                property <length> bw: self.k == 0 ? mixbox.ow : mixbox.iw;
+                                property <length> bh: self.k == 0 ? mixbox.oh : mixbox.ih;
                                 property <float> u: mod(mixbox.t / 2.6 + self.k * 0.5 - self.j * 0.003 + 10, 1.0);
                                 property <float> d: self.u * 4;
                                 property <float> s: floor(self.d);
                                 property <float> f: self.d - self.s;
-                                property <length> px: self.s == 0 ? self.x0 + mixbox.c * self.f : self.s == 1 ? self.x0 + mixbox.c : self.s == 2 ? self.x0 + mixbox.c * (1 - self.f) : self.x0;
-                                property <length> py: self.s == 0 ? self.y0 : self.s == 1 ? self.y0 + mixbox.c * self.f : self.s == 2 ? self.y0 + mixbox.c : self.y0 + mixbox.c * (1 - self.f);
+                                property <length> px: self.s == 0 ? self.x0 + self.bw * self.f : self.s == 1 ? self.x0 + self.bw : self.s == 2 ? self.x0 + self.bw * (1 - self.f) : self.x0;
+                                property <length> py: self.s == 0 ? self.y0 : self.s == 1 ? self.y0 + self.bh * self.f : self.s == 2 ? self.y0 + self.bh : self.y0 + self.bh * (1 - self.f);
                                 property <length> size: self.j == 0 ? mixbox.c * 0.16 : 1.5px + 2.5px * self.fade;
                                 width: self.size;
                                 height: self.size;

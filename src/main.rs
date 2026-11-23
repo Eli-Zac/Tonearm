@@ -491,6 +491,9 @@ struct App {
     /// It runs on this clock and leans towards the reports, which come in
     /// steps.
     playhead_clock: Cell<Option<(f64, Instant)>>,
+    /// The song the playhead last followed, and when it took over. Reports
+    /// are unsteady for a moment as the playing song changes over.
+    playhead_song: RefCell<(String, Instant)>,
     /// When the preview's spinner started turning.
     spinner_from: Cell<Option<Instant>>,
 /// The language lyrics are translated into: an index into
@@ -3933,7 +3936,10 @@ impl App {
             until: Instant::now() + Duration::from_secs_f32(seconds),
         });
         self.ui.set_fade_motion_on(motion_on);
-        self.ui.invoke_begin_crossfade(seconds);
+        // The mix animation is for mixes. A plain crossfade just fades.
+        if self.mix_mode() {
+            self.ui.invoke_begin_crossfade(seconds);
+        }
     }
 
     /// The engine started the armed next song gaplessly. Moves the player
@@ -4784,7 +4790,11 @@ impl App {
             self.show_playhead(seconds);
             self.cast_now_playing(seconds, duration, playing);
             // Marks where the next song will start to mix in.
-            let fade_from = self.mix_start(duration).map_or(1.0, |at| (at / duration).clamp(0.0, 1.0));
+            // Only for mixes: a plain crossfade leaves the timeline alone.
+            let fade_from = self
+                .mix_start(duration)
+                .filter(|_| self.mix_mode())
+                .map_or(1.0, |at| (at / duration).clamp(0.0, 1.0));
             ui.set_fade_from(fade_from);
             ui.set_position_text(clock_text(seconds));
             ui.set_progress(if duration > 0.0 {
@@ -6194,6 +6204,7 @@ fn main() -> Result<(), slint::PlatformError> {
         previewing: RefCell::new(None),
         preview_track: RefCell::new(None),
         playhead_clock: Cell::new(None),
+        playhead_song: RefCell::new((String::new(), Instant::now())),
         spinner_from: Cell::new(None),
 translate: Cell::new(load_translate()),
         fade_next: RefCell::new(None),

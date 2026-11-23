@@ -47,6 +47,60 @@ import uniffi.tonearm_android.MixEditorData
 import uniffi.tonearm_android.MixSettings
 import uniffi.tonearm_android.Tonearm as Core
 
+/**
+ * A preview playhead that keeps its own time. `sample` takes the core's
+ * position (0 to 1 across the picture, null while the playing song changes
+ * over) and leans the clock towards it; `shown` is where to draw it now.
+ * Only a big jump, as after a seek, moves it at once.
+ */
+private class HeadClock {
+    private var at = -1f
+    private var rate = 0f
+    private var stamp = 0L
+    private var lastRaw = -1f
+    private var lastRawAt = 0L
+    private var heardAt = 0L
+
+    fun reset() {
+        at = -1f
+        rate = 0f
+        lastRaw = -1f
+    }
+
+    private fun predicted(now: Long) = at + rate * ((now - stamp) / 1e9f)
+
+    fun sample(raw: Float?, now: Long) {
+        if (raw == null) return
+        heardAt = now
+        if (at < 0f) {
+            at = raw
+            stamp = now
+        } else {
+            val ahead = predicted(now)
+            if (kotlin.math.abs(raw - ahead) > 0.12f) {
+                at = raw
+            } else {
+                at = ahead + (raw - ahead) * 0.1f
+            }
+            stamp = now
+        }
+        if (lastRaw >= 0f && now > lastRawAt && raw >= lastRaw) {
+            val r = (raw - lastRaw) / ((now - lastRawAt) / 1e9f)
+            // The rate is a steady thing: a poll or two off doesn't move it.
+            rate = if (rate == 0f) r else rate * 0.85f + r * 0.15f
+        }
+        lastRaw = raw
+        lastRawAt = now
+    }
+
+    fun shown(now: Long): Float {
+        if (at < 0f) return -1f
+        // No word for a while: the preview has left the picture.
+        if (now - heardAt > 700_000_000L) return -1f
+        return predicted(now).coerceIn(0f, 1f)
+    }
+}
+
 /** Counts saved transitions, so a mixed playlist's rows load again after one. */
 object MixSaves {
     var count by androidx.compose.runtime.mutableIntStateOf(0)
@@ -96,10 +150,21 @@ fun MixSheet(
         }
     }
 
+    // The playhead runs on its own clock, every frame. The polls below only
+    // nudge it, so steps in the reports, and the moment the playing song
+    // changes over, never show as jitter.
+    val head = remember(from.videoId, to.videoId) { HeadClock() }
+    LaunchedEffect(previewing) {
+        while (previewing) {
+            withFrameNanos { now -> previewAt = head.shown(now) }
+        }
+    }
+
     LaunchedEffect(previewing) {
         // The songs take a moment to open: not playing yet is not the end,
         // until it has started once, or 20 s have gone by.
         var waited = 0
+        head.reset()
         while (previewing) {
             val state = try {
                 withContext(Dispatchers.IO) { core.mixPreviewActive() to core.mixPreviewPosition() }
@@ -109,10 +174,11 @@ fun MixSheet(
             }
             if (state?.first == true) {
                 starting = false
-                previewAt = state.second ?: -1f
+                head.sample(state.second, System.nanoTime())
             } else if (!starting || waited > 20_000) {
                 starting = false
                 previewing = false
+                head.reset()
                 previewAt = -1f
             }
             delay(60)

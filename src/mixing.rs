@@ -420,11 +420,28 @@ impl App {
         // jumping, and only snaps on a big change, as after a seek.
         let t = found.map(|(target, _)| {
             let now = Instant::now();
+            // Where the report comes from changes at the start of the mix, as
+            // the next song takes over. Its first positions are unsteady, so
+            // for a moment the clock runs on alone.
+            let settling = {
+                let id = self.playing_id().unwrap_or_default();
+                let mut song = self.playhead_song.borrow_mut();
+                if song.0 != id {
+                    *song = (id, now);
+                }
+                song.1.elapsed().as_secs_f64() < 0.6
+            };
             let t = match self.playhead_clock.get() {
                 Some((last, at)) => {
                     let predicted = last + if playing { at.elapsed().as_secs_f64() } else { 0.0 };
                     let off = target - predicted;
-                    if off.abs() > 0.75 { target } else { predicted + off * 0.12 }
+                    if settling && off.abs() < 2.0 {
+                        predicted
+                    } else if off.abs() > 1.5 {
+                        target
+                    } else {
+                        predicted + off * 0.05
+                    }
                 }
                 None => target,
             };
