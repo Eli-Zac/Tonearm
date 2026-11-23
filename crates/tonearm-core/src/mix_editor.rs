@@ -204,6 +204,15 @@ pub fn pick_preset(
     Ok(settings)
 }
 
+/// The parts of `pick_choice`, in the order `editor_data` lists the choices.
+/// Callers use these names, not numbers, so a menu can't change another's.
+pub const CHOICE_LENGTH: usize = 0;
+pub const CHOICE_VOLUME: usize = 1;
+pub const CHOICE_EQ: usize = 2;
+pub const CHOICE_FILTER: usize = 3;
+pub const CHOICE_EFFECT: usize = 4;
+pub const CHOICE_LOOP: usize = 5;
+
 pub fn pick_choice(mut settings: Settings, part: usize, index: usize) -> Result<Settings, String> {
     use transition::*;
     fn at<T: Copy>(values: &[(T, &str)], index: usize) -> Result<T, String> {
@@ -212,27 +221,27 @@ pub fn pick_choice(mut settings: Settings, part: usize, index: usize) -> Result<
     match part {
         // A length of its own is a choice like the others: it makes the
         // transition custom, so it is kept when saved and not read as Auto.
-        0 => {
+        CHOICE_LENGTH => {
             settings.bars = at(&LENGTH_CHOICES, index)?;
             settings.preset = Preset::Custom;
         }
-        1 => {
+        CHOICE_VOLUME => {
             settings.volume = at(&VOLUME_CHOICES, index)?;
             settings.preset = Preset::Custom;
         }
-        2 => {
+        CHOICE_EQ => {
             settings.eq = at(&EQ_CHOICES, index)?;
             settings.preset = Preset::Custom;
         }
-        3 => {
+        CHOICE_FILTER => {
             settings.filter = at(&FILTER_CHOICES, index)?;
             settings.preset = Preset::Custom;
         }
-        4 => {
+        CHOICE_EFFECT => {
             settings.effect = at(&EFFECT_CHOICES, index)?;
             settings.preset = Preset::Custom;
         }
-        5 => {
+        CHOICE_LOOP => {
             settings.looping = at(&LOOP_CHOICES, index)?;
             settings.preset = Preset::Custom;
         }
@@ -494,6 +503,37 @@ mod tests {
         let picked = pick_preset(settings, 0, None, None).unwrap();
         assert_eq!(picked.bars, 8);
         assert!(pick_preset(settings, usize::MAX, None, None).is_err());
+    }
+
+    #[test]
+    fn each_menu_changes_only_its_own_setting() {
+        use transition::*;
+        let base = Settings::preset(Preset::Fade);
+        let by = |part: usize| pick_choice(base, part, 1).unwrap();
+        // Index 1 differs from the base on all but the volume, which Fade
+        // may already have; the others must each move alone.
+        let length = by(CHOICE_LENGTH);
+        assert_eq!(length.bars, LENGTH_CHOICES[1].0);
+        assert_eq!((length.volume, length.eq, length.filter, length.effect, length.looping), (base.volume, base.eq, base.filter, base.effect, base.looping));
+        let volume = by(CHOICE_VOLUME);
+        assert_eq!(volume.volume, VOLUME_CHOICES[1].0);
+        assert_eq!((volume.bars, volume.eq, volume.filter, volume.effect, volume.looping), (base.bars, base.eq, base.filter, base.effect, base.looping));
+        let eq = by(CHOICE_EQ);
+        assert_eq!(eq.eq, EQ_CHOICES[1].0);
+        assert_eq!((eq.bars, eq.volume, eq.filter, eq.effect, eq.looping), (base.bars, base.volume, base.filter, base.effect, base.looping));
+        let filter = by(CHOICE_FILTER);
+        assert_eq!(filter.filter, FILTER_CHOICES[1].0);
+        assert_eq!((filter.bars, filter.volume, filter.eq, filter.effect, filter.looping), (base.bars, base.volume, base.eq, base.effect, base.looping));
+        let effect = by(CHOICE_EFFECT);
+        assert_eq!(effect.effect, EFFECT_CHOICES[1].0);
+        assert_eq!((effect.bars, effect.volume, effect.eq, effect.filter, effect.looping), (base.bars, base.volume, base.eq, base.filter, base.looping));
+        let looping = by(CHOICE_LOOP);
+        assert_eq!(looping.looping, LOOP_CHOICES[1].0);
+        assert_eq!((looping.bars, looping.volume, looping.eq, looping.filter, looping.effect), (base.bars, base.volume, base.eq, base.filter, base.effect));
+        // And they are listed in this order, so a menu's row is its part.
+        let view = editor_data(base, base, None, 180.0, None, 8.0, 0.5);
+        let titles: Vec<&str> = view.choices.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(&titles[..2], ["Length", "Volume"]);
     }
 
     #[test]

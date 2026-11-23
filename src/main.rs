@@ -6398,12 +6398,15 @@ translate: Cell::new(load_translate()),
     on!(on_preview_mix, |app, id| app.preview_row_mix(id as usize));
     on!(on_mix_preview, |app| app.preview_editing());
     on!(on_mix_preset_picked, |app, i| app.mix_preset_picked(i as usize));
-    on!(on_mix_volume_picked, |app, i| app.mix_choice_picked(0, i as usize));
-    on!(on_mix_eq_picked, |app, i| app.mix_choice_picked(1, i as usize));
-    on!(on_mix_filter_picked, |app, i| app.mix_choice_picked(2, i as usize));
-    on!(on_mix_effect_picked, |app, i| app.mix_choice_picked(3, i as usize));
-    on!(on_mix_loop_picked, |app, i| app.mix_choice_picked(4, i as usize));
-    on!(on_mix_length_picked, |app, i| app.mix_choice_picked(5, i as usize));
+    {
+        use tonearm_core::mix_editor::*;
+        on!(on_mix_volume_picked, |app, i| app.mix_choice_picked(CHOICE_VOLUME as u8, i as usize));
+        on!(on_mix_eq_picked, |app, i| app.mix_choice_picked(CHOICE_EQ as u8, i as usize));
+        on!(on_mix_filter_picked, |app, i| app.mix_choice_picked(CHOICE_FILTER as u8, i as usize));
+        on!(on_mix_effect_picked, |app, i| app.mix_choice_picked(CHOICE_EFFECT as u8, i as usize));
+        on!(on_mix_loop_picked, |app, i| app.mix_choice_picked(CHOICE_LOOP as u8, i as usize));
+        on!(on_mix_length_picked, |app, i| app.mix_choice_picked(CHOICE_LENGTH as u8, i as usize));
+    }
     on!(on_mix_beatmatch_toggled, |app| app.mix_beatmatch_toggled());
     on!(on_mix_key_lock_toggled, |app| app.mix_key_lock_toggled());
     on!(on_mix_save, |app| app.mix_save());
