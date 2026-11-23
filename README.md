@@ -116,8 +116,8 @@ The resolver lives behind one trait in `crates/tonearm-core/src/resolver.rs`. Se
 
 The cast button by the sleep timer lists the Google Cast devices on your
 network. The device plays Tonearm's own output as a live stream from your
-computer, so crossfades, mixes and offline songs all carry over. Skips and
-seeks take about two seconds to be heard, and the computer has to stay on.
+computer, so crossfades, mixes and offline songs all carry over. Pausing is
+heard at once, skips and seeks within about a second, and the computer has to stay on.
 
 The device fetches the stream from your computer, so Windows Firewall asks
 the first time you cast. If casting fails with "couldn't reach this
@@ -132,7 +132,7 @@ screen can use Tonearm's own receiver instead, `receiver/public/index.html`,
 which shows each song's cover, title, artist and progress. It is Cast app
 `79497171`, served from `https://tonearm-cast.eli-zac.dev/` by a Cloudflare
 Worker (`cd receiver && npx wrangler deploy` to update it). A build uses it
-when `TONEARM_CAST_APP` holds that id (in `keys.env` or the environment).
+unless `TONEARM_CAST_APP` (in `keys.env` or the environment) names another id.
 Until the app is published, only devices registered in the Cast developer
 console can open it; any other device falls back to Google's receiver.
 

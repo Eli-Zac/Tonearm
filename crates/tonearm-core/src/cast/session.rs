@@ -43,6 +43,9 @@ const STATUS_EVERY: Duration = Duration::from_secs(1);
 /// How long a device has to take up a volume change before the cast
 /// scales the stream instead.
 const VOLUME_IGNORED: Duration = Duration::from_millis(1500);
+/// Device reports this soon after a volume change here are taken as echoes
+/// of it, not as someone else's change.
+const VOLUME_ECHO: Duration = Duration::from_millis(2000);
 /// A device that has not fetched the stream this long after being told
 /// the link never will: something between is turning it away.
 const UNREACHED: Duration = Duration::from_secs(12);
@@ -391,6 +394,9 @@ impl Cast {
         let mut volume_check: Option<(f32, Instant)> = None;
         // The level last asked for here.
         let mut sent_volume: Option<f32> = None;
+        // When the level was last asked for here, to tell echoes from the
+        // device's own changes.
+        let mut asked_volume: Option<Instant> = None;
         let mut heard = Instant::now();
         let mut pinged = Instant::now();
         let mut asked = Instant::now();
@@ -407,6 +413,9 @@ impl Cast {
                      or set this network to private in Windows settings"
                 ));
             }
+            // Everything waiting is taken at once, so a dragged slider's
+            // levels never queue up behind the loop's pace.
+            loop {
             match rx.try_recv() {
                 Ok(Command::Stop) | Err(TryRecvError::Disconnected) => {
                     let id = self.next_request();
@@ -419,6 +428,7 @@ impl Cast {
                         self.pipe.set_gain(gain_for(level));
                     }
                     wanted_volume = Some(level);
+                    asked_volume = Some(Instant::now());
                 }
                 Ok(Command::Now(now)) => {
                     let lead = self.pipe.lead();
@@ -426,7 +436,8 @@ impl Cast {
                     screen.update(now, lead)
                 }
                 Ok(Command::Lyrics(message)) => channel.send(&transport, TONEARM, &message)?,
-                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Empty) => break,
+            }
             }
             if let Some(now) = screen.due() {
                 let mut message = json!({
@@ -482,6 +493,16 @@ impl Cast {
                 }
                 if asked.elapsed() >= STATUS_EVERY {
                     asked = Instant::now();
+                    if std::env::var_os("TONEARM_CAST_DEBUG").is_some() {
+                        // How far the device trails what has been made, and
+                        // the stream's own clock, to see where a delay is.
+                        eprintln!(
+                            "cast lag: {:.2}s behind, stream at {:.1}s, paused {}",
+                            self.pipe.lead().as_secs_f32(),
+                            self.pipe.stream_seconds(),
+                            self.pipe.paused()
+                        );
+                    }
                     let id = self.next_request();
                     channel.send(&transport, MEDIA, &json!({"type": "GET_STATUS", "mediaSessionId": media, "requestId": id}))?;
                 }
@@ -514,7 +535,12 @@ impl Cast {
                         // Ours coming back changes nothing. Anyone else's,
                         // such as a phone's slider, moves ours, and with a
                         // device that ignores its volume, the stream's.
-                        let theirs = volume.is_none_or(|v| (v - level).abs() > 0.01)
+                        // Reports trail what was sent by a moment, so ones
+                        // soon after our own change are echoes of older
+                        // levels, not anyone else's change.
+                        let echo = asked_volume.is_some_and(|at| at.elapsed() < VOLUME_ECHO);
+                        let theirs = !echo
+                            && volume.is_none_or(|v| (v - level).abs() > 0.01)
                             && sent_volume.is_none_or(|v| (v - level).abs() > 0.01);
                         if scaled && !theirs {
                             volume = Some(level);
@@ -887,7 +913,9 @@ mod tests {
             Some(path) => Input::File(path),
             None => {
                 let resolver = crate::resolver::default().expect("no resolver");
+                let resolving = Instant::now();
                 let stream = resolver.resolve(&video_id).expect("resolve");
+                println!("resolved the link in {:?}", resolving.elapsed());
                 Input::Http {
                     url: stream.url,
                     headers: stream.headers,
@@ -904,6 +932,7 @@ mod tests {
             assert!(started.elapsed() < Duration::from_secs(30), "the song never started");
             std::thread::sleep(Duration::from_millis(50));
         }
+        println!("song playing locally after {:?}", started.elapsed());
         let device = Device {
             id: "test".into(),
             name: "test device".into(),
@@ -918,8 +947,9 @@ mod tests {
             let _ = tx.send(event);
         });
         audio.route(Some(pipe));
+        let routed = Instant::now();
 
-        let artist = if item.artists.is_empty() {
+        let artist =if item.artists.is_empty() {
             item.subtitle.split(" • ").next().unwrap_or_default().to_string()
         } else {
             item.artists.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ")
@@ -929,7 +959,7 @@ mod tests {
         let until = Instant::now() + Duration::from_secs(seconds);
         while Instant::now() < until {
             while let Ok(event) = rx.try_recv() {
-                println!("event {event:?}");
+                println!("event {event:?} {:?} after the cast began", routed.elapsed());
                 if let Event::Ended(reason) = event {
                     panic!("the cast ended: {reason:?}");
                 }

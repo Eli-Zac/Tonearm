@@ -3,7 +3,8 @@
 //!
 //! The engine hands its mixer to a `Pipe` in place of the sound card. The
 //! device pulls the stream, and we keep only `LEAD` ahead of what it has
-//! played, so a skip or a seek is heard within about that long. How far
+//! played, so a skip or a seek is heard within about that long (a pause
+//! goes to the device itself and is heard at once). How far
 //! the device has got comes from its media status, with the time since it
 //! connected as a floor, so a device that reports oddly never stalls.
 
@@ -13,11 +14,19 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// How far the stream runs ahead of the device.
-const LEAD: f64 = 2.0;
+/// How far the stream runs ahead of the device. What is already sent can't
+/// be taken back, so this is how long a skip or seek takes to be heard,
+/// less the device's own buffer. Short, but enough that a hiccup on the
+/// network doesn't run the device dry.
+const LEAD: f64 = 0.75;
+/// The lead until the device first plays. It won't start on less than about
+/// this much: with a shorter one it took 4 s longer to begin.
+const START_LEAD: f64 = 2.0;
 /// The most a device's own report may trail the time since it connected
 /// before that time is trusted instead.
-const SLACK: f64 = 8.0;
+/// It also caps how far ahead of a device that reports oddly the stream can
+/// run, and so how long a skip or pause waits behind what is already sent.
+const SLACK: f64 = 3.0;
 /// Frames written at a time: about 10 ms.
 const FRAMES: usize = 512;
 
@@ -76,6 +85,8 @@ pub struct Pipe {
     closed: AtomicBool,
     /// What the stream's samples are scaled by, as f32 bits.
     gain: AtomicU32,
+    /// Set once the device has said it is playing.
+    started: AtomicBool,
 }
 
 impl Pipe {
@@ -143,6 +154,9 @@ impl Pipe {
 
     /// The device's own word on how far it has played this connection.
     pub fn heard(&self, seconds: f64, playing: bool) {
+        if playing {
+            self.started.store(true, Ordering::SeqCst);
+        }
         let mut clock = self.clock.lock().unwrap();
         clock.heard = Some(Heard {
             seconds: seconds - clock.base,
@@ -312,7 +326,8 @@ fn answer(mut stream: TcpStream, path: &str, pipe: &Pipe) -> std::io::Result<()>
             last = now;
             clock.sent - clock.played()
         };
-        if ahead >= LEAD {
+        let lead = if pipe.started.load(Ordering::SeqCst) { LEAD } else { START_LEAD };
+        if ahead >= lead {
             std::thread::sleep(Duration::from_millis(5));
             continue;
         }
@@ -409,7 +424,7 @@ fn serves_a_paced_wav() {
     assert_eq!(u32::from_le_bytes(header[24..28].try_into().unwrap()), 48_000);
     // The lead comes at once. More than that takes real time.
     let start = Instant::now();
-    let mut audio = vec![0u8; (LEAD * 48_000.0) as usize * 4];
+    let mut audio = vec![0u8; (START_LEAD * 48_000.0) as usize * 4];
     reader.read_exact(&mut audio).unwrap();
     assert!(start.elapsed() < Duration::from_millis(500), "{:?}", start.elapsed());
     assert_eq!(i16::from_le_bytes([audio[0], audio[1]]), 16383);
@@ -425,6 +440,6 @@ fn serves_a_paced_wav() {
     assert_eq!(i16::from_le_bytes([quieter[n - 4], quieter[n - 3]]), 4095);
     // The device's report moves the pacing: it has played 1 s and stopped.
     pipe.heard(1.0, false);
-    assert!(pipe.lead() > Duration::from_millis(1000), "{:?}", pipe.lead());
+    assert!(pipe.lead() > Duration::from_millis(500), "{:?}", pipe.lead());
     pipe.close();
 }

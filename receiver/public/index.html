@@ -12,10 +12,14 @@
 <head>
 <meta charset="utf-8">
 <title>Tonearm</title>
+<!-- The Cast framework first, and the font after without blocking: a
+     stylesheet in the head holds back every script after it until it has
+     downloaded, which slowed the receiver's start on a TV. The font swaps in
+     when it arrives; system-ui shows until then. -->
+<script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Figtree:wght@500;700;800&display=swap" rel="stylesheet">
-<script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Figtree:wght@500;700;800&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
 <style>
   :root {
     --ink: #ffffff;

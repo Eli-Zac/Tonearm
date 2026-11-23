@@ -19,7 +19,12 @@ fn main() {
             let (key, value) = line.split_once('=')?;
             (key.trim() == name).then(|| value.trim().to_string())
         });
-        let value = std::env::var(name).ok().or(from_file).unwrap_or_default();
+        let mut value = std::env::var(name).ok().or(from_file).unwrap_or_default();
+        // Tonearm's receiver is public (it is in the README), so every build
+        // has it. Without it a screen shows Google's Default Media Receiver.
+        if value.is_empty() && name == "TONEARM_CAST_APP" {
+            value = "79497171".into();
+        }
         if !value.is_empty() {
             println!("cargo:rustc-env={name}={value}");
         }
