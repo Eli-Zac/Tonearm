@@ -28,6 +28,9 @@ export struct MixSong {
     bpm: string,
     camelot: string,
     key-color: color,
+    // Whether the song has been analysed. Without it there is no waveform to
+    // draw, so the editor shows a skeleton of one.
+    analysed: bool,
     // Why the two songs cannot be beat matched, shown on the tempo. Empty
     // when they can, or beatmatching is off.
     warning: string,
@@ -7554,6 +7557,7 @@ export component AppWindow inherits Window {
                         // pictures wide, so dragging brings more of them into
                         // view.
                         Rectangle {
+                            visible: root.mix-from.analysed;
                             x: parent.out-drag - parent.width;
                             width: parent.width * 3;
                             height: parent.height;
@@ -7561,11 +7565,36 @@ export component AppWindow inherits Window {
                             MixPath { commands: root.mix-out-low; fill: #e0884a; }
                         }
                         Rectangle {
+                            visible: root.mix-to.analysed;
                             x: parent.in-drag - parent.width;
                             width: parent.width * 3;
                             height: parent.height;
                             MixPath { commands: root.mix-in-wave; fill: #2f62e0; }
                             MixPath { commands: root.mix-in-low; fill: #e0884a; }
+                        }
+                        // A song with no analysis has no waveform yet: bars
+                        // of changing height stand in for it in its half of
+                        // the picture, with the skeletons' light sweeping
+                        // over them, until the analysis is done.
+                        for i in 56: Bone {
+                            visible: !root.mix-from.analysed;
+                            property <float> shape: abs(sin(i * 0.55rad)) * 0.6 + abs(sin((i * 1.7 + 1) * 1rad)) * 0.4;
+                            property <length> bar-h: min(parent.height / 2 - 8px, 10px + self.shape * (parent.height / 2 - 26px));
+                            x: parent.width / 56 * i + parent.width / 56 * 0.18;
+                            width: parent.width / 56 * 0.64;
+                            height: self.bar-h;
+                            y: parent.height / 4 - self.bar-h / 2;
+                            corner: self.width / 2;
+                        }
+                        for i in 56: Bone {
+                            visible: !root.mix-to.analysed;
+                            property <float> shape: abs(sin(i * 0.55rad)) * 0.6 + abs(sin((i * 1.7 + 1) * 1rad)) * 0.4;
+                            property <length> bar-h: min(parent.height / 2 - 8px, 10px + self.shape * (parent.height / 2 - 26px));
+                            x: parent.width / 56 * i + parent.width / 56 * 0.18;
+                            width: parent.width / 56 * 0.64;
+                            height: self.bar-h;
+                            y: parent.height * 3 / 4 - self.bar-h / 2;
+                            corner: self.width / 2;
                         }
                         // Drag a song along to change where they meet.
                         TouchArea {

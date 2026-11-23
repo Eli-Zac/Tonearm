@@ -313,6 +313,13 @@ impl App {
             return;
         };
         let saved = library::transition(a, b).unwrap_or_else(|| self.auto_settings(a, b));
+        // A song with no analysis yet is queued for one, so its waveform
+        // fills in where the editor shows a skeleton.
+        for id in [a, b] {
+            if self.analysis_of(id).is_none() {
+                crate::analysis::request(id);
+            }
+        }
         *self.editing.borrow_mut() = Some(Editing {
             from: from.clone(),
             to: to.clone(),
@@ -333,6 +340,59 @@ impl App {
         ui.set_mix_to(self.mix_song(songs[n + 1].0, to));
         self.show_editor();
         ui.invoke_open_mix_panel();
+    }
+
+    /// An analysis finished. If the editor has that song open, its tempo, key
+    /// and waveform fill in where the skeleton was, and an Auto transition
+    /// follows what the songs turned out to be.
+    pub fn editor_analysis_ready(&self, video_id: &str) {
+        let (from, to) = {
+            let editing = self.editing.borrow();
+            let Some(e) = editing.as_ref() else {
+                return;
+            };
+            (e.from.video_id.clone(), e.to.video_id.clone())
+        };
+        if from.as_deref() != Some(video_id) && to.as_deref() != Some(video_id) {
+            return;
+        }
+        let ui = &self.ui;
+        for (id, get, set) in [
+            (
+                from.as_deref(),
+                AppWindow::get_mix_from as fn(&AppWindow) -> MixSong,
+                AppWindow::set_mix_from as fn(&AppWindow, MixSong),
+            ),
+            (to.as_deref(), AppWindow::get_mix_to, AppWindow::set_mix_to),
+        ] {
+            let Some(id) = id else { continue };
+            let found = self.analysis_of(id);
+            let summary = tonearm_core::mix_editor::song_info(found.as_deref());
+            let mut song = get(ui);
+            song.bpm = summary.bpm.into();
+            song.camelot = summary.camelot.into();
+            song.key_color = slint::Color::from_rgb_u8(
+                (summary.key_color >> 16) as u8,
+                (summary.key_color >> 8) as u8,
+                summary.key_color as u8,
+            );
+            song.analysed = found.is_some();
+            set(ui, song);
+        }
+        if let (Some(a), Some(b)) = (from.as_deref(), to.as_deref()) {
+            let auto = self.auto_settings(a, b);
+            if let Some(e) = self.editing.borrow_mut().as_mut() {
+                if e.settings.preset == Preset::Auto {
+                    let bars = e.settings.bars;
+                    e.settings = auto;
+                    e.settings.bars = bars;
+                }
+                if e.saved.preset == Preset::Auto {
+                    e.saved = auto;
+                }
+            }
+        }
+        self.show_editor();
     }
 
     /// What Auto picks for two songs.
@@ -365,6 +425,7 @@ impl App {
                 summary.key_color as u8,
             ),
             camelot: summary.camelot.into(),
+            analysed: found.is_some(),
             // `show_editor` fills it in, as it depends on the choices.
             warning: Default::default(),
         }

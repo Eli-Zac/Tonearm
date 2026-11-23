@@ -3622,6 +3622,7 @@ impl App {
         if self.playing_id().as_deref() == Some(video_id) {
             self.show_sound();
         }
+        self.editor_analysis_ready(video_id);
         if self.ui.get_header().mixing {
             self.refresh_mix_rows();
         }
