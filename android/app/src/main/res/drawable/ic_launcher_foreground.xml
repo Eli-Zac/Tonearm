@@ -1,35 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The logo's marks (assets/logo.svg) on the record: a groove, the label,
-     the spindle and the arm. The logo's 64 units are scaled by 1.2 about the
-     centre, so its record (r 30) fills the launcher's mask (r 36). -->
+<!-- The logo's sound wave (assets/logo.svg) on the disc: five white bars,
+     mirrored about the middle. The logo's 64 units are scaled by 1.2 about
+     the centre, so its disc (r 30) fills the launcher's mask (r 36). -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- A groove, faint. -->
     <path
-        android:pathData="M27.6,54a26.4,26.4 0 1,0 52.8,0a26.4,26.4 0 1,0 -52.8,0"
-        android:strokeColor="#0C0C0E"
-        android:strokeAlpha="0.16"
-        android:strokeWidth="1.44" />
-    <!-- The label. -->
+        android:pathData="M28.32,49.2a3.6,3.6 0 0 1 7.2,0v9.6a3.6,3.6 0 0 1 -7.2,0z"
+        android:fillColor="#FFFFFFFF" />
     <path
-        android:pathData="M43.2,54a10.8,10.8 0 1,0 21.6,0a10.8,10.8 0 1,0 -21.6,0"
-        android:strokeColor="#0C0C0E"
-        android:strokeWidth="4.08" />
-    <!-- The spindle. -->
+        android:pathData="M39.36,42a3.6,3.6 0 0 1 7.2,0v24a3.6,3.6 0 0 1 -7.2,0z"
+        android:fillColor="#FFFFFFFF" />
     <path
-        android:pathData="M51.36,54a2.64,2.64 0 1,0 5.28,0a2.64,2.64 0 1,0 -5.28,0"
-        android:fillColor="#0C0C0E" />
-    <!-- The arm, and its pivot. -->
+        android:pathData="M50.4,34.8a3.6,3.6 0 0 1 7.2,0v38.4a3.6,3.6 0 0 1 -7.2,0z"
+        android:fillColor="#FFFFFFFF" />
     <path
-        android:pathData="M74.4,30.6L69.6,51L61.8,55.2"
-        android:strokeColor="#0C0C0E"
-        android:strokeWidth="4.8"
-        android:strokeLineCap="round"
-        android:strokeLineJoin="round" />
+        android:pathData="M61.44,42a3.6,3.6 0 0 1 7.2,0v24a3.6,3.6 0 0 1 -7.2,0z"
+        android:fillColor="#FFFFFFFF" />
     <path
-        android:pathData="M69.84,30.6a4.56,4.56 0 1,0 9.12,0a4.56,4.56 0 1,0 -9.12,0"
-        android:fillColor="#0C0C0E" />
+        android:pathData="M72.48,49.2a3.6,3.6 0 0 1 7.2,0v9.6a3.6,3.6 0 0 1 -7.2,0z"
+        android:fillColor="#FFFFFFFF" />
 </vector>

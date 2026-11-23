@@ -98,6 +98,8 @@ object SettingsPages {
     fun isSettings(id: String) = id == root || id.startsWith("$root/")
 }
 
+/** The middle of the logo's red gradient (assets/logo.svg). */
+internal val brandTonearm = Color(0xFFEC343A)
 private val brandYouTube = Color(0xFFFF0000)
 internal val brandLastfm = Color(0xFFD51007)
 internal val brandSpotify = Color(0xFF1DB954)
@@ -216,7 +218,8 @@ private fun AccountsPage(core: Core, onOpen: (String) -> Unit) {
     SubpageRow(
         title = "Tonearm",
         subtitle = tonearm?.let { "Signed in as ${it.email}" } ?: "Not signed in",
-        icon = Icons.artist,
+        logo = R.drawable.logo_tonearm,
+        brand = brandTonearm,
     ) { onOpen(SettingsPages.tonearm) }
     SubpageRow(
         title = "YouTube Music",

@@ -1,7 +1,10 @@
 package app.tonearm
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.res.painterResource
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -42,13 +45,13 @@ internal fun TonearmAccountPage(core: Core, onToast: (String) -> Unit) {
     }
 }
 
-/** The Tonearm account's section heading, as the other accounts have: a
- *  tile in the accent colour and the name. */
+/** The Tonearm account's section heading, as the other accounts have: the
+ *  logo's sound wave on a tile of its red, and the name. */
 @Composable
 private fun TonearmHeader() {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.size(32.dp).clip(RoundedCornerShape(8.dp)).background(Tonearm.accent), contentAlignment = Alignment.Center) {
-            Icon(Icons.artist, size = 18.sp, color = Color.White)
+        Box(Modifier.size(32.dp).clip(RoundedCornerShape(8.dp)).background(brandTonearm), contentAlignment = Alignment.Center) {
+            Image(painterResource(R.drawable.logo_tonearm), null, Modifier.size(18.dp), colorFilter = ColorFilter.tint(Color.White))
         }
         Title("Tonearm", size = 16.sp, modifier = Modifier.padding(start = 12.dp))
     }

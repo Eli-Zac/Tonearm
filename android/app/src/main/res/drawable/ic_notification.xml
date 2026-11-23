@@ -1,26 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The status bar and media notification's icon: the logo in one colour,
-     in its own 64 units (assets/logo.svg), with the record a ring. -->
+<!-- The status bar and media notification's icon: the logo's sound wave in
+     one colour, bolder and filling the square, as the disc is left out. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"
     android:viewportWidth="64"
     android:viewportHeight="64">
     <path
-        android:pathData="M3,32a29,29 0 1,0 58,0a29,29 0 1,0 -58,0"
-        android:strokeColor="#FFFFFFFF"
-        android:strokeWidth="4" />
+        android:pathData="M4,26a4,4 0 0 1 8,0v12a4,4 0 0 1 -8,0z"
+        android:fillColor="#FFFFFFFF" />
     <path
-        android:pathData="M23,32a9,9 0 1,0 18,0a9,9 0 1,0 -18,0"
-        android:strokeColor="#FFFFFFFF"
-        android:strokeWidth="4.5" />
+        android:pathData="M16,17a4,4 0 0 1 8,0v30a4,4 0 0 1 -8,0z"
+        android:fillColor="#FFFFFFFF" />
     <path
-        android:pathData="M49,13L45,29.5L38.5,33"
-        android:strokeColor="#FFFFFFFF"
-        android:strokeWidth="5"
-        android:strokeLineCap="round"
-        android:strokeLineJoin="round" />
+        android:pathData="M28,8a4,4 0 0 1 8,0v48a4,4 0 0 1 -8,0z"
+        android:fillColor="#FFFFFFFF" />
     <path
-        android:pathData="M45,13a4,4 0 1,0 8,0a4,4 0 1,0 -8,0"
+        android:pathData="M40,17a4,4 0 0 1 8,0v30a4,4 0 0 1 -8,0z"
+        android:fillColor="#FFFFFFFF" />
+    <path
+        android:pathData="M52,26a4,4 0 0 1 8,0v12a4,4 0 0 1 -8,0z"
         android:fillColor="#FFFFFFFF" />
 </vector>

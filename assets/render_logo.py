@@ -2,20 +2,20 @@
 
 Run it after changing the logo: `python assets/render_logo.py`. Needs
 Pillow. Each size is drawn on its own, four times over and scaled down, so
-small icons stay sharp. Below 32 px the faint groove ring goes and the arm
-gets heavier, so the mark still reads on the taskbar.
+small icons stay sharp.
 """
 from pathlib import Path
 from PIL import Image, ImageDraw
 
 HERE = Path(__file__).resolve().parent
-TOP, BOTTOM = (0xFF, 0x6F, 0x88), (0xEE, 0x3A, 0x57)
-INK = (0x0C, 0x0C, 0x0E, 255)
-ARM = [(49, 13), (45, 29.5), (38.5, 33)]
+TOP, BOTTOM = (0xFF, 0x4A, 0x4A), (0xD9, 0x1E, 0x2B)
+WHITE = (255, 255, 255, 255)
+# The sound wave, in the logo's 64 units: five bars, mirrored about the middle.
+HEIGHTS = [14, 26, 38, 26, 14]
+WIDTH, GAP = 6.0, 3.2
 
 
 def render(px: int) -> Image.Image:
-    small = px < 32
     ss = 4
     size = px * ss
     k = size / 64  # grid units to pixels
@@ -33,30 +33,12 @@ def render(px: int) -> Image.Image:
     img.paste(grad, (0, 0), mask)
 
     d = ImageDraw.Draw(img)
-
-    def ring(r, width, color, draw=d):
-        # Pillow draws an outline inward from the box. SVG centres the
-        # stroke on the radius, so grow the box by half the width.
-        r += width / 2
-        draw.ellipse([(32 - r) * k, (32 - r) * k, (32 + r) * k, (32 + r) * k],
-                     outline=color, width=max(1, round(width * k)))
-
-    def dot(cx, cy, r, color=INK):
-        d.ellipse([(cx - r) * k, (cy - r) * k, (cx + r) * k, (cy + r) * k], fill=color)
-
-    if not small:
-        overlay = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-        ring(22, 1.2, (12, 12, 14, 41), ImageDraw.Draw(overlay))
-        img.alpha_composite(overlay)
-    ring(9, 3.4 if not small else 4.2, INK)
-    dot(32, 32, 2.2 if not small else 2.6)
-
-    arm = 4.0 if not small else 5.2
-    pts = [(x * k, y * k) for x, y in ARM]
-    d.line(pts, fill=INK, width=round(arm * k))
-    for x, y in ARM:  # round caps and joins
-        dot(x, y, arm / 2)
-    dot(49, 13, 3.8 if not small else 4.4)
+    total = len(HEIGHTS) * WIDTH + (len(HEIGHTS) - 1) * GAP
+    x = 32 - total / 2
+    for h in HEIGHTS:
+        d.rounded_rectangle([x * k, (32 - h / 2) * k, (x + WIDTH) * k, (32 + h / 2) * k],
+                            radius=WIDTH / 2 * k, fill=WHITE)
+        x += WIDTH + GAP
 
     return img.resize((px, px), Image.LANCZOS)
 

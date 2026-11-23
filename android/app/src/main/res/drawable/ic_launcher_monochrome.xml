@@ -1,31 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- For themed icons: Android tints this with the wallpaper's colours and
-     sets it on a background to match. The logo's marks alone, a little
-     bolder, as the faint groove would vanish. -->
+     sets it on a background to match. The logo's sound wave alone, as the
+     foreground draws it. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- The record's edge, so the shape still reads as a record. -->
     <path
-        android:pathData="M24,54a30,30 0 1,0 60,0a30,30 0 1,0 -60,0"
-        android:strokeColor="#FFFFFFFF"
-        android:strokeWidth="3" />
-    <path
-        android:pathData="M43.2,54a10.8,10.8 0 1,0 21.6,0a10.8,10.8 0 1,0 -21.6,0"
-        android:strokeColor="#FFFFFFFF"
-        android:strokeWidth="4.6" />
-    <path
-        android:pathData="M51.2,54a2.8,2.8 0 1,0 5.6,0a2.8,2.8 0 1,0 -5.6,0"
+        android:pathData="M28.32,49.2a3.6,3.6 0 0 1 7.2,0v9.6a3.6,3.6 0 0 1 -7.2,0z"
         android:fillColor="#FFFFFFFF" />
     <path
-        android:pathData="M74.4,30.6L69.6,51L61.8,55.2"
-        android:strokeColor="#FFFFFFFF"
-        android:strokeWidth="5.2"
-        android:strokeLineCap="round"
-        android:strokeLineJoin="round" />
+        android:pathData="M39.36,42a3.6,3.6 0 0 1 7.2,0v24a3.6,3.6 0 0 1 -7.2,0z"
+        android:fillColor="#FFFFFFFF" />
     <path
-        android:pathData="M69.6,30.6a4.8,4.8 0 1,0 9.6,0a4.8,4.8 0 1,0 -9.6,0"
+        android:pathData="M50.4,34.8a3.6,3.6 0 0 1 7.2,0v38.4a3.6,3.6 0 0 1 -7.2,0z"
+        android:fillColor="#FFFFFFFF" />
+    <path
+        android:pathData="M61.44,42a3.6,3.6 0 0 1 7.2,0v24a3.6,3.6 0 0 1 -7.2,0z"
+        android:fillColor="#FFFFFFFF" />
+    <path
+        android:pathData="M72.48,49.2a3.6,3.6 0 0 1 7.2,0v9.6a3.6,3.6 0 0 1 -7.2,0z"
         android:fillColor="#FFFFFFFF" />
 </vector>
