@@ -1,6 +1,6 @@
 [package]
 name = "tonearm"
-version = "0.13.3"
+version = "0.13.4"
 edition = "2021"
 description = "Native Windows client for YouTube Music. No web views."
 license = "GPL-3.0-only"
