@@ -45,6 +45,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use canvas::unix_now;
+
 const SLOW_TICK: Duration = Duration::from_millis(250);
 const FAST_TICK: Duration = Duration::from_millis(33);
 /// How often the playing bars move. Each move redraws the whole window,
@@ -534,6 +536,9 @@ struct App {
     /// Counts pairing codes made, so an old code's timer leaves a newer one.
     tonearm_pair: Cell<u32>,
     listen: RefCell<tonearm_core::listen::Listen>,
+    /// When the song on Discord started, in Unix seconds, or None while it
+    /// shows nothing; and when Discord was last told.
+    presence: Cell<(Option<u64>, Instant)>,
     toast_timer: Timer,
     /// What the toast's button does, while it shows one.
     toast_action: RefCell<Option<Box<dyn Fn(&Rc<App>)>>>,
@@ -4998,14 +5003,7 @@ impl App {
                         self.remember(item, 0.25);
                         let (artist, album, seconds) = credits_with_album(item);
                         let seconds = if duration > 0.0 { duration } else { seconds };
-                        // Where the player's clock stands, as the playhead shows it.
-                        let status = &self.audio.status;
-                        let position = status
-                            .position_ms
-                            .load(Ordering::SeqCst)
-                            .saturating_sub(status.lag_ms.load(Ordering::SeqCst))
-                            as f32
-                            / 1000.0;
+                        let position = self.heard_position();
                         let lead_artist = lead_artist(item, &artist);
                         self.services.send(Event::Started(services::Track {
                             title: item.title.clone(),
@@ -5016,6 +5014,12 @@ impl App {
                             art: item.thumb.clone(),
                             position,
                         }));
+                        // Discord has the song at the player's place in it. If
+                        // that is wrong, `keep_presence_true` corrects it.
+                        let long_ago = Instant::now()
+                            .checked_sub(Duration::from_secs(60))
+                            .unwrap_or_else(Instant::now);
+                        self.presence.set((Some(unix_now().saturating_sub(position.round() as u64)), long_ago));
                     }
                 }
                 Moment::Scrobble => self.services.send(Event::Scrobble),
@@ -5038,18 +5042,51 @@ impl App {
                         }
                     }
                 }
-                Moment::Paused => self.services.send(Event::Paused),
+                Moment::Paused => {
+                    self.services.send(Event::Paused);
+                    self.presence.set((None, Instant::now()));
+                }
                 Moment::Resumed => {
-                    let status = &self.audio.status;
-                    let position = status
-                        .position_ms
-                        .load(Ordering::SeqCst)
-                        .saturating_sub(status.lag_ms.load(Ordering::SeqCst))
-                        as f32
-                        / 1000.0;
+                    let position = self.heard_position();
                     self.services.send(Event::Resumed { position });
+                    self.presence.set((Some(unix_now().saturating_sub(position.round() as u64)), Instant::now()));
                 }
             }
+        }
+        self.keep_presence_true(playing);
+    }
+
+    /// Where the player's clock stands, as the playhead shows it, in seconds.
+    fn heard_position(&self) -> f32 {
+        let status = &self.audio.status;
+        status
+            .position_ms
+            .load(Ordering::SeqCst)
+            .saturating_sub(status.lag_ms.load(Ordering::SeqCst)) as f32
+            / 1000.0
+    }
+
+    /// Keeps what Discord shows true to what is playing, whatever happened
+    /// since it was last told: a seek, a stall, a song that started while the
+    /// clock still had the last one's place (as a cast device can report), or
+    /// a pause that was missed. Discord is only told when it is wrong, and no
+    /// more than once in two seconds, as it limits how often a status may
+    /// change.
+    fn keep_presence_true(&self, playing: bool) {
+        let (shown, told) = self.presence.get();
+        if !playing {
+            if shown.is_some() {
+                self.services.send(services::Event::Paused);
+                self.presence.set((None, Instant::now()));
+            }
+            return;
+        }
+        let position = self.heard_position();
+        let start = unix_now().saturating_sub(position.round() as u64);
+        let wrong = shown.map_or(true, |s| s.abs_diff(start) > 1);
+        if wrong && told.elapsed() >= Duration::from_secs(2) {
+            self.services.send(services::Event::Resumed { position });
+            self.presence.set((Some(start), Instant::now()));
         }
     }
 
@@ -6164,6 +6201,7 @@ fn main() -> Result<(), slint::PlatformError> {
         tonearm_devices: RefCell::default(),
         tonearm_pair: Cell::new(0),
         listen: RefCell::default(),
+        presence: Cell::new((None, Instant::now())),
         ui,
         client,
         api: pool::Pool::new("api", 3),
