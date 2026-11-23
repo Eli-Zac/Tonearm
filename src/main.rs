@@ -4996,6 +4996,14 @@ impl App {
                         self.remember(item, 0.25);
                         let (artist, album, seconds) = credits_with_album(item);
                         let seconds = if duration > 0.0 { duration } else { seconds };
+                        // Where the player's clock stands, as the playhead shows it.
+                        let status = &self.audio.status;
+                        let position = status
+                            .position_ms
+                            .load(Ordering::SeqCst)
+                            .saturating_sub(status.lag_ms.load(Ordering::SeqCst))
+                            as f32
+                            / 1000.0;
                         let lead_artist = lead_artist(item, &artist);
                         self.services.send(Event::Started(services::Track {
                             title: item.title.clone(),
@@ -5004,6 +5012,7 @@ impl App {
                             album,
                             seconds,
                             art: item.thumb.clone(),
+                            position,
                         }));
                     }
                 }
@@ -5029,7 +5038,13 @@ impl App {
                 }
                 Moment::Paused => self.services.send(Event::Paused),
                 Moment::Resumed => {
-                    let position = self.audio.status.position_ms.load(Ordering::SeqCst) as f32 / 1000.0;
+                    let status = &self.audio.status;
+                    let position = status
+                        .position_ms
+                        .load(Ordering::SeqCst)
+                        .saturating_sub(status.lag_ms.load(Ordering::SeqCst))
+                        as f32
+                        / 1000.0;
                     self.services.send(Event::Resumed { position });
                 }
             }

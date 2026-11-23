@@ -135,6 +135,9 @@ pub struct Track {
     pub album: String,
     pub seconds: f32,
     pub art: String,
+    /// Seconds into the song when it was reported as started, so Discord's
+    /// clock starts where the player's is.
+    pub position: f32,
 }
 
 pub enum Event {
@@ -242,6 +245,9 @@ impl Worker {
                 }
             }
             Event::Started(track) => {
+                // Taken before the lookups below, which can take a while.
+                let begun = unix_now();
+                let position = track.position;
                 let meta = self.spotify(&track).unwrap_or(Meta {
                     title: track.title,
                     lead: if track.lead_artist.is_empty() { track.artist.clone() } else { track.lead_artist },
@@ -250,10 +256,10 @@ impl Worker {
                     seconds: track.seconds,
                     art: track.art,
                 });
-                self.started = unix_now();
+                self.started = begun;
                 self.lastfm("track.updateNowPlaying", &meta, None);
                 self.current = Some(meta);
-                self.presence(Some(self.started));
+                self.presence(Some(begun.saturating_sub(position.round() as u64)));
             }
             Event::Scrobble => {
                 if let Some(meta) = self.current.clone() {
@@ -262,7 +268,7 @@ impl Worker {
             }
             Event::Paused => self.presence(None),
             Event::Resumed { position } => {
-                self.presence(Some(unix_now().saturating_sub(position as u64)));
+                self.presence(Some(unix_now().saturating_sub(position.round() as u64)));
             }
             Event::Stopped => {
                 self.current = None;

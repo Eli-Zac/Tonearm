@@ -462,6 +462,7 @@ impl Tonearm {
                     self.remember(&song, 0.25);
                     self.played_here(&song.video_id);
                     let seconds = if duration > 0.0 { duration } else { crate::lyrics::seconds_of(&song.duration) };
+                    let position = self.audio.status.position_ms.load(Ordering::SeqCst) as f32 / 1000.0;
                     let item = song_item(&song);
                     self.services.send(services::Event::Started(services::Track {
                         title: song.title.clone(),
@@ -470,13 +471,14 @@ impl Tonearm {
                         album: song.album.clone(),
                         seconds,
                         art: song.cover.clone(),
+                        position,
                     }));
-                    // Discord has the song as starting now. If it is not at
-                    // its top, `keep_presence_true` corrects that at once.
+                    // Discord has the song at the player's place in it. If
+                    // that drifts, `keep_presence_true` corrects it.
                     let long_ago = std::time::Instant::now()
                         .checked_sub(std::time::Duration::from_secs(60))
                         .unwrap_or_else(std::time::Instant::now);
-                    *self.presence.lock().unwrap() = (Some(unix_now()), long_ago);
+                    *self.presence.lock().unwrap() = (Some(unix_now().saturating_sub(position.round() as u64)), long_ago);
                 }
                 Moment::Scrobble => self.services.send(services::Event::Scrobble),
                 Moment::Counted => {
@@ -502,7 +504,7 @@ impl Tonearm {
                     let position = self.audio.status.position_ms.load(Ordering::SeqCst) as f32 / 1000.0;
                     self.services.send(services::Event::Resumed { position });
                     *self.presence.lock().unwrap() =
-                        (Some(unix_now().saturating_sub(position as u64)), std::time::Instant::now());
+                        (Some(unix_now().saturating_sub(position.round() as u64)), std::time::Instant::now());
                 }
             }
         }
@@ -524,8 +526,9 @@ impl Tonearm {
             return;
         }
         let position = self.audio.status.position_ms.load(Ordering::SeqCst) as f32 / 1000.0;
-        let start = unix_now().saturating_sub(position as u64);
-        let wrong = shown.0.map_or(true, |s| s.abs_diff(start) > 2);
+        let start = unix_now().saturating_sub(position.round() as u64);
+        // Off by more than a second is seen. Two was, and was 2 s ahead.
+        let wrong = shown.0.map_or(true, |s| s.abs_diff(start) > 1);
         if wrong && shown.1.elapsed() >= std::time::Duration::from_secs(2) {
             self.services.send(services::Event::Resumed { position });
             *shown = (Some(start), std::time::Instant::now());
