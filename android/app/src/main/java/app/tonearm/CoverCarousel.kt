@@ -408,43 +408,61 @@ private fun MixPair(
             val f = Frame(elapsed(), size.width, size.height)
             if (f.hold <= 0.01f) return@Canvas
             val rim = Color.White.copy(alpha = 0.14f * f.hold)
-            val corner = CornerRadius(Tonearm.radius.toPx() * 0.45f)
             val stroke = Stroke(1.dp.toPx())
+            val radius = Tonearm.radius.toPx()
+            // Where each cover is drawn and how big, as the layers above
+            // have them, so the outline stays on its edges while the covers
+            // scale into and out of place. A cover's corners scale with it.
             val oy = f.cy * min(1f, f.oe)
             val ox = f.lx * f.oe + (-f.c - pad - f.lx) * f.ol
-            drawRoundRect(rim, Offset(ox, oy), Size(f.c, f.c), corner, stroke)
+            val ow = size.width + (f.c - size.width) * f.oe
+            val oh = size.height + (f.c - size.height) * f.oe
+            val il = min(1f, f.il)
             val ix = (size.width + pad) + (f.rx - size.width - pad) * f.ie - f.rx * f.il
-            drawRoundRect(rim, Offset(ix, f.cy), Size(f.c, f.c), corner, stroke)
+            val iy = f.cy - f.cy * il
+            val iw = f.c + (size.width - f.c) * il
+            val ih = f.c + (size.height - f.c) * il
+            val covers = listOf(
+                listOf(ox, oy, ow, oh),
+                listOf(ix, iy, iw, ih),
+            )
+            for ((x, y, w, h) in covers) {
+                drawRoundRect(
+                    rim, Offset(x, y), Size(w, h),
+                    CornerRadius(radius * w / size.width, radius * h / size.height), stroke,
+                )
+            }
             // Light running round each cover's border, a lap every 2.6 s,
             // half a lap apart: a bright head with a glow, and a tail of
             // light fading behind it.
-            fun around(x0: Float, y0: Float, u: Float): Offset {
+            fun around(x0: Float, y0: Float, w: Float, h: Float, u: Float): Offset {
                 val d = (((u % 1f) + 1f) % 1f) * 4f
                 val s = d.toInt()
                 val k = d - s
                 return when (s) {
-                    0 -> Offset(x0 + f.c * k, y0)
-                    1 -> Offset(x0 + f.c, y0 + f.c * k)
-                    2 -> Offset(x0 + f.c * (1 - k), y0 + f.c)
-                    else -> Offset(x0, y0 + f.c * (1 - k))
+                    0 -> Offset(x0 + w * k, y0)
+                    1 -> Offset(x0 + w, y0 + h * k)
+                    2 -> Offset(x0 + w * (1 - k), y0 + h)
+                    else -> Offset(x0, y0 + h * (1 - k))
                 }
             }
             val width = 2.5.dp.toPx()
             val glow = f.c * 0.08f
-            for ((n, at) in listOf(Offset(ox, oy), Offset(ix, f.cy)).withIndex()) {
+            for ((n, rect) in covers.withIndex()) {
+                val (x, y, w, h) = rect
                 val head = f.secs / 2.6f + n * 0.5f
                 val steps = 40
                 for (i in 0 until steps) {
                     val fade = 1f - i / steps.toFloat()
                     drawLine(
                         Color.White.copy(alpha = 0.9f * fade * fade * f.hold),
-                        around(at.x, at.y, head - i * 0.003f),
-                        around(at.x, at.y, head - (i + 1) * 0.003f),
+                        around(x, y, w, h, head - i * 0.003f),
+                        around(x, y, w, h, head - (i + 1) * 0.003f),
                         strokeWidth = width * (0.5f + 0.5f * fade),
                         cap = StrokeCap.Butt,
                     )
                 }
-                val p = around(at.x, at.y, head)
+                val p = around(x, y, w, h, head)
                 drawCircle(
                     Brush.radialGradient(
                         0f to Color.White.copy(alpha = 0.8f),
