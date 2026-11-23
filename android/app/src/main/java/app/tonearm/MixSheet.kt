@@ -137,8 +137,12 @@ fun MixSheet(
         }
     }
 
-    LaunchedEffect(data?.from?.analyzing, data?.to?.analyzing) {
-        while (data?.from?.analyzing == true || data?.to?.analyzing == true) {
+    // Until both songs are analysed the editor looks again, so the skeleton
+    // waveforms give way to the real ones as soon as they are there. A song
+    // waiting its turn, or not started yet, counts, not only one being worked
+    // on.
+    LaunchedEffect(data != null, data?.from?.analysed, data?.to?.analysed) {
+        while (data != null && (data?.from?.analysed != true || data?.to?.analysed != true)) {
             delay(750)
             try {
                 val current = settings ?: break
@@ -287,7 +291,10 @@ fun MixSheet(
                     // Preview, in the middle of the picture as on the desktop:
                     // play, or stop while it plays, with an outline running
                     // round it while the songs open.
-                    PreviewButton(previewing, starting) {
+                    PreviewButton(
+                        previewing, starting,
+                        loading = data?.from?.analysed != true || data?.to?.analysed != true,
+                    ) {
                         val current = settings ?: return@PreviewButton
                         scope.launch {
                             try {
@@ -381,11 +388,13 @@ fun MixSheet(
 
 /** The desktop's preview button on the picture: 44 by 32, play or stop. */
 @Composable
-private fun PreviewButton(previewing: Boolean, starting: Boolean, onClick: () -> Unit) {
+private fun PreviewButton(previewing: Boolean, starting: Boolean, loading: Boolean = false, onClick: () -> Unit) {
     val spin = rememberInfiniteTransition(label = "spin")
     val turn by spin.animateFloat(0f, 1f, infiniteRepeatable(tween(1100, easing = LinearEasing)), label = "turn")
     Box(Modifier.size(52.dp, 40.dp), contentAlignment = Alignment.Center) {
-        if (starting && !previewing) {
+        // The outline runs while the songs open, and while one is still to be
+        // analysed, when there is nothing to preview yet.
+        if ((starting || loading) && !previewing) {
             Canvas(Modifier.fillMaxSize()) {
                 val stroke = 2.dp.toPx()
                 val radius = androidx.compose.ui.geometry.CornerRadius(13.dp.toPx())
@@ -406,7 +415,7 @@ private fun PreviewButton(previewing: Boolean, starting: Boolean, onClick: () ->
         }
         Box(
             Modifier.size(44.dp, 32.dp).clip(RoundedCornerShape(9.dp)).background(Color(0x26FFFFFF))
-                .clickable(onClick = onClick),
+                .clickable(enabled = !loading, onClick = onClick),
             contentAlignment = Alignment.Center,
         ) {
             if (previewing) Box(Modifier.size(11.dp).clip(RoundedCornerShape(2.dp)).background(Color.White))

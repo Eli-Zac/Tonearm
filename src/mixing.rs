@@ -313,11 +313,17 @@ impl App {
             return;
         };
         let saved = library::transition(a, b).unwrap_or_else(|| self.auto_settings(a, b));
-        // A song with no analysis yet is queued for one, so its waveform
-        // fills in where the editor shows a skeleton.
+        // A song with no analysis yet gets one now, so its waveform fills in
+        // where the editor shows a skeleton. One saved here is queued. Any
+        // other has its sound fetched first, as it would not be analysed
+        // before it was played.
         for id in [a, b] {
             if self.analysis_of(id).is_none() {
-                crate::analysis::request(id);
+                if crate::offline::saved_file(id).is_some() {
+                    crate::analysis::request_at(id, crate::analysis::Priority::Now);
+                } else {
+                    self.analyze_now(id.to_string());
+                }
             }
         }
         *self.editing.borrow_mut() = Some(Editing {
@@ -338,8 +344,40 @@ impl App {
         ui.set_mix_lengths(choices(&transition::LENGTH_CHOICES));
         ui.set_mix_from(self.mix_song(id, from));
         ui.set_mix_to(self.mix_song(songs[n + 1].0, to));
+        ui.set_mix_loading(self.editor_analysing());
         self.show_editor();
         ui.invoke_open_mix_panel();
+    }
+
+    /// Whether the editor is open on a transition with a song still to be
+    /// analysed. Its preview can not start until both are.
+    fn editor_analysing(&self) -> bool {
+        self.editing.borrow().is_some() && {
+            let ui = &self.ui;
+            !ui.get_mix_from().analysed || !ui.get_mix_to().analysed
+        }
+    }
+
+    /// Each tick: while the editor waits on an analysis, its play button
+    /// shows the outline running round it, as when the songs are opening.
+    /// `show_playhead` does the same once a song has loaded, and this is for
+    /// when none has.
+    pub fn show_editor_loading(&self) {
+        if !self.editor_analysing() {
+            // The editor closed while it waited: nothing to load.
+            if self.ui.get_mix_loading() && self.editing.borrow().is_none() && !self.ui.get_buffering() {
+                self.ui.set_mix_loading(false);
+            }
+            return;
+        }
+        let ui = &self.ui;
+        if !ui.get_mix_loading() {
+            ui.set_mix_loading(true);
+        }
+        let from = self.spinner_from.get().unwrap_or_else(Instant::now);
+        self.spinner_from.set(Some(from));
+        let turn = from.elapsed().as_secs_f64() % 1.0;
+        ui.set_mix_spinner(spinner(turn).into());
     }
 
     /// An analysis finished. If the editor has that song open, its tempo, key
@@ -379,6 +417,8 @@ impl App {
             song.analysed = found.is_some();
             set(ui, song);
         }
+        // Both ready: the play button stops loading.
+        ui.set_mix_loading(self.editor_analysing());
         if let (Some(a), Some(b)) = (from.as_deref(), to.as_deref()) {
             let auto = self.auto_settings(a, b);
             if let Some(e) = self.editing.borrow_mut().as_mut() {
@@ -530,7 +570,7 @@ impl App {
             ui.set_mix_previewing(previewing);
         }
         // Starting up: the song or its link is still loading.
-        let loading = in_preview && !playing && ui.get_buffering();
+        let loading = self.editor_analysing() || (in_preview && !playing && ui.get_buffering());
         if ui.get_mix_loading() != loading {
             ui.set_mix_loading(loading);
         }
@@ -592,6 +632,11 @@ impl App {
     /// The editor's play button: a preview, or with one playing, pause and
     /// play.
     pub fn preview_editing(self: &Rc<Self>) {
+        // Nothing to preview until both songs are analysed: the button is
+        // loading till then.
+        if self.editor_analysing() {
+            return;
+        }
         // Playing, it stops. Otherwise it starts over, 5 s before the switch.
         if self.ui.get_mix_previewing() {
             self.toggle_play();

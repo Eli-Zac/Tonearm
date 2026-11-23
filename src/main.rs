@@ -4688,6 +4688,7 @@ impl App {
             self.ui.invoke_focus_hotkeys();
         }
         self.sleep_tick();
+        self.show_editor_loading();
         let followed = self.audio.status.followed.swap(0, Ordering::SeqCst);
         if followed != 0 {
             self.followed(followed);

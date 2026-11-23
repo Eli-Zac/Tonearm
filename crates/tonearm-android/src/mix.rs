@@ -169,6 +169,17 @@ fn analysis(item: &pages::Item) -> Option<Analysis> {
     tonearm_core::library::analysis(id)
 }
 
+/// When each song last had its sound fetched for the analyzer here, so the
+/// editor asking again on every look does not fetch it again.
+fn fetched() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, std::time::Instant>> {
+    static FETCHED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>> =
+        std::sync::OnceLock::new();
+    FETCHED.get_or_init(Default::default).lock().unwrap()
+}
+
+/// How long before a song whose fetch failed is tried again.
+const FETCH_RETRY: std::time::Duration = std::time::Duration::from_secs(60);
+
 fn settings_for(from: &pages::Item, to: &pages::Item, out: Option<&Analysis>, inn: Option<&Analysis>) -> Settings {
     from.video_id
         .as_deref()
@@ -269,6 +280,37 @@ fn camelot(key: u8) -> String {
     format!("{}{}", (major * 7 + 7) % 12 + 1, if minor { 'A' } else { 'B' })
 }
 
+impl Tonearm {
+    /// The analyzer only takes songs saved on the phone, or ones just played.
+    /// The editor wants both of its songs now, so one that is neither has its
+    /// sound fetched and handed over, ahead of everything waiting.
+    fn analyse_for_editor(&self, item: &pages::Item) {
+        let Some(id) = item.video_id.clone() else {
+            return;
+        };
+        if tonearm_core::library::has_analysis(&id) || tonearm_core::offline::saved_file(&id).is_some() {
+            return;
+        }
+        {
+            let mut tried = fetched();
+            if tried.get(&id).is_some_and(|at| at.elapsed() < FETCH_RETRY) {
+                return;
+            }
+            tried.insert(id.clone(), std::time::Instant::now());
+        }
+        let resolver = self.resolver.clone();
+        let _ = std::thread::Builder::new().name("analyse-editor".into()).spawn(move || {
+            let bytes = resolver
+                .resolve(&id)
+                .and_then(|stream| tonearm_core::audio::fetch_all(&stream.url, &stream.headers));
+            match bytes {
+                Ok(bytes) => tonearm_core::analysis::submit_at(&id, &bytes, tonearm_core::analysis::Priority::Now),
+                Err(message) => eprintln!("tonearm: analysing {id} for the editor: {message}"),
+            }
+        });
+    }
+}
+
 #[uniffi::export]
 impl Tonearm {
     /// Whether a playlist has mix mode on.
@@ -365,6 +407,8 @@ impl Tonearm {
         tonearm_core::analysis::set_enabled(true);
         let out = analysis(&from);
         let inn = analysis(&to);
+        self.analyse_for_editor(&from);
+        self.analyse_for_editor(&to);
         let saved = settings_for(&from, &to, out.as_ref(), inn.as_ref());
         let initial = tonearm_core::library::transition(from_id, to_id).unwrap_or(saved);
         Ok(editor_data(&from, &to, initial, saved, out.as_ref(), inn.as_ref()))
@@ -382,6 +426,8 @@ impl Tonearm {
         tonearm_core::analysis::set_enabled(true);
         let out = analysis(&from);
         let inn = analysis(&to);
+        self.analyse_for_editor(&from);
+        self.analyse_for_editor(&to);
         let saved = settings_for(&from, &to, out.as_ref(), inn.as_ref());
         let current = Settings::try_from(&settings)?;
         let _ = (from_id, to_id);
