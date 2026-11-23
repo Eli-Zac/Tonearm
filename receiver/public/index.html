@@ -72,16 +72,20 @@
     flex: none; width: 46vh; height: 46vh; border-radius: 1.6vh;
     background: #222 center / cover no-repeat;
     box-shadow: 0 3vh 8vh rgba(0, 0, 0, 0.55);
+    position: relative;
+  }
+  /* The last song's cover, fading out over the next. */
+  .cover .ghost {
+    position: absolute; inset: 0; border-radius: inherit;
+    background: center / cover no-repeat;
   }
   .text { min-width: 0; flex: 0 1 auto; width: 76vh; }
-  .title {
-    font-size: 6.4vh; font-weight: 700; line-height: 1.12;
-    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
-  }
-  .artist, .album {
-    font-size: 3.4vh; font-weight: 500; color: var(--soft); margin-top: 1.4vh;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
+  .title { font-size: 6.4vh; font-weight: 700; line-height: 1.12; }
+  .artist, .album { font-size: 3.4vh; font-weight: 500; color: var(--soft); margin-top: 1.4vh; }
+  /* A line too long to fit scrolls, as Now playing's title does on the
+     computer: `Marquee` below moves it and fades the edges it runs past. */
+  .marquee { white-space: nowrap; overflow: hidden; }
+  .marquee .run { display: inline-block; will-change: transform; }
   .album { font-size: 2.8vh; margin-top: 0.8vh; }
 
   .progress { margin-top: 6vh; max-width: 70vh; }
@@ -190,9 +194,11 @@
   <div class="song" id="song">
     <div class="cover" id="cover"></div>
     <div class="text" id="text">
-      <div class="title" id="title">Tonearm</div>
-      <div class="artist" id="artist"></div>
-      <div class="album" id="album"></div>
+      <div id="names">
+        <div class="title marquee" id="title"></div>
+        <div class="artist marquee" id="artist"></div>
+        <div class="album marquee" id="album"></div>
+      </div>
       <div class="progress" id="progress">
         <div class="bar"><div class="fill" id="fill"></div></div>
         <div class="times"><span id="at">0:00</span><span id="length"></span></div>
@@ -297,6 +303,8 @@
 
     return {
       cover(url) {
+        // Already on show or on its way: no second cross-fade.
+        if (url && url === wanted) return;
         wanted = url || '';
         if (!url) {
           base = null;
@@ -365,6 +373,95 @@
     return url ? 'url("' + url.replace(/["\\]/g, '') + '")' : 'none';
   }
 
+  // A line that scrolls when too long to fit, as the computer's Now playing
+  // title does: it rests at the start, slides left until its end shows,
+  // rests there, then slides back, and so on. An edge fades where the text
+  // runs past it. Text that fits stays put.
+  class Marquee {
+    constructor(element) {
+      this.box = element;
+      this.run = document.createElement('span');
+      this.run.className = 'run';
+      element.append(this.run);
+      this.since = performance.now();
+      this.travel = 0;
+      this.speed = 0;
+      this.fade = 0;
+      this.x = null;
+    }
+    set(text) {
+      if (this.run.textContent === text) return;
+      this.run.textContent = text;
+      this.since = performance.now();
+      this.measure();
+    }
+    // Widths, read now and then rather than every frame.
+    measure() {
+      const travel = Math.max(0, this.run.offsetWidth - this.box.clientWidth);
+      // Widened until it fits: back to the start, not stuck at the end.
+      if (travel <= 0.5 && this.travel > 0.5) this.since = performance.now();
+      this.travel = travel;
+      const font = parseFloat(getComputedStyle(this.box).fontSize) || 16;
+      // The computer's 32 pixels a second and 28 pixel fades at 24 pixels.
+      this.speed = font * 32 / 24;
+      this.fade = font * 28 / 24;
+    }
+    frame(now) {
+      let x = 0;
+      if (this.travel > 0.5) {
+        const glide = this.travel / this.speed * 1000;
+        // Each turn is the slide plus a rest at the end it reaches.
+        const turn = glide + 2500;
+        const n = Math.floor((now - this.since) / turn);
+        if (n > 0) {
+          const to = n % 2 ? -this.travel : 0;
+          const from = n % 2 ? 0 : -this.travel;
+          const t = Math.min(1, (now - this.since - n * turn) / glide);
+          x = from + (to - from) * easeInOut(t);
+        }
+      }
+      if (x === this.x) return;
+      this.x = x;
+      this.run.style.transform = x ? 'translateX(' + x.toFixed(1) + 'px)' : '';
+      if (this.travel <= 0.5) {
+        this.box.style.webkitMaskImage = this.box.style.maskImage = '';
+        return;
+      }
+      // How much of each fade shows: none with the text's own end at that
+      // edge, all of it once a fade's width of text is past it.
+      const left = Math.max(0, Math.min(1, -x / this.fade));
+      const right = Math.max(0, Math.min(1, (this.travel + x) / this.fade));
+      const mask = 'linear-gradient(90deg, rgba(0,0,0,' + (1 - left) + ') 0, #000 ' + this.fade + 'px, #000 calc(100% - ' +
+        this.fade + 'px), rgba(0,0,0,' + (1 - right) + ') 100%)';
+      this.box.style.webkitMaskImage = this.box.style.maskImage = mask;
+    }
+  }
+
+  // CSS's ease-in-out, cubic-bezier(0.42, 0, 0.58, 1), which Slint's is too.
+  function easeInOut(t) {
+    const x1 = 0.42, x2 = 0.58;
+    const bez = (s, a, b) => 3 * a * s * (1 - s) * (1 - s) + 3 * b * s * s * (1 - s) + s * s * s;
+    let lo = 0, hi = 1, s = t;
+    for (let i = 0; i < 20; i++) {
+      s = (lo + hi) / 2;
+      if (bez(s, x1, x2) < t) lo = s; else hi = s;
+    }
+    return bez(s, 0, 1);
+  }
+
+  const marquees = {
+    title: new Marquee($('title')),
+    artist: new Marquee($('artist')),
+    album: new Marquee($('album')),
+  };
+  marquees.title.set('Tonearm');
+  // Layout moves (lyrics coming or going, the window resized) change what fits.
+  setInterval(() => Object.values(marquees).forEach((m) => m.measure()), 500);
+  (function animate(now) {
+    requestAnimationFrame(animate);
+    for (const m of Object.values(marquees)) m.frame(now);
+  })(performance.now());
+
   function replay(element) {
     element.classList.remove('swap');
     void element.offsetWidth;
@@ -393,9 +490,65 @@
     return duration > 0 ? Math.min(position, duration) : position;
   }
 
+  // A change of song, as the computer's Now playing makes it: the old words
+  // slide up and out, then the new ones slide up into place, quick and
+  // never both at once. Each eases out, starting quick and settling.
+  const EASE_OUT = 'cubic-bezier(0.5, 1, 0.89, 1)';
+  function turnOver(element, swap) {
+    element.turn = (element.turn || 0) + 1;
+    const turn = element.turn;
+    (element.moves || []).forEach((m) => m.cancel());
+    const out = element.animate(
+      [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'translateY(-1.6vh)' }],
+      { duration: 180, easing: EASE_OUT, fill: 'forwards' });
+    element.moves = [out];
+    out.onfinish = () => {
+      if (element.turn !== turn) return;
+      swap();
+      const back = element.animate(
+        [{ opacity: 0, transform: 'translateY(1.6vh)' }, { opacity: 1, transform: 'none' }],
+        { duration: 280, easing: EASE_OUT, fill: 'forwards' });
+      element.moves.push(back);
+      back.onfinish = () => {
+        if (element.turn === turn) element.moves.forEach((m) => m.cancel());
+      };
+    };
+  }
+
+  // The cover cross-fades: the old one fades out over the new, eased at both
+  // ends, once the new one has loaded so it never fades out to nothing.
+  let coverWanted = '';
+  function showCover(url, fade) {
+    const cover = $('cover');
+    const next = cssUrl(url);
+    coverWanted = next;
+    const old = cover.style.backgroundImage;
+    if (old === next) return;
+    const swap = () => {
+      if (coverWanted !== next) return;
+      if (fade && old && old !== 'none') {
+        const ghost = document.createElement('div');
+        ghost.className = 'ghost';
+        ghost.style.backgroundImage = old;
+        cover.append(ghost);
+        ghost.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 700, easing: 'cubic-bezier(0.45, 0, 0.55, 1)' })
+          .onfinish = () => ghost.remove();
+      }
+      cover.style.backgroundImage = next;
+    };
+    if (!url) return swap();
+    const image = new Image();
+    image.onload = image.onerror = swap;
+    image.src = url;
+  }
+
+  // While the old lyrics slide out, they are left as they are.
+  let lyricsTurning = false;
+
   function show(now) {
     const changed = !song || song.id !== now.id || song.title !== now.title ||
       song.artist !== now.artist || song.cover !== now.cover;
+    const another = !!song && song.id !== now.id && !document.body.classList.contains('waiting');
     song = now;
     clock = {
       position: now.position || 0,
@@ -408,16 +561,27 @@
     if (clock.engine == null) clock.stream = null;
     if (changed) {
       document.body.classList.remove('waiting');
-      $('title').textContent = now.title || '';
-      $('artist').textContent = now.artist || '';
-      $('album').textContent = now.album || '';
+      // Read when the words swap, so a quick run of skips lands on the last.
+      const names = () => {
+        marquees.title.set(song.title || '');
+        marquees.artist.set(song.artist || '');
+        marquees.album.set(song.album || '');
+      };
+      if (another) turnOver($('names'), names);
+      else names();
       $('length').textContent = now.duration > 0 ? clockText(now.duration) : '';
       $('progress').style.visibility = now.duration > 0 ? 'visible' : 'hidden';
-      $('cover').style.backgroundImage = cssUrl(now.cover);
+      showCover(now.cover, another);
       flow.cover(now.cover);
-      replay($('cover'));
-      replay($('text'));
-      showLyrics();
+      if (another && shown.rows.length) {
+        lyricsTurning = true;
+        turnOver($('lyrics'), () => {
+          lyricsTurning = false;
+          showLyrics();
+        });
+      } else if (!lyricsTurning) {
+        showLyrics();
+      }
     }
     document.body.classList.toggle('paused', clock.paused);
     tick();
@@ -459,6 +623,7 @@
   }
 
   function showLyrics() {
+    if (lyricsTurning) return;
     const id = song ? song.id : null;
     const lines = id ? lyrics.get(id) : null;
     const has = !!(lines && lines.length);
@@ -558,7 +723,7 @@
 
   // Lights the line being sung and scrolls it to just above the middle.
   function follow(force) {
-    if (!shown.rows.length) return;
+    if (!shown.rows.length || lyricsTurning) return;
     const t = heard() + EARLY;
     let now = -1;
     for (let i = 0; i < shown.rows.length && shown.rows[i].start <= t; i++) now = i;
@@ -607,8 +772,8 @@
   player.setMessageInterceptor(cast.framework.messages.MessageType.LOAD, (request) => {
     const meta = request.media && request.media.metadata;
     if (meta && !song) {
-      $('title').textContent = meta.title || 'Tonearm';
-      $('artist').textContent = meta.artist || '';
+      marquees.title.set(meta.title || 'Tonearm');
+      marquees.artist.set(meta.artist || '');
     }
     return request;
   });
