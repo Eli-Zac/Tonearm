@@ -119,6 +119,11 @@ Section "Tonearm"
   ; Tonearm keeps this shortcut's app ID up to date itself, for the media
   ; flyout, so it only needs to exist here.
   CreateShortcut "$SMPROGRAMS\Tonearm.lnk" "$INSTDIR\tonearm.exe"
+  ; A desktop shortcut made at an earlier install is written again, so the
+  ; shell reads it afresh.
+  IfFileExists "$DESKTOP\Tonearm.lnk" 0 +2
+    CreateShortcut "$DESKTOP\Tonearm.lnk" "$INSTDIR\tonearm.exe"
+  Call RefreshIcons
 
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayName" "${NAME}"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayVersion" "${VERSION}"
@@ -141,6 +146,37 @@ SectionEnd
 
 Function CreateDesktopShortcut
   CreateShortcut "$DESKTOP\Tonearm.lnk" "$INSTDIR\tonearm.exe"
+  Call RefreshIcons
+FunctionEnd
+
+; Windows keeps a cache of icons, so an update that changes the logo would
+; leave the old one on the Start menu, the desktop and the taskbar pin, which
+; all take it from the exe. Tells the shell each of those changed, then that
+; icons changed everywhere, and has Windows rebuild its icon cache.
+!define SHCNE_UPDATEITEM 0x2000
+!define SHCNE_ASSOCCHANGED 0x08000000
+!define SHCNF_PATHW_FLUSH 0x1005
+!define SHCNF_IDLIST_FLUSH 0x1000
+!define PINNED "$APPDATA\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar\Tonearm.lnk"
+Function RefreshIcons
+  System::Call 'shell32::SHChangeNotify(i ${SHCNE_UPDATEITEM}, i ${SHCNF_PATHW_FLUSH}, w "$INSTDIR\tonearm.exe", p 0)'
+  System::Call 'shell32::SHChangeNotify(i ${SHCNE_UPDATEITEM}, i ${SHCNF_PATHW_FLUSH}, w "$SMPROGRAMS\Tonearm.lnk", p 0)'
+  IfFileExists "$DESKTOP\Tonearm.lnk" 0 +2
+    System::Call 'shell32::SHChangeNotify(i ${SHCNE_UPDATEITEM}, i ${SHCNF_PATHW_FLUSH}, w "$DESKTOP\Tonearm.lnk", p 0)'
+  IfFileExists "${PINNED}" 0 +2
+    System::Call 'shell32::SHChangeNotify(i ${SHCNE_UPDATEITEM}, i ${SHCNF_PATHW_FLUSH}, w "${PINNED}", p 0)'
+  System::Call 'shell32::SHChangeNotify(i ${SHCNE_ASSOCCHANGED}, i ${SHCNF_IDLIST_FLUSH}, p 0, p 0)'
+  ; Windows 10 and 11 refresh their icon cache with this, quietly. The
+  ; installer is 32 bit, so the 64 bit system folder is reached through
+  ; Sysnative. It does not matter if neither is there.
+  StrCpy $0 "$WINDIR\Sysnative\ie4uinit.exe"
+  IfFileExists $0 refresh_run 0
+  StrCpy $0 "$SYSDIR\ie4uinit.exe"
+  IfFileExists $0 refresh_run refresh_done
+  refresh_run:
+    nsExec::Exec '"$0" -show'
+    Pop $0
+  refresh_done:
 FunctionEnd
 
 Section "Uninstall"
