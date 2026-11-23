@@ -278,6 +278,8 @@ fun MixSheet(
                     MixPictureView(
                         picture = picture,
                         playhead = previewAt,
+                        outLoading = data?.from?.analysed != true,
+                        inLoading = data?.to?.analysed != true,
                         onDrag = { side, delta, exact ->
                             update { current -> core.mixEditorDrag(from, to, current, side.toUInt(), delta, exact) }
                         },
@@ -484,12 +486,50 @@ private fun ToggleRow(title: String, on: Boolean, enabled: Boolean, onToggle: ()
     }
 }
 
+/**
+ * A waveform that is still on its way: rounded bars of changing height down
+ * the middle of the band from `top` to `bottom`, with a band of light
+ * sweeping along them, as the other skeletons do. Drawn in the picture's own
+ * 340 by 230 units.
+ */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.skeletonWaveform(top: Float, bottom: Float, sweep: Float) {
+    val bars = 56
+    val step = 340f / bars
+    val middle = (top + bottom) / 2f
+    for (i in 0 until bars) {
+        // Heights that look like a song, the same every time.
+        val shape = kotlin.math.abs(kotlin.math.sin(i * 0.55f)) * 0.6f + kotlin.math.abs(kotlin.math.sin(i * 1.7f + 1f)) * 0.4f
+        val height = (10f + shape * (bottom - top - 26f)).coerceAtMost(bottom - top - 8f)
+        val x = i * step
+        // How near this bar is to the light, wrapping round at the end.
+        val d = kotlin.math.abs(((x / 340f - sweep + 1.5f) % 1f) - 0.5f)
+        val light = (1f - d * 4f).coerceIn(0f, 1f)
+        drawRoundRect(
+            Color.White.copy(alpha = 0.07f + 0.13f * light),
+            topLeft = Offset(x + step * 0.18f, middle - height / 2f),
+            size = androidx.compose.ui.geometry.Size(step * 0.64f, height),
+            cornerRadius = androidx.compose.ui.geometry.CornerRadius(step * 0.32f),
+        )
+    }
+}
+
 @Composable
 private fun MixPictureView(
     picture: uniffi.tonearm_android.MixPicture,
     playhead: Float,
     onDrag: (Int, Double, Boolean) -> Unit,
+    // A song with no analysis has no waveform yet: a skeleton of one shows
+    // in its half of the picture, shimmering, until the analysis is done.
+    outLoading: Boolean = false,
+    inLoading: Boolean = false,
 ) {
+    // One sweep of light along the skeleton bars, 1.4 s.
+    val shimmer = if (outLoading || inLoading) {
+        rememberInfiniteTransition(label = "waveform skeleton")
+            .animateFloat(0f, 1f, infiniteRepeatable(tween(1400, easing = LinearEasing)), label = "sweep").value
+    } else {
+        0f
+    }
     var size by remember { mutableStateOf(IntSize.Zero) }
     var dragSide by remember { mutableIntStateOf(-1) }
     var dragPixels by remember { mutableFloatStateOf(0f) }
@@ -536,15 +576,23 @@ private fun MixPictureView(
             drawPath(paths[1], Color(0x22FFFFFF), style = Stroke(1f))
             val shift = if (dragSide >= 0) dragPixels / scaleFactor else 0f
             clipRect(0f, 0f, 340f, 115f) {
-                translate(left = -340f + if (dragSide == 0) shift else 0f) {
-                    drawPath(paths[2], Color(color.outWave.toInt()))
-                    drawPath(paths[3], Color(color.low.toInt()))
+                if (outLoading) {
+                    skeletonWaveform(0f, 115f, shimmer)
+                } else {
+                    translate(left = -340f + if (dragSide == 0) shift else 0f) {
+                        drawPath(paths[2], Color(color.outWave.toInt()))
+                        drawPath(paths[3], Color(color.low.toInt()))
+                    }
                 }
             }
             clipRect(0f, 115f, 340f, 230f) {
-                translate(left = -340f + if (dragSide == 1) shift else 0f) {
-                    drawPath(paths[4], Color(color.inWave.toInt()))
-                    drawPath(paths[5], Color(color.low.toInt()))
+                if (inLoading) {
+                    skeletonWaveform(115f, 230f, shimmer)
+                } else {
+                    translate(left = -340f + if (dragSide == 1) shift else 0f) {
+                        drawPath(paths[4], Color(color.inWave.toInt()))
+                        drawPath(paths[5], Color(color.low.toInt()))
+                    }
                 }
             }
             drawPath(paths[6], Color(color.effect.toInt()), style = Stroke(2f, cap = StrokeCap.Round, join = StrokeJoin.Round))

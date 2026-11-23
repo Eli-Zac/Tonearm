@@ -270,7 +270,19 @@ impl Tonearm {
             if self.fade.lock().unwrap().take().is_some_and(|n| n.armed) {
                 self.audio.unfollow();
             }
-            if self.preview_mix.lock().unwrap().take().is_some() {
+            // Nothing follows the last song of a preview, which is the one
+            // mixed into. The preview goes on while either of its songs
+            // plays, so the editor keeps its playhead and stop button
+            // through the mix and past it.
+            let in_preview = {
+                let preview = self.preview_mix.lock().unwrap();
+                let song = self.now_playing();
+                preview
+                    .as_ref()
+                    .zip(song)
+                    .is_some_and(|(p, s)| s.video_id == p.from || s.video_id == p.to)
+            };
+            if !in_preview && self.preview_mix.lock().unwrap().take().is_some() {
                 self.mix_mode.store(false, Ordering::SeqCst);
                 tonearm_core::analysis::set_enabled(false);
             }

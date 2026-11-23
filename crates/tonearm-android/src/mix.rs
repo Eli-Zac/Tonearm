@@ -13,6 +13,12 @@ pub struct MixRow {
     pub key_color: u32,
     pub transition: String,
     pub analyzing: bool,
+    /// Why there is no tempo and key yet, as the desktop's playlist says
+    /// it: 0 nothing to say, 1 being analysed, 2 queued, 3 waiting for a
+    /// play.
+    pub analysis_state: u32,
+    /// How far along the analysis is, 0 to 1, while it is being analysed.
+    pub analysis_fraction: f32,
 }
 
 #[derive(uniffi::Record, Clone, Debug)]
@@ -44,6 +50,9 @@ pub struct MixEditorSong {
     pub camelot: String,
     pub key_color: u32,
     pub analyzing: bool,
+    /// Whether the song has been analysed. Without it the picture has no
+    /// waveform to draw, so the editor shows a skeleton of one.
+    pub analysed: bool,
 }
 
 #[derive(uniffi::Record, Clone, Debug)]
@@ -210,6 +219,7 @@ fn editor_data(
                 .video_id
                 .as_deref()
                 .is_some_and(|id| tonearm_core::analysis::progress(id) != tonearm_core::analysis::Progress::Idle),
+            analysed: out.is_some(),
         },
         to: MixEditorSong {
             bpm: data.to.bpm,
@@ -219,6 +229,7 @@ fn editor_data(
                 .video_id
                 .as_deref()
                 .is_some_and(|id| tonearm_core::analysis::progress(id) != tonearm_core::analysis::Progress::Idle),
+            analysed: inn.is_some(),
         },
         picture: MixPicture {
             card_from: data.picture.card_from,
@@ -332,6 +343,15 @@ impl Tonearm {
                     transition,
                     analyzing: summary.is_none()
                         && tonearm_core::analysis::progress(id) != tonearm_core::analysis::Progress::Idle,
+                    analysis_state: match summary {
+                        Some(_) => 0,
+                        None => match tonearm_core::analysis::progress(id) {
+                            tonearm_core::analysis::Progress::Working => 1,
+                            tonearm_core::analysis::Progress::Waiting => 2,
+                            tonearm_core::analysis::Progress::Idle => 3,
+                        },
+                    },
+                    analysis_fraction: tonearm_core::analysis::fraction(id),
                 }
             })
             .collect()
@@ -506,7 +526,14 @@ impl Tonearm {
         let preview = self.preview_mix.lock().unwrap();
         let preview = preview.as_ref()?;
         let song = self.now_playing()?;
-        let position = self.audio.status.position_ms.load(Ordering::SeqCst) as f64 / 1000.0;
+        // What is heard, not what the mixer has made: while casting, the
+        // device plays the stream a moment behind it.
+        let status = &self.audio.status;
+        let position = status
+            .position_ms
+            .load(Ordering::SeqCst)
+            .saturating_sub(status.lag_ms.load(Ordering::SeqCst)) as f64
+            / 1000.0;
         let at = if song.video_id == preview.from {
             position - preview.out_start
         } else if song.video_id == preview.to {
@@ -518,7 +545,22 @@ impl Tonearm {
             .then_some(((at - preview.left) / (preview.right - preview.left)) as f32)
     }
 
+    /// Whether a preview plays: one of its two songs is the song playing,
+    /// and it has not ended or failed.
     pub fn mix_preview_active(&self) -> bool {
-        self.preview_mix.lock().unwrap().is_some()
+        let preview = self.preview_mix.lock().unwrap();
+        let Some(preview) = preview.as_ref() else {
+            return false;
+        };
+        let Some(song) = self.now_playing() else {
+            return false;
+        };
+        if song.video_id != preview.from && song.video_id != preview.to {
+            return false;
+        }
+        !matches!(
+            self.audio.status.state.load(Ordering::SeqCst),
+            tonearm_core::audio::ENDED | tonearm_core::audio::FAILED
+        )
     }
 }

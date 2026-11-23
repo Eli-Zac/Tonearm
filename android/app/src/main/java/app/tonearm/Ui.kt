@@ -584,12 +584,33 @@ private fun MixRowLine(row: MixRow?, onEdit: (MixRow) -> Unit) {
             Bone(Modifier.width(28.dp).height(12.dp))
             Spacer(Modifier.width(10.dp))
             Bone(Modifier.width(26.dp).height(12.dp))
+        } else if (row.analysisState.toInt() != 0) {
+            // No tempo or key yet: say why, as the desktop's playlist does.
+            // The words and the bar take the same room whichever shows, so
+            // the row doesn't move as the analysis goes on.
+            val state = row.analysisState.toInt()
+            Column(Modifier.width(100.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                if (state == 1) {
+                    Title("Analysing ${(row.analysisFraction.coerceIn(0f, 1f) * 100).toInt()}%", size = 12.sp, weight = FontWeight.Medium)
+                } else {
+                    Dim(if (state == 2) "Queued" else "After a play", 12.sp, lines = 1)
+                }
+                Box(
+                    Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp))
+                        .background(if (state == 1) Color(0x40FFFFFF) else Color.Transparent),
+                ) {
+                    if (state == 1) {
+                        Box(
+                            Modifier.fillMaxWidth(row.analysisFraction.coerceIn(0f, 1f)).fillMaxHeight()
+                                .background(Tonearm.accent),
+                        )
+                    }
+                }
+            }
         } else {
-            if (row.analyzing && row.bpm.isEmpty()) Bone(Modifier.width(28.dp).height(12.dp))
-            else Dim(row.bpm, 12.sp, modifier = Modifier.widthIn(min = 28.dp))
+            Dim(row.bpm, 12.sp, modifier = Modifier.widthIn(min = 28.dp))
             Spacer(Modifier.width(10.dp))
-            if (row.analyzing && row.key.isEmpty()) Bone(Modifier.width(26.dp).height(12.dp))
-            else if (row.key.isNotEmpty()) {
+            if (row.key.isNotEmpty()) {
                 Box(
                     Modifier.clip(RoundedCornerShape(5.dp))
                         .background(Color(row.keyColor.toInt()))
