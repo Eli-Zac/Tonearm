@@ -49,6 +49,11 @@ const VOLUME_ECHO: Duration = Duration::from_millis(2000);
 /// A device that has not fetched the stream this long after being told
 /// the link never will: something between is turning it away.
 const UNREACHED: Duration = Duration::from_secs(12);
+/// A device still holding an earlier cast of the same app answers our launch
+/// with that session, then replaces it with a new one. Within this long of
+/// the song being sent, and before the device has played anything, a new
+/// session is that swap, and the cast moves to it.
+const SWAP_WINDOW: Duration = Duration::from_secs(10);
 
 /// What happens to a cast, for the app.
 #[derive(Debug)]
@@ -301,7 +306,7 @@ impl Cast {
         let mut refused = 0;
         let mut retry_at: Option<Instant> = None;
         let mut launched = Instant::now();
-        let (transport, session) = loop {
+        let (mut transport, mut session) = loop {
             if started.elapsed() > Duration::from_secs(25) {
                 return Err(format!("{name} didn't start the player"));
             }
@@ -364,13 +369,11 @@ impl Cast {
         };
         channel.send(&transport, CONNECTION, &json!({"type": "CONNECT"}))?;
         self.shows_songs.store(self.app != DEFAULT_APP, Ordering::Relaxed);
-        let load = self.next_request();
-        channel.send(
-            &transport,
-            MEDIA,
-            &json!({
+        // The message that has the device play our stream, for a session.
+        let load_message = |request: u64, session: &str| {
+            json!({
                 "type": "LOAD",
-                "requestId": load,
+                "requestId": request,
                 "sessionId": session,
                 "media": {
                     "contentId": server.url,
@@ -380,8 +383,10 @@ impl Cast {
                     "metadata": {"metadataType": 3, "title": title, "artist": subtitle},
                 },
                 "autoplay": true,
-            }),
-        )?;
+            })
+        };
+        let load = self.next_request();
+        channel.send(&transport, MEDIA, &load_message(load, &session))?;
 
         let mut media: Option<u64> = None;
         let mut playing = false;
@@ -400,7 +405,7 @@ impl Cast {
         let mut heard = Instant::now();
         let mut pinged = Instant::now();
         let mut asked = Instant::now();
-        let loaded = Instant::now();
+        let mut loaded = Instant::now();
         // Until the device plays, the song isn't moving there.
         let mut screen = Screen {
             held: true,
@@ -524,8 +529,22 @@ impl Cast {
                     return Err(format!("{name} stopped playing"));
                 }
                 (RECEIVER, Some("RECEIVER_STATUS")) => {
-                    if our_app(p, self.app).is_none_or(|(_, s)| s != session) {
-                        return Err(format!("{name} is playing something else now"));
+                    match our_app(p, self.app) {
+                        Some((_, s)) if s == session => {}
+                        // The device swapped the earlier cast's session for a
+                        // new one as ours started. Carry on in the new one:
+                        // the song goes to it again.
+                        Some((new_transport, new_session)) if !playing && loaded.elapsed() < SWAP_WINDOW => {
+                            eprintln!("cast: {name} replaced the session as we started, moving to the new one");
+                            transport = new_transport;
+                            session = new_session;
+                            media = None;
+                            channel.send(&transport, CONNECTION, &json!({"type": "CONNECT"}))?;
+                            let load = self.next_request();
+                            channel.send(&transport, MEDIA, &load_message(load, &session))?;
+                            loaded = Instant::now();
+                        }
+                        _ => return Err(format!("{name} is playing something else now")),
                     }
                     if let Some(level) = p["status"]["volume"]["level"].as_f64() {
                         let level = level as f32;
@@ -577,7 +596,15 @@ impl Cast {
                         }
                         // Idle with no reason before it plays is the player
                         // starting up.
-                        "IDLE" if playing || status["idleReason"].is_string() => {
+                        // The earlier cast's media being cancelled as the
+                        // device swaps sessions, before anything of ours
+                        // plays, is not the end of this one.
+                        "IDLE"
+                            if (playing || status["idleReason"].is_string())
+                                && !(!playing
+                                    && loaded.elapsed() < SWAP_WINDOW
+                                    && matches!(status["idleReason"].as_str(), Some("INTERRUPTED" | "CANCELLED"))) =>
+                        {
                             let reason = status["idleReason"].as_str().unwrap_or("");
                             return Err(match reason {
                                 "ERROR" if !self.pipe.reached() => format!(
