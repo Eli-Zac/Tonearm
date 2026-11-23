@@ -137,6 +137,10 @@ unless `TONEARM_CAST_APP` (in `keys.env` or the environment) names another id.
 Until the app is published, only devices registered in the Cast developer
 console can open it; any other device falls back to Google's receiver.
 
+To test casting without a TV, `python receiver/fake-cast/fake_cast.py`
+(Windows) advertises a pretend Cast device with a screen on the network and
+shows the receiver page in an Edge window, logging what Tonearm sends it.
+
 ## Lyrics
 
 Tonearm asks these public lyric services in order, and stops at the first
