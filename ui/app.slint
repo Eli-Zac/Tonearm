@@ -2988,12 +2988,19 @@ component SuggestRow inherits Rectangle {
     in property <bool> highlighted;
     callback clicked;
     callback open(string);
+    // Right clicked, at this place in the window.
+    callback menu(length, length);
     height: data.kind != 1 ? 48px : 60px;
     border-radius: 8px;
     background: highlighted || (touch.has-hover && !Scroll.active) ? #ffffff14 : transparent;
     touch := TouchArea {
         mouse-cursor: pointer;
         clicked => { root.clicked(); }
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down && event.button == PointerEventButton.right {
+                root.menu(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
     }
     HorizontalLayout {
         padding-left: 8px;
@@ -3074,6 +3081,8 @@ component SearchBox inherits Rectangle {
     callback picked(int);
     // An artist or album name in a row was clicked.
     callback open-link(string);
+    // A row was right clicked: its index, and where in the window.
+    callback menu(int, length, length);
     height: showing ? 54px + list.preferred-height : 48px;
 
     // Closes the list and lets go of focus. A focused box opens its list
@@ -3082,6 +3091,20 @@ component SearchBox inherits Rectangle {
         root.open = false;
         root.highlight = -1;
         field.blur();
+    }
+
+    // Closes the list as a line of its right click menu is picked. The menu
+    // gives focus back to the box as it closes, which would open the list
+    // again, so the box lets go of that focus once, for a moment.
+    property <bool> stay-closed;
+    public function close-from-menu() {
+        root.stay-closed = true;
+        root.close();
+    }
+    Timer {
+        interval: 400ms;
+        running: root.stay-closed;
+        triggered => { root.stay-closed = false; }
     }
 
     function pick(index: int) {
@@ -3127,7 +3150,10 @@ component SearchBox inherits Rectangle {
             placeholder: "Search songs, albums, artists";
             text <=> root.text;
             changed focused => {
-                if self.focused {
+                if self.focused && root.stay-closed {
+                    root.stay-closed = false;
+                    self.blur();
+                } else if self.focused {
                     root.open = true;
                 }
             }
@@ -3205,6 +3231,7 @@ component SearchBox inherits Rectangle {
                 root.close();
                 root.open-link(b);
             }
+            menu(x, y) => { root.menu(i, x, y); }
         }
     }
 }
@@ -4389,6 +4416,8 @@ component SyllableView inherits Rectangle {
     in property <int> time;
     in property <bool> active;
     in property <length> font-size: 24px;
+    // How bright words not yet sung are on the sung line.
+    in property <float> unsung: 0.4;
     property <float> progress: !active || time <= syllable.start ? 0 : time >= syllable.end ? 1 : 1.0 * (time - syllable.start) / max(1, syllable.end - syllable.start);
     // Sung syllables rise a little, the way Apple Music lifts them.
     property <length> lift: active && time >= syllable.start ? -2px : 0px;
@@ -4400,7 +4429,7 @@ component SyllableView inherits Rectangle {
         y: root.lift;
         height: 100%;
         text: syllable.text;
-        color: active ? #ffffff66 : #ffffff;
+        color: active ? #ffffff.with-alpha(root.unsung) : #ffffff;
         font-size: root.font-size;
         font-family: "Figtree";
         font-weight: 700;
@@ -4947,6 +4976,8 @@ export component AppWindow inherits Window {
     callback item-menu(int, int);
     callback menu-picked(int);
     property <length> menu-x;
+    // Where the open menu came from, as show-menu numbers it.
+    property <int> menu-source;
     property <length> menu-y;
     property <length> menu-height: 10px + root.menu-entries.length * 34px - 2px;
     // Opens the menu again where it last was, with new entries, such as
@@ -5460,6 +5491,7 @@ export component AppWindow inherits Window {
 
     // Asks Rust what the item offers, then opens the menu at the mouse.
     function show-menu(source: int, id: int, x: length, y: length) {
+        root.menu-source = source;
         root.item-menu(source, id);
         if root.menu-entries.length > 0 {
             root.menu-x = x;
@@ -6686,7 +6718,8 @@ export component AppWindow inherits Window {
                         font-weight: 800;
                     }
                     SubpageRow {
-                        icon: Icons.artist;
+                        logo: @image-url("tonearm-wave.svg");
+                        brand: #ec343a;
                         title: "Tonearm";
                         subtitle: root.tonearm-email != "" ? "Signed in as " + root.tonearm-email : "Not signed in";
                         clicked => { root.settings-page = 6; }
@@ -6756,8 +6789,8 @@ export component AppWindow inherits Window {
                     }
                     if root.tonearm-email == "": Section {
                         title: "Tonearm";
-                        glyph: Icons.artist;
-                        brand: Theme.accent;
+                        logo: @image-url("tonearm-wave.svg");
+                        brand: #ec343a;
                         about: "Sign in with your email. Your settings and pins follow you to every device you sign in on. Tonearm emails you a six digit code; there is no password.";
                         tonearm-mail := Field {
                             placeholder: "Email address";
@@ -6809,8 +6842,8 @@ export component AppWindow inherits Window {
                     }
                     if root.tonearm-email != "": Section {
                         title: "Tonearm";
-                        glyph: Icons.artist;
-                        brand: Theme.accent;
+                        logo: @image-url("tonearm-wave.svg");
+                        brand: #ec343a;
                         about: "This account's settings follow you to every device signed in to it.";
                         AccountRow {
                             linked: true;
@@ -8681,6 +8714,10 @@ export component AppWindow inherits Window {
                             time: root.lyrics-time;
                             active: lyric-row.active;
                             font-size: root.lyrics-font * lyric-row.grow;
+                            // The row is still fading up as its line starts.
+                            // Its words not yet sung stay as bright as the
+                            // line was while it waited, rather than dipping.
+                            unsung: 0.4 / max(0.4, lyric-row.fade);
                         }
                     }
                     if row.syllables.length == 0 || lyric-row.distance > 0: BlurText {
@@ -9509,6 +9546,7 @@ export component AppWindow inherits Window {
         // Now playing to show it, which the app does as it opens one.
         picked(index) => { root.suggestion-picked(index); }
         open-link(b) => { root.open-browse(b); }
+        menu(index, x, y) => { root.show-menu(5, index, x, y); }
     }
 
     // The right click menu, opened at the mouse by show-menu. It keeps to
@@ -9554,7 +9592,14 @@ export component AppWindow inherits Window {
                     }
                     pick := TouchArea {
                         mouse-cursor: pointer;
-                        clicked => { root.menu-picked(i); }
+                        clicked => {
+                            // What a line does happens on the page, which
+                            // the list would otherwise still cover.
+                            if root.menu-source == 5 {
+                                search.close-from-menu();
+                            }
+                            root.menu-picked(i);
+                        }
                     }
                 }
             }

@@ -91,6 +91,7 @@ const QUEUE_ITEM: i32 = 1;
 const PLAYING: i32 = 2;
 const PAGE: i32 = 3;
 const QUICK_ACCESS: i32 = 4;
+const SUGGESTION: i32 = 5;
 
 struct Lines<'a> {
     icons: Icons<'a>,
@@ -173,6 +174,14 @@ impl App {
             QUICK_ACCESS => {
                 let item = self.quick_access.borrow().items().get(id).cloned();
                 if let Some(item) = item {
+                    self.item_lines(&mut lines, &item, false);
+                }
+            }
+            // A song, album or artist under the search box. Typed and
+            // recent searches are only text, and offer nothing.
+            SUGGESTION => {
+                let pick = self.suggest.borrow().picks.get(id).cloned();
+                if let Some(crate::Pick::Item(item)) = pick {
                     self.item_lines(&mut lines, &item, false);
                 }
             }

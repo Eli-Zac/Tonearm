@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- The logo's sound wave alone (assets/logo.svg), filling the square, for
+       a tile of the logo's red, as the other accounts' logos are drawn. -->
+  <g fill="#ffffff">
+    <path d="M4,26a4,4 0 0 1 8,0v12a4,4 0 0 1 -8,0z"/>
+    <path d="M16,17a4,4 0 0 1 8,0v30a4,4 0 0 1 -8,0z"/>
+    <path d="M28,8a4,4 0 0 1 8,0v48a4,4 0 0 1 -8,0z"/>
+    <path d="M40,17a4,4 0 0 1 8,0v30a4,4 0 0 1 -8,0z"/>
+    <path d="M52,26a4,4 0 0 1 8,0v12a4,4 0 0 1 -8,0z"/>
+  </g>
+</svg>
