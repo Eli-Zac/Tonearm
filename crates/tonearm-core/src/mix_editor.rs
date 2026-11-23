@@ -210,7 +210,12 @@ pub fn pick_choice(mut settings: Settings, part: usize, index: usize) -> Result<
         values.get(index).map(|(value, _)| *value).ok_or_else(|| "Unknown transition choice".to_string())
     }
     match part {
-        0 => settings.bars = at(&LENGTH_CHOICES, index)?,
+        // A length of its own is a choice like the others: it makes the
+        // transition custom, so it is kept when saved and not read as Auto.
+        0 => {
+            settings.bars = at(&LENGTH_CHOICES, index)?;
+            settings.preset = Preset::Custom;
+        }
         1 => {
             settings.volume = at(&VOLUME_CHOICES, index)?;
             settings.preset = Preset::Custom;
@@ -489,5 +494,15 @@ mod tests {
         let picked = pick_preset(settings, 0, None, None).unwrap();
         assert_eq!(picked.bars, 8);
         assert!(pick_preset(settings, usize::MAX, None, None).is_err());
+    }
+
+    #[test]
+    fn changing_the_length_makes_an_auto_transition_custom() {
+        let auto = Settings::preset(Preset::Auto);
+        let index = transition::LENGTH_CHOICES.iter().position(|(bars, _)| *bars == 8).unwrap();
+        let picked = pick_choice(auto, 0, index).unwrap();
+        assert_eq!(picked.bars, 8);
+        // Not Auto, so saving keeps it.
+        assert_eq!(picked.preset, Preset::Custom);
     }
 }
