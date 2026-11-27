@@ -124,8 +124,10 @@ fun LibraryScreen(core: Core, actions: Actions, epoch: Int) {
             LibraryStore.offset = state.firstVisibleItemScrollOffset
         }
     }
+    val scrolled by remember { derivedStateOf { state.firstVisibleItemIndex > 0 || state.firstVisibleItemScrollOffset > 0 } }
+    Box(Modifier.fillMaxSize()) {
     LazyColumn(state = state, contentPadding = PaddingValues(bottom = 24.dp)) {
-        item(contentType = "heading") { TabHeading("Library") }
+        item(contentType = "heading") { Box(Modifier.statusBarsPadding()) { TabHeading("Library") } }
         item(contentType = "chips") {
             LazyRow(
                 contentPadding = PaddingValues(horizontal = 16.dp),
@@ -176,6 +178,8 @@ fun LibraryScreen(core: Core, actions: Actions, epoch: Int) {
                 ItemRow(item, playing = false, onClick = { actions.tap(item) }, onPlay = { actions.menu(item) })
             }
         }
+    }
+    StatusBar(scrolled)
     }
 }
 

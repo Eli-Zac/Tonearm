@@ -879,6 +879,30 @@ fun PageView(
     /** The id and params the page was opened with, for its own menu. */
     pageId: String? = null,
     pageParams: String? = null,
+    /** The page runs up under the status bar, and `StatusBar` goes over
+     *  it: Home, Explore and the pages opened from them. */
+    underStatusBar: Boolean = false,
+) {
+    Box(Modifier.fillMaxSize()) {
+        var scrolled by remember(key) { mutableStateOf(false) }
+        PageViewBody(key, load, more, actions, top, topWhileLoading, skeleton, pageId, pageParams) { scrolled = it }
+        if (underStatusBar) StatusBar(scrolled)
+    }
+}
+
+@Composable
+private fun PageViewBody(
+    key: Any,
+    load: suspend () -> Page,
+    more: suspend (String) -> Page,
+    actions: Actions,
+    top: (@Composable (Page?) -> Unit)?,
+    topWhileLoading: Boolean,
+    skeleton: PageSkeleton,
+    pageId: String?,
+    pageParams: String?,
+    /** Whether the list is scrolled off its top, as it changes. */
+    onScrolled: (Boolean) -> Unit,
 ) {
     // Shown again at once when it was loaded lately: going to another tab,
     // or into an album and back, takes the page off the screen, and it
@@ -964,6 +988,10 @@ fun PageView(
                         loadingMore = false
                     }
                 }
+            }
+            LaunchedEffect(state) {
+                snapshotFlow { state.firstVisibleItemIndex > 0 || state.firstVisibleItemScrollOffset > 0 }
+                    .collect { onScrolled(it) }
             }
             LazyColumn(state = state, contentPadding = PaddingValues(bottom = 24.dp)) {
                 top?.let { t -> item(contentType = "top") { t(shown) } }

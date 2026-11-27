@@ -159,9 +159,10 @@ fun SettingsScreen(
 /** A settings page: the back button, the page's title, and its cards. */
 @Composable
 private fun SettingsPage(title: String, onBack: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
+    val scroll = rememberScrollState()
     Box(Modifier.fillMaxSize()) {
         Column(
-            Modifier.fillMaxSize().imePadding().verticalScroll(rememberScrollState()).statusBarsPadding()
+            Modifier.fillMaxSize().imePadding().verticalScroll(scroll).statusBarsPadding()
                 .padding(start = 16.dp, end = 16.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
@@ -190,7 +191,7 @@ private fun SettingsPage(title: String, onBack: () -> Unit, content: @Composable
             }
             content()
         }
-        StatusFade()
+        StatusBar(scroll.value > 0)
     }
 }
 

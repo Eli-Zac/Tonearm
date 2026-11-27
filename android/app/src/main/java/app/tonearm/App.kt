@@ -5,6 +5,8 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.tween
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -358,11 +360,10 @@ fun App(core: Core, controller: MediaController?) {
                                 onSettings = { stack.add(Route(SettingsPages.root, null, "Settings")) },
                                 onAccount = { stack.add(Route(PROFILE_ROUTE, null, "Profile")) },
                             )
-                            StatusFade()
                         }
-                        Tab.Explore -> Box(Modifier.statusBarsPadding()) { ExploreScreen(core, actions) }
+                        Tab.Explore -> ExploreScreen(core, actions)
                         Tab.Search -> Box(Modifier.statusBarsPadding()) { SearchScreen(core, actions) }
-                        Tab.Library -> Box(Modifier.statusBarsPadding()) { LibraryScreen(core, actions, libraryEpoch) }
+                        Tab.Library -> LibraryScreen(core, actions, libraryEpoch)
                     }
                 }
             }
@@ -579,19 +580,33 @@ fun ConfirmDialog(
     }
 }
 
-/** A fade behind the status bar, so the clock and battery read over a
- *  bright banner or Home's glows, on pages that run up under it. */
+/**
+ * Behind the status bar, on every page that scrolls under it, as YouTube
+ * Music's: at the top the page runs up behind the clock, under a light
+ * fade so it reads over a bright banner or Home's glows. Scrolled, the bar
+ * turns solid, the page's background, so what scrolls up goes under it
+ * instead of showing behind the clock.
+ */
 @Composable
-fun StatusFade() {
-    Box(
-        Modifier.fillMaxWidth().windowInsetsTopHeight(WindowInsets.statusBars.add(WindowInsets(top = 24.dp)))
-            .background(
-                androidx.compose.ui.graphics.Brush.verticalGradient(
-                    0f to androidx.compose.ui.graphics.Color(0x8C000000),
-                    1f to androidx.compose.ui.graphics.Color.Transparent,
+fun StatusBar(scrolled: Boolean) {
+    val solid by animateFloatAsState(if (scrolled) 1f else 0f, tween(150), label = "status bar")
+    Box(Modifier.fillMaxWidth()) {
+        Box(
+            Modifier.fillMaxWidth().windowInsetsTopHeight(WindowInsets.statusBars.add(WindowInsets(top = 24.dp)))
+                .graphicsLayer { alpha = 1f - solid }
+                .background(
+                    androidx.compose.ui.graphics.Brush.verticalGradient(
+                        0f to androidx.compose.ui.graphics.Color(0x8C000000),
+                        1f to androidx.compose.ui.graphics.Color.Transparent,
+                    ),
                 ),
-            ),
-    )
+        )
+        Box(
+            Modifier.fillMaxWidth().windowInsetsTopHeight(WindowInsets.statusBars)
+                .graphicsLayer { alpha = solid }
+                .background(Tonearm.bg),
+        )
+    }
 }
 
 @Composable
@@ -640,6 +655,7 @@ fun HomeScreen(core: Core, actions: Actions, onSettings: () -> Unit, onAccount: 
     PageView(
         topWhileLoading = true,
         key = chip ?: "home",
+        underStatusBar = true,
         load = {
             withContext(Dispatchers.IO) {
                 chip?.let { (id, params) -> core.browse(id, params) } ?: core.home()
@@ -698,13 +714,14 @@ fun HomeScreen(core: Core, actions: Actions, onSettings: () -> Unit, onAccount: 
 fun ExploreScreen(core: Core, actions: Actions) {
     PageView(
         key = "explore",
+        underStatusBar = true,
         skeleton = PageSkeleton.Explore,
         load = { withContext(Dispatchers.IO) { core.explore() } },
         more = { token -> withContext(Dispatchers.IO) { core.more(token) } },
         actions = actions,
         topWhileLoading = true,
         top = {
-            TabHeading("Explore")
+            Box(Modifier.statusBarsPadding()) { TabHeading("Explore") }
         },
     )
 }
@@ -888,6 +905,7 @@ fun PageScreen(route: Route, core: Core, actions: Actions, libraryEpoch: Int, on
         PageView(
             // A library page loads again when something is saved or followed.
             key = if (isLibraryPage(route.id)) route to libraryEpoch else route,
+            underStatusBar = true,
             load = { withContext(Dispatchers.IO) { core.browse(route.id, route.params) } },
             more = { token -> withContext(Dispatchers.IO) { core.more(token) } },
             actions = actions,
@@ -928,7 +946,6 @@ fun PageScreen(route: Route, core: Core, actions: Actions, libraryEpoch: Int, on
                 }
             },
         )
-        StatusFade()
         Box(
             Modifier.statusBarsPadding().padding(8.dp).size(40.dp).clip(RoundedCornerShape(20.dp))
                 .background(androidx.compose.ui.graphics.Color(0x9908080A)).clickable(onClick = onBack),

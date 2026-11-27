@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -173,7 +174,8 @@ fun DownloadsScreen(core: Core, actions: Actions, onBack: () -> Unit) {
     }
     Box(Modifier.fillMaxSize()) {
         val list = songs
-        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
+        val listState = rememberLazyListState()
+        LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(bottom = 24.dp)) {
             item(contentType = "header") {
                 Column(Modifier.fillMaxWidth().statusBarsPadding().padding(top = 56.dp)) {
                     Row(
@@ -222,7 +224,7 @@ fun DownloadsScreen(core: Core, actions: Actions, onBack: () -> Unit) {
                 }
             }
         }
-        StatusFade()
+        StatusBar(listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 0)
         Box(
             Modifier.statusBarsPadding().padding(8.dp).size(40.dp).clip(RoundedCornerShape(20.dp))
                 .background(Color(0x9908080A)).clickable(onClick = onBack),

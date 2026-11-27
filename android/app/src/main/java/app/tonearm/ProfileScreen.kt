@@ -76,9 +76,10 @@ fun ProfileScreen(
         }
     }
 
+    val scroll = rememberScrollState()
     Box(Modifier.fillMaxSize()) {
         Column(
-            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).statusBarsPadding()
+            Modifier.fillMaxSize().verticalScroll(scroll).statusBarsPadding()
                 .padding(top = 56.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(28.dp),
         ) {
@@ -167,7 +168,7 @@ fun ProfileScreen(
                 ) { onOpenSettings(SettingsPages.spotify) }
             }
         }
-        StatusFade()
+        StatusBar(scroll.value > 0)
         BackButton(onBack)
     }
 }
