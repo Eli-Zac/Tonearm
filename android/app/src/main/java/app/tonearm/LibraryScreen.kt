@@ -124,7 +124,7 @@ fun LibraryScreen(core: Core, actions: Actions, epoch: Int) {
             LibraryStore.offset = state.firstVisibleItemScrollOffset
         }
     }
-    val scrolled by remember { derivedStateOf { state.canScrollBackward } }
+    val scrolled by remember { derivedStateOf { state.scrolledDown() } }
     Box(Modifier.fillMaxSize()) {
     LazyColumn(state = state, contentPadding = PaddingValues(bottom = 24.dp)) {
         item(contentType = "heading") { Box(Modifier.statusBarsPadding()) { TabHeading("Library") } }

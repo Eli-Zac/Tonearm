@@ -234,6 +234,14 @@ fun App(core: Core, controller: MediaController?) {
                 (item.browseId == top.id || "MPLA${item.browseId}" == top.id)
             menuItem = MenuRequest(item, inLibrary, onPage)
         }
+        override fun pageMenu(item: Item, followed: Boolean) {
+            menu(item)
+            // The core offers Unfollow where artists are followed, as it
+            // does on the library.
+            // From the page's own dots, so Open would go nowhere, even
+            // when the page was opened by another of the artist's ids.
+            menuItem = menuItem?.copy(inLibrary = followed, onPage = true)
+        }
         override val playing: String? get() = playingId
         override fun albumMotion(album: String, artist: String, firstSong: String): String? =
             if (core.animatedCovers()) core.albumMotion(album, artist, firstSong) else null

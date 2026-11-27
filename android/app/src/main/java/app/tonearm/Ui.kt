@@ -73,6 +73,9 @@ interface Actions {
     fun playWatch(item: Item)
     /** An item's menu, on a long press. */
     fun menu(item: Item)
+    /** A page's own menu, from its dots, saying whether its artist is
+     *  followed so the menu offers Follow or Unfollow to match. */
+    fun pageMenu(item: Item, followed: Boolean) = menu(item)
     /** The video id playing, to mark its row. */
     val playing: String?
     /** An album's moving cover as a local file, when it has one and
@@ -506,7 +509,10 @@ fun PageHeader(
                     }
                 }
             }
-            HeroIcon(Icons.dots, filled = true) { actions.menu(header.asItem(saved, pageId, pageParams)) }
+            HeroIcon(Icons.dots, filled = true) {
+                val item = header.asItem(saved, pageId, pageParams)
+                if (header.banner) actions.pageMenu(item, followed == true) else actions.menu(item)
+            }
             Spacer(Modifier.weight(1f))
             shuffle?.let { HeroIcon(Icons.shuffle, onClick = it) }
             if (canMix) {
@@ -778,6 +784,12 @@ fun PlayDisc(mixed: Boolean, size: Dp = 56.dp, onClick: () -> Unit) {
     }
 }
 
+/** Whether a list has been scrolled down from its top, for `StatusBar`.
+ *  Read from the first item and its offset, which are state, so what
+ *  reads it follows the scroll. */
+fun androidx.compose.foundation.lazy.LazyListState.scrolledDown(): Boolean =
+    firstVisibleItemIndex > 0 || firstVisibleItemScrollOffset > 0
+
 /** A chip, as the desktop's: a rounded rectangle, faintly lit, lit
  *  further while pressed, and white when it is the one picked. Home's
  *  moods, Explore's pages and Search's tabs all use it. */
@@ -1007,14 +1019,15 @@ private fun PageViewBody(
                 }
             }
             LaunchedEffect(state) {
-                // Whether it can go back up: at the top it can't, even when
-                // the first item is the empty `top` of a page with a header,
-                // which the list counts as scrolled past.
-                snapshotFlow { state.canScrollBackward }
+                snapshotFlow { state.scrolledDown() }
                     .collect { onScrolled(it) }
             }
             LazyColumn(state = state, contentPadding = PaddingValues(bottom = 24.dp)) {
-                top?.let { t -> item(contentType = "top") { t(shown) } }
+                // Only on a page without a header: every page with one draws
+                // nothing there, and an empty first item made the list
+                // count its top as scrolled past, so the status bar went
+                // solid over the banner.
+                if (shown.header == null) top?.let { t -> item(contentType = "top") { t(shown) } }
                 shown.header?.let { h ->
                     item(contentType = "header") {
                         PageHeader(
