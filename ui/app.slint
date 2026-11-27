@@ -9042,7 +9042,9 @@ export component AppWindow inherits Window {
             vertical-alignment: center;
         }
 
-        // right: the panels, then volume, from the right edge in
+        // right: the panels, then volume, from the right edge in. Left to
+        // right they read lyrics, sleep timer, devices, queue, as on the
+        // phone's Now playing.
         Bar {
             x: parent.width - 16px - 96px;
             y: (parent.height - self.height) / 2;
@@ -9083,7 +9085,7 @@ export component AppWindow inherits Window {
             clicked => { root.show-panel(1); }
         }
         IconButton {
-            x: parent.width - 16px - 96px - 28px - 4px - 72px;
+            x: parent.width - 16px - 96px - 28px - 4px - 144px;
             y: (parent.height - self.height) / 2;
             icon: Icons.lyrics;
             size: 20px;
@@ -9108,7 +9110,7 @@ export component AppWindow inherits Window {
         // Devices: opens the panel of devices to cast to. Lights up while
         // casting, as on other players, and shows its dot while open.
         IconButton {
-            x: parent.width - 16px - 96px - 28px - 4px - 144px;
+            x: parent.width - 16px - 96px - 28px - 4px - 72px;
             y: (parent.height - self.height) / 2;
             shape: CastIcon.shape;
             size: 19px;
