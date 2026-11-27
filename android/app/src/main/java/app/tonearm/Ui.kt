@@ -45,6 +45,8 @@ import coil3.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import uniffi.tonearm_android.Header
 import uniffi.tonearm_android.Item
 import uniffi.tonearm_android.ItemKind
@@ -352,18 +354,10 @@ fun LazyListScope.shelf(
         // empty cards.
         ShelfLayout.CARDS if shelf.items.all { it.thumb.isEmpty() && it.videoId == null } -> item(contentType = "buttons") {
             LazyRow(
-                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 4.dp),
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 4.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                items(shelf.items) { item ->
-                    Box(
-                        Modifier.height(44.dp).clip(RoundedCornerShape(Tonearm.radius)).background(Tonearm.raised)
-                            .clickable { actions.tap(item) }.padding(horizontal = 16.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Title(item.title, size = 15.sp)
-                    }
-                }
+                items(shelf.items) { item -> Chip(item.title) { actions.tap(item) } }
             }
         }
         ShelfLayout.CARDS, ShelfLayout.WIDE -> item(contentType = "cards") {
@@ -789,6 +783,28 @@ fun PlayDisc(mixed: Boolean, size: Dp = 56.dp, onClick: () -> Unit) {
     }
 }
 
+/** A chip, as the desktop's: a rounded rectangle, faintly lit, lit
+ *  further while pressed, and white when it is the one picked. Home's
+ *  moods, Explore's pages and Search's tabs all use it. */
+@Composable
+fun Chip(label: String, selected: Boolean = false, onClick: () -> Unit) {
+    val press = remember { MutableInteractionSource() }
+    val pressed by press.collectIsPressedAsState()
+    Box(
+        Modifier.height(34.dp).clip(RoundedCornerShape(CHIP_RADIUS))
+            .background(if (selected) Tonearm.text else if (pressed) Color(0x24FFFFFF) else Color(0x14FFFFFF))
+            .clickable(interactionSource = press, indication = null, onClick = onClick)
+            .padding(horizontal = 14.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(label, color = if (selected) Tonearm.bg else Tonearm.text, fontFamily = Tonearm.font,
+            fontWeight = FontWeight.SemiBold, fontSize = 14.sp, maxLines = 1)
+    }
+}
+
+/** A chip's corners, for its bones too. */
+val CHIP_RADIUS = 8.dp
+
 @Composable
 fun PillButton(glyph: String, label: String, onClick: () -> Unit) {
     Row(
@@ -803,6 +819,41 @@ fun PillButton(glyph: String, label: String, onClick: () -> Unit) {
 }
 
 // ------------------------------------------------------------------- pages
+
+/** Pages loaded lately, by `PageView`'s key, with where each was scrolled
+ *  to. A page kept for under ten minutes shows as it was; an older one
+ *  shows at once too while a newer one loads over it. Read and written on
+ *  the main thread only. */
+object PageCache {
+    private const val FRESH_MS = 10 * 60_000L
+    private const val MOST = 30
+
+    class Entry(val page: Page, val at: Long, val index: Int = 0, val offset: Int = 0) {
+        fun fresh() = System.currentTimeMillis() - at < FRESH_MS
+    }
+
+    private val entries = object : LinkedHashMap<Any, Entry>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Any, Entry>?) = size > MOST
+    }
+
+    fun get(key: Any): Entry? = entries[key]
+
+    /** Just loaded: kept as new, at the top. */
+    fun loaded(key: Any, page: Page) {
+        entries[key] = Entry(page, System.currentTimeMillis())
+    }
+
+    /** The same page grown by more shelves: as old as it was. */
+    fun update(key: Any, page: Page) {
+        val old = entries[key] ?: return
+        if (old.page !== page) entries[key] = Entry(page, old.at, old.index, old.offset)
+    }
+
+    fun scrolled(key: Any, index: Int, offset: Int) {
+        val old = entries[key] ?: return
+        entries[key] = Entry(old.page, old.at, index, offset)
+    }
+}
 
 /** The songs listed down a page, for its play button. */
 fun Page.songs(): List<Item> =
@@ -829,16 +880,24 @@ fun PageView(
     pageId: String? = null,
     pageParams: String? = null,
 ) {
-    var page by remember(key) { mutableStateOf<Page?>(null) }
+    // Shown again at once when it was loaded lately: going to another tab,
+    // or into an album and back, takes the page off the screen, and it
+    // would otherwise load again from nothing.
+    val kept = remember(key) { PageCache.get(key) }
+    var page by remember(key) { mutableStateOf(kept?.page) }
     var error by remember(key) { mutableStateOf<String?>(null) }
     var loadingMore by remember(key) { mutableStateOf(false) }
     LaunchedEffect(key) {
+        if (kept != null && kept.fresh()) return@LaunchedEffect
         try {
-            page = load()
+            page = load().also { PageCache.loaded(key, it) }
         } catch (e: Exception) {
-            error = e.message ?: "Couldn't load this page"
+            // A kept page stays up when the newer one will not load.
+            if (page == null) error = e.message ?: "Couldn't load this page"
         }
     }
+    // More shelves scrolled into: kept with the page.
+    LaunchedEffect(key, page) { page?.let { PageCache.update(key, it) } }
     val shown = page
     when {
         // A page that keeps its top while loading keeps it on failing too:
@@ -852,7 +911,11 @@ fun PageView(
             PageSkeletonView(skeleton)
         }
         else -> {
-            val state = rememberLazyListState()
+            val state = rememberLazyListState(kept?.index ?: 0, kept?.offset ?: 0)
+            // Where it was scrolled to, for coming back to it.
+            DisposableEffect(key) {
+                onDispose { PageCache.scrolled(key, state.firstVisibleItemIndex, state.firstVisibleItemScrollOffset) }
+            }
             val header = shown.header
             val playlistId = header?.playlistId
             val canMix = header?.editable == true && playlistId != null

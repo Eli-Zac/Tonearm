@@ -420,7 +420,7 @@ fun App(core: Core, controller: MediaController?) {
             enter = slideInVertically { it },
             exit = slideOutVertically { it },
         ) {
-            shown?.let { ItemMenu(it, core, host) { menuItem = null } }
+            shown?.let { DragToClose({ menuItem = null }) { ItemMenu(it, core, host) { menuItem = null } } }
         }
         // The sleep timer's sheet, the same way.
         AnimatedVisibility(sleepOpen, enter = fadeIn(), exit = fadeOut()) {
@@ -437,12 +437,14 @@ fun App(core: Core, controller: MediaController?) {
             enter = slideInVertically { it },
             exit = slideOutVertically { it },
         ) {
-            SleepSheet(sleepOptions, sleep) { choice ->
-                sleepOpen = false
-                scope.launch {
-                    withContext(Dispatchers.IO) {
-                        core.setSleep(choice.toUInt())
-                        runCatching { core.sleepTimer() }.getOrNull()?.let { sleep = it }
+            DragToClose({ sleepOpen = false }) {
+                SleepSheet(sleepOptions, sleep) { choice ->
+                    sleepOpen = false
+                    scope.launch {
+                        withContext(Dispatchers.IO) {
+                            core.setSleep(choice.toUInt())
+                            runCatching { core.sleepTimer() }.getOrNull()?.let { sleep = it }
+                        }
                     }
                 }
             }
@@ -462,25 +464,27 @@ fun App(core: Core, controller: MediaController?) {
             enter = slideInVertically { it },
             exit = slideOutVertically { it },
         ) {
-            CastSheet(
-                cast,
-                onPick = { index ->
-                    val phone = phoneName(context)
-                    scope.launch {
-                        withContext(Dispatchers.IO) {
-                            try {
-                                core.castPick(index, phone)
-                            } catch (e: Exception) {
-                                toast = e.message ?: "Couldn't use that device"
+            DragToClose({ castOpen = false }) {
+                CastSheet(
+                    cast,
+                    onPick = { index ->
+                        val phone = phoneName(context)
+                        scope.launch {
+                            withContext(Dispatchers.IO) {
+                                try {
+                                    core.castPick(index, phone)
+                                } catch (e: Exception) {
+                                    toast = e.message ?: "Couldn't use that device"
+                                }
+                                runCatching { core.castState() }.getOrNull()?.let { cast = it }
                             }
-                            runCatching { core.castState() }.getOrNull()?.let { cast = it }
                         }
-                    }
-                },
-                onVolume = { level ->
-                    scope.launch { withContext(Dispatchers.IO) { runCatching { core.castVolume(level) } } }
-                },
-            )
+                    },
+                    onVolume = { level ->
+                        scope.launch { withContext(Dispatchers.IO) { runCatching { core.castVolume(level) } } }
+                    },
+                )
+            }
         }
         AnimatedVisibility(mixEdit != null, enter = fadeIn(), exit = fadeOut()) {
             Box(
@@ -514,6 +518,23 @@ fun App(core: Core, controller: MediaController?) {
             }
         }
     }
+    }
+}
+
+/** A tab's heading, the same on Home, Explore and Library: the title in a
+ *  row as tall as Home's buttons beside it, so it sits at the same height
+ *  on every tab, buttons or not. `trailing` goes at the right. */
+@Composable
+fun TabHeading(title: String, trailing: (@Composable RowScope.() -> Unit)? = null) {
+    Row(
+        Modifier.fillMaxWidth()
+            .padding(start = 16.dp, end = if (trailing != null) 4.dp else 16.dp)
+            .padding(top = 14.dp, bottom = 10.dp)
+            .heightIn(min = 44.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Title(title, size = 28.sp, weight = FontWeight.ExtraBold, modifier = Modifier.weight(1f))
+        trailing?.invoke(this)
     }
 }
 
@@ -630,11 +651,7 @@ fun HomeScreen(core: Core, actions: Actions, onSettings: () -> Unit, onAccount: 
             // Under the status bar: the glows start there, the words below it.
             Column(Modifier.homeGlow(WindowInsets.statusBars.getTop(LocalDensity.current).toFloat()).statusBarsPadding()) {
                 // Settings beside the title, as the desktop's menu has it.
-                Row(
-                    Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 14.dp, bottom = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Title("Home", size = 28.sp, weight = FontWeight.ExtraBold, modifier = Modifier.weight(1f))
+                TabHeading("Home") {
                     Box(
                         Modifier.size(44.dp).clip(RoundedCornerShape(22.dp)).clickable(onClick = onSettings),
                         contentAlignment = Alignment.Center,
@@ -663,17 +680,8 @@ fun HomeScreen(core: Core, actions: Actions, onSettings: () -> Unit, onAccount: 
                             // While a page loads, the chip just tapped is the
                             // one lit (or none, going back to Home).
                             val on = if (page != null) c.selected else chip == (c.browseId to c.params)
-                            Box(
-                                Modifier.height(34.dp).clip(RoundedCornerShape(17.dp))
-                                    .background(if (on) Tonearm.text else Tonearm.raised)
-                                    .clickable {
-                                        chip = if (on) null else c.browseId to c.params
-                                    }
-                                    .padding(horizontal = 14.dp),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                Text(c.title, color = if (on) Tonearm.bg else Tonearm.text, fontFamily = Tonearm.font,
-                                    fontWeight = FontWeight.Medium, fontSize = 14.sp)
+                            Chip(c.title, selected = on) {
+                                chip = if (on) null else c.browseId to c.params
                             }
                         }
                     }
@@ -690,13 +698,13 @@ fun HomeScreen(core: Core, actions: Actions, onSettings: () -> Unit, onAccount: 
 fun ExploreScreen(core: Core, actions: Actions) {
     PageView(
         key = "explore",
+        skeleton = PageSkeleton.Explore,
         load = { withContext(Dispatchers.IO) { core.explore() } },
         more = { token -> withContext(Dispatchers.IO) { core.more(token) } },
         actions = actions,
         topWhileLoading = true,
         top = {
-            Title("Explore", size = 28.sp, weight = FontWeight.ExtraBold,
-                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 4.dp))
+            TabHeading("Explore")
         },
     )
 }
@@ -711,8 +719,7 @@ fun LibraryScreen(core: Core, actions: Actions, epoch: Int) {
         topWhileLoading = true,
         top = {
             Column {
-                Title("Library", size = 28.sp, weight = FontWeight.ExtraBold,
-                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 4.dp))
+                TabHeading("Library")
                 // Downloads first, as YouTube Music's library has them; it
                 // stays up when the library can't load, so offline songs
                 // are always a tap away.
@@ -855,16 +862,7 @@ fun SearchTabs(picked: Int, onPick: (Int) -> Unit) {
     ) {
         items(SEARCH_TABS.size) { i ->
             val on = i == picked
-            Box(
-                Modifier.height(34.dp).clip(RoundedCornerShape(17.dp))
-                    .background(if (on) Tonearm.text else Tonearm.raised)
-                    .clickable { if (!on) onPick(i) }
-                    .padding(horizontal = 14.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(SEARCH_TABS[i], color = if (on) Tonearm.bg else Tonearm.text, fontFamily = Tonearm.font,
-                    fontWeight = FontWeight.Medium, fontSize = 14.sp)
-            }
+            Chip(SEARCH_TABS[i], selected = on) { if (!on) onPick(i) }
         }
     }
 }

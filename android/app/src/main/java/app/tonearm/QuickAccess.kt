@@ -32,6 +32,10 @@ object QuickAccess {
     private val main = android.os.Handler(android.os.Looper.getMainLooper())
     /** From any thread: the count moves on the main one. */
     fun changed() { main.post { version++ } }
+    /** The tiles last shown, so Home coming back on screen draws them at
+     *  once instead of nothing until they are read again, which made what
+     *  is under them jump. Main thread only. */
+    var shown: List<QuickTile> = emptyList()
 }
 
 /** Tiles on a page: three rows of three. */
@@ -47,8 +51,9 @@ private const val PER_PAGE = 9
  */
 @Composable
 fun QuickAccessShelf(core: Core, actions: Actions) {
-    val tiles by produceState<List<QuickTile>>(emptyList(), QuickAccess.version, Prefs.version) {
+    val tiles by produceState(QuickAccess.shown, QuickAccess.version, Prefs.version) {
         value = withContext(Dispatchers.IO) { runCatching { core.quickAccessTiles() }.getOrDefault(emptyList()) }
+        QuickAccess.shown = value
     }
     if (tiles.isEmpty()) return
     val pages = (tiles.size + PER_PAGE - 1) / PER_PAGE

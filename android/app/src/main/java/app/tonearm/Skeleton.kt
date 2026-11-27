@@ -79,6 +79,8 @@ enum class PageSkeleton {
     Chips,
     /** Shelves of cards: Library and the other tabs. */
     Shelves,
+    /** Explore: its three pages' chips over shelves of cards. */
+    Explore,
     /** A list of rows: search results. */
     Rows,
     /** An album or playlist: its cover, title and buttons over rows. */
@@ -98,6 +100,12 @@ fun PageSkeletonView(kind: PageSkeleton, modifier: Modifier = Modifier) {
                 repeat(3) { ShelfSkeleton(it * 3) }
             }
             PageSkeleton.Shelves -> repeat(3) { ShelfSkeleton(it * 3) }
+            PageSkeleton.Explore -> {
+                // New releases, Charts, Moods & genres, where the shelf of
+                // buttons puts them (`ShelfView`'s button row).
+                ChipsSkeleton(widths = listOf(118, 73, 137), modifier = Modifier.padding(bottom = 4.dp))
+                repeat(3) { ShelfSkeleton(it * 3) }
+            }
             PageSkeleton.Rows -> {
                 Bone(
                     Modifier.padding(start = 16.dp, top = 22.dp, bottom = 10.dp).width(130.dp).height(20.dp),
@@ -130,14 +138,15 @@ fun PageSkeletonView(kind: PageSkeleton, modifier: Modifier = Modifier) {
     }
 }
 
-/** Home's chips, while there are none yet to show. */
+/** Chips while there are none yet to show: Home's moods, or Explore's
+ *  pages at `widths` (in dp). Shaped as `Chip`. */
 @Composable
-fun ChipsSkeleton() {
+fun ChipsSkeleton(widths: List<Int> = List(6) { i -> 78 + 16 * (i * 2 % 3) }, modifier: Modifier = Modifier) {
     Row(
-        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState(), enabled = false).padding(horizontal = 16.dp),
+        modifier.fillMaxWidth().horizontalScroll(rememberScrollState(), enabled = false).padding(horizontal = 16.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        repeat(6) { i -> Bone(Modifier.width((78 + 16 * (i * 2 % 3)).dp).height(34.dp), RoundedCornerShape(17.dp)) }
+        widths.forEach { w -> Bone(Modifier.width(w.dp).height(34.dp), RoundedCornerShape(CHIP_RADIUS)) }
     }
 }
 
