@@ -39,6 +39,23 @@ pub enum Added {
     AlreadyQueued,
 }
 
+/// Smart shuffle mixes in one suggested song after every this many.
+pub const SMART_EVERY: usize = 3;
+/// The most songs smart shuffle mixes in at once.
+pub const SMART_MOST: usize = 12;
+
+/// Smart shuffle's placing, the same on the computer and the phone: the
+/// picks go into what is still to come after `index`, one after every
+/// `SMART_EVERY` songs, and any left over at the end.
+pub fn mix_in<T>(items: &mut Vec<T>, index: usize, picks: impl IntoIterator<Item = T>) {
+    let mut at = index + 1;
+    for item in picks.into_iter().take(SMART_MOST) {
+        at = (at + SMART_EVERY).min(items.len());
+        items.insert(at, item);
+        at += 1;
+    }
+}
+
 /// Previous goes back a song only this early in one.
 pub const RESTART_AFTER_MS: u64 = 3000;
 
@@ -48,6 +65,8 @@ pub struct Queue<T> {
     index: usize,
     pub repeat: Repeat,
     shuffle: bool,
+    /// Smart shuffle: shuffle that also mixes in suggested songs.
+    smart: bool,
     /// The queue as it was before shuffle, to put back when it ends.
     unshuffled: Option<Vec<T>>,
 }
@@ -59,6 +78,7 @@ impl<T> Default for Queue<T> {
             index: 0,
             repeat: Repeat::Off,
             shuffle: false,
+            smart: false,
             unshuffled: None,
         }
     }
@@ -69,6 +89,36 @@ impl<T> Default for Queue<T> {
 impl<T: Clone> Queue<T> {
     pub fn shuffle(&self) -> bool {
         self.shuffle
+    }
+
+    pub fn smart(&self) -> bool {
+        self.smart
+    }
+
+    /// Turns smart shuffle on or off. It only counts with shuffle on; the
+    /// caller mixes the suggestions in, or takes them out.
+    pub fn set_smart(&mut self, on: bool) {
+        self.smart = on && self.shuffle;
+    }
+
+    /// Mixes suggested songs into what is still to come, as `mix_in` does.
+    pub fn mix_in(&mut self, picks: impl IntoIterator<Item = T>) {
+        let index = self.index;
+        mix_in(&mut self.items, index, picks);
+    }
+
+    /// Takes out songs still to come that `suggested` picks out: smart
+    /// shuffle's, as it ends. Songs played already stay. Whether any went.
+    pub fn take_out(&mut self, suggested: impl Fn(&T) -> bool) -> bool {
+        let before = self.items.len();
+        let index = self.index;
+        let mut position = 0;
+        self.items.retain(|item| {
+            let keep = position <= index || !suggested(item);
+            position += 1;
+            keep
+        });
+        before != self.items.len()
     }
 
     /// Starts a new queue at `index`. With shuffle on, that song plays
@@ -93,6 +143,7 @@ impl<T: Clone> Queue<T> {
     pub fn restore(&mut self, items: Vec<T>, index: usize, shuffle: bool) {
         self.unshuffled = None;
         self.shuffle = shuffle;
+        self.smart = false;
         self.set(items, index);
     }
 
@@ -102,6 +153,9 @@ impl<T: Clone> Queue<T> {
             return;
         }
         self.shuffle = on;
+        if !on {
+            self.smart = false;
+        }
         if on {
             self.unshuffled = Some(self.items.clone());
             if self.index + 1 < self.items.len() {
@@ -282,6 +336,25 @@ pub fn shuffled<T>(mut items: Vec<T>) -> Vec<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn smart_shuffle_mixes_in_and_takes_out() {
+        let mut q: Queue<u32> = Queue::default();
+        q.start((0..8).collect(), 1);
+        q.set_shuffle(true, |a, b| a == b);
+        q.set_smart(true);
+        assert!(q.smart());
+        q.go(1);
+        let order: Vec<u32> = q.items().to_vec();
+        q.mix_in([100, 101]);
+        // One after every three still to come.
+        assert_eq!(q.items()[5], 100);
+        assert_eq!(q.items()[9], 101);
+        assert!(q.take_out(|&s| s >= 100));
+        assert_eq!(q.items(), &order[..]);
+        q.set_shuffle(false, |a, b| a == b);
+        assert!(!q.smart());
+    }
 
     #[test]
     fn shuffle_keeps_the_song_playing_and_comes_back() {

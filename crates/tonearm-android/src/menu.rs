@@ -18,6 +18,8 @@ pub enum MenuIcon {
     Heart,
     Open,
     Library,
+    /// Quick access's pin.
+    Pin,
 }
 
 /// What a line does, to the item its menu is for unless it says.
@@ -41,6 +43,8 @@ pub enum MenuAction {
     DownloadAll,
     Library { playlist: String, save: bool },
     Follow { channel: String, follow: bool },
+    /// Pins the album, artist or playlist to Quick access, or unpins it.
+    TogglePin,
 }
 
 #[derive(uniffi::Record, Clone, Debug)]

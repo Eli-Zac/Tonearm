@@ -134,6 +134,14 @@ impl Tonearm {
     /// does without beat matching. With crossfade off the next song is
     /// handed to the engine to start the moment this one ends.
     fn crossfade_check(self: &Arc<Self>, generation: u64, duration: f32) {
+        // The sleep timer stops after this song, so nothing follows it,
+        // and a song armed to follow is called off.
+        if self.sleeps_after_song() {
+            if self.fade.lock().unwrap().take().is_some_and(|n| n.armed) {
+                self.audio.unfollow();
+            }
+            return;
+        }
         if self.mix_mode.load(Ordering::SeqCst) || self.preview_mix.lock().unwrap().is_some() {
             self.mixed_crossfade_check(generation, duration);
             return;

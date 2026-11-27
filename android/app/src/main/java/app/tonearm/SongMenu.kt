@@ -44,7 +44,7 @@ interface MenuHost {
 
 /** A long press: the item, and whether it was on the library, where the
  *  artists listed are followed. */
-data class MenuRequest(val item: Item, val inLibrary: Boolean = false)
+data class MenuRequest(val item: Item, val inLibrary: Boolean = false, val onPage: Boolean = false)
 
 /** A song in the queue, as the item its menu works on. */
 fun Song.asItem() = Item(
@@ -81,7 +81,11 @@ fun ItemMenu(request: MenuRequest, core: Core, host: MenuHost, onClose: () -> Un
     // Add to playlist turns the menu into the list of the user's playlists.
     var picking by remember(request) { mutableStateOf(false) }
     // Only locks inside the core, so cheap enough to read as it opens.
-    val lines = remember(request) { core.menu(item, request.inLibrary) }
+    val lines = remember(request) {
+        core.menu(item, request.inLibrary).filterNot { line ->
+            request.onPage && (line.action as? MenuAction.Browse)?.id == item.browseId
+        }
+    }
     Column(
         Modifier
             .fillMaxWidth()
@@ -125,6 +129,7 @@ private fun glyph(icon: MenuIcon) = when (icon) {
     MenuIcon.HEART -> Icons.heart
     MenuIcon.OPEN -> Icons.open
     MenuIcon.LIBRARY -> Icons.library
+    MenuIcon.PIN -> Icons.pin
 }
 
 @Composable
@@ -165,6 +170,13 @@ private fun Entries(
             // Its songs are fetched first, which takes a moment.
             is MenuAction.DownloadAll -> host.run { core.downloadCollection(item) }
             is MenuAction.AddToPlaylist -> {}
+            // Synced after, so the pin reaches the account's other devices.
+            is MenuAction.TogglePin -> host.run {
+                core.togglePin(item).also {
+                    QuickAccess.changed()
+                    Prefs.syncSoon(core)
+                }
+            }
         }
     }
     Column(Modifier.padding(vertical = 6.dp)) {

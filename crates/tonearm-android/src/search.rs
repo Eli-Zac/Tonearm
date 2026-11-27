@@ -64,7 +64,9 @@ impl Tonearm {
         if let Some(found) = self.cached_suggestions(query.clone()) {
             return Ok(found);
         }
-        let found = suggest::fetch(&self.client, query.trim())?;
+        let mut found = suggest::fetch(&self.client, query.trim())?;
+        // Tailored as the results page will be, which reuses this page.
+        self.tailor(&query, &mut found.page, true);
         self.suggest.lock().unwrap().put(&query, found.clone());
         Ok(suggestions(&query, &found))
     }
@@ -91,7 +93,9 @@ impl Tonearm {
         if let Some(found) = cached.filter(|f| !f.page.shelves.is_empty()) {
             return Ok(pages::page(&found.page));
         }
-        Ok(pages::page(&self.client.search(&query)?))
+        let mut page = self.client.search(&query)?;
+        self.tailor(&query, &mut page, true);
+        Ok(pages::page(&page))
     }
 
     /// One tab of the results, as the desktop's: 0 all, 1 songs, 2 albums,
@@ -100,12 +104,24 @@ impl Tonearm {
         if tab == 0 {
             return self.search_page(query);
         }
-        Ok(pages::page(&self.client.search_in(&query, tab as usize)?))
+        let mut page = self.client.search_in(&query, tab as usize)?;
+        self.tailor(&query, &mut page, true);
+        Ok(pages::page(&page))
     }
 
     /// More search results, as the list is scrolled. Search continues
     /// through the search endpoint, not browse.
     pub fn search_more(&self, continuation: String) -> Result<pages::Page, TonearmError> {
-        Ok(pages::page(&self.client.search_more(&continuation)?))
+        let mut page = self.client.search_more(&continuation)?;
+        // Later pages have no top result, so the query is not needed.
+        self.tailor("", &mut page, false);
+        Ok(pages::page(&page))
+    }
+}
+
+impl Tonearm {
+    /// Puts what you play first in search results, as the desktop does.
+    fn tailor(&self, query: &str, page: &mut tonearm_core::innertube::model::Page, first: bool) {
+        tonearm_core::history::tailor_results(&self.taste.lock().unwrap(), query, page, first);
     }
 }

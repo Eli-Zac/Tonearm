@@ -406,6 +406,9 @@ fun PageHeader(
     canMix: Boolean = false,
     mixing: Boolean? = false,
     onMixToggle: (Boolean) -> Unit = {},
+    /** The page's id and params, as it was opened. */
+    pageId: String? = null,
+    pageParams: String? = null,
 ) {
     Column(Modifier.fillMaxWidth()) {
         // Every page's art fills the top, up under the status bar, fading
@@ -514,7 +517,7 @@ fun PageHeader(
                     }
                 }
             }
-            HeroIcon(Icons.dots, filled = true) { actions.menu(header.asItem(saved)) }
+            HeroIcon(Icons.dots, filled = true) { actions.menu(header.asItem(saved, pageId, pageParams)) }
             Spacer(Modifier.weight(1f))
             shuffle?.let { HeroIcon(Icons.shuffle, onClick = it) }
             if (canMix) {
@@ -646,7 +649,7 @@ private val albumLabels = setOf("Album", "EP", "Single")
 
 /** The page itself as an item, for its menu: the same lines a long press
  *  on its card gives. `saved` is the page's save state as it is now. */
-fun Header.asItem(saved: Boolean?): Item = Item(
+fun Header.asItem(saved: Boolean?, pageId: String? = null, pageParams: String? = null): Item = Item(
     kind = when {
         banner -> ItemKind.ARTIST
         label in albumLabels -> ItemKind.ALBUM
@@ -654,7 +657,8 @@ fun Header.asItem(saved: Boolean?): Item = Item(
     },
     title = title, subtitle = listOf(label, byline).filter { it.isNotEmpty() }.joinToString(" • "),
     thumb = thumb, duration = "", videoId = null,
-    browseId = if (banner) channelId else null, playlistId = playlistId, params = null,
+    // The page's own id, so the menu can pin it to Quick access.
+    browseId = if (banner) channelId else pageId, playlistId = playlistId, params = if (banner) null else pageParams,
     artist = byline, album = "", explicit = false,
     artists = if (!banner && byline.isNotEmpty()) listOf(Link(byline, bylineId)) else emptyList(),
     albumId = null, libraryPlaylist = if (saved != null) playlistId else null, saved = saved == true,
@@ -821,6 +825,9 @@ fun PageView(
     topWhileLoading: Boolean = false,
     /** What stands in for the page while it loads, as on the desktop. */
     skeleton: PageSkeleton = PageSkeleton.Shelves,
+    /** The id and params the page was opened with, for its own menu. */
+    pageId: String? = null,
+    pageParams: String? = null,
 ) {
     var page by remember(key) { mutableStateOf<Page?>(null) }
     var error by remember(key) { mutableStateOf<String?>(null) }
@@ -911,6 +918,8 @@ fun PageView(
                                 mixing = on
                                 actions.setPlaylistMix(id, on) { mixRefresh++ }
                             },
+                            pageId = pageId,
+                            pageParams = pageParams,
                         )
                     }
                 }

@@ -27,9 +27,11 @@ mod menu;
 mod pages;
 mod playing;
 mod profile;
+mod quick;
 mod resume;
 mod search;
 mod settings;
+mod sleep;
 mod updates;
 pub use cast::{CastDevice, CastKind, CastState};
 pub use downloads::{DownloadMarks, DownloadProgress};
@@ -95,6 +97,8 @@ pub struct Playback {
     pub version: u64,
     pub repeat: RepeatMode,
     pub shuffle: bool,
+    /// Smart shuffle: shuffle that also mixes in suggested songs.
+    pub smart: bool,
 }
 
 /// In Kotlin, a `TonearmException` whose message says what went wrong.
@@ -197,6 +201,12 @@ pub struct Tonearm {
     saved: Mutex<resume::Saved>,
     /// The last mix into a song, for Now Playing's mix animation.
     mixing: Mutex<Option<MixShown>>,
+    /// The sleep timer, and the choice it came from.
+    sleep: Mutex<(tonearm_core::sleep::Sleep, u32)>,
+    /// How many times the sleep timer has stopped the music.
+    sleep_stops: AtomicU64,
+    /// Video ids of the songs smart shuffle mixed in, to take out again.
+    suggested: Mutex<std::collections::HashSet<String>>,
 }
 
 /// A mix into a song: under which generation, when it started, how long.
@@ -274,6 +284,9 @@ impl Tonearm {
             resume_at: Mutex::new(None),
             saved: Mutex::new(resume::Saved::default()),
             mixing: Mutex::new(None),
+            sleep: Mutex::new((tonearm_core::sleep::Sleep::Off, 0)),
+            sleep_stops: AtomicU64::new(0),
+            suggested: Mutex::new(std::collections::HashSet::new()),
         });
         // Signed in as last time, as the desktop app starts.
         if let Some(cookie) = store::load("session") {
@@ -595,7 +608,17 @@ impl Tonearm {
             in_library,
             downloads: true,
         };
-        menu::lines(&item, &context)
+        let mut lines = menu::lines(&item, &context);
+        // Pin or unpin, as the desktop's menu offers.
+        if self.can_pin(item.clone()) {
+            let pinned = self.is_pinned(item);
+            lines.push(menu::MenuLine {
+                label: if pinned { "Unpin from Quick access" } else { "Pin to Quick access" }.into(),
+                icon: menu::MenuIcon::Pin,
+                action: menu::MenuAction::TogglePin,
+            });
+        }
+        lines
     }
 
     /// Whether the user has liked a song, for Now Playing's heart. Asks
@@ -694,6 +717,9 @@ impl Tonearm {
     /// Shuffle on mixes the songs after the one playing; off puts the
     /// queue back in its order.
     pub fn set_shuffle(&self, on: bool) {
+        if !on {
+            self.take_out_suggestions();
+        }
         self.queue.lock().unwrap().set_shuffle(on, |a, b| a.video_id == b.video_id);
         self.changed();
     }
@@ -769,6 +795,7 @@ impl Tonearm {
                 version: self.version.load(Ordering::SeqCst),
                 repeat: repeat_mode(queue.repeat),
                 shuffle: queue.shuffle(),
+            smart: queue.smart(),
             };
         }
         let note = self.note.lock().unwrap().clone();
@@ -809,6 +836,7 @@ impl Tonearm {
             version: self.version.load(Ordering::SeqCst),
             repeat: repeat_mode(queue.repeat),
             shuffle: queue.shuffle(),
+            smart: queue.smart(),
         }
     }
 }
@@ -1044,6 +1072,11 @@ impl Tonearm {
 
     /// The song playing has run out: what the queue says comes next.
     fn song_ended(&self) {
+        // The sleep timer stops after this song, so nothing follows it.
+        if self.sleeps_after_song() {
+            self.sleep_done();
+            return;
+        }
         let step = self.queue.lock().unwrap().ended();
         let result = match step {
             // The engine has let go of an ended song, so it loads again.
@@ -1066,16 +1099,24 @@ fn watch(tonearm: Weak<Tonearm>) {
             // still show the last one's state for a moment.
             let mut played = 0;
             let mut handled = 0;
+            // The song and queue the next songs were last got ready for.
+            let mut readied = (0, 0);
             loop {
                 std::thread::sleep(Duration::from_millis(250));
                 let Some(tonearm) = tonearm.upgrade() else { return };
                 tonearm.tick();
+                tonearm.sleep_tick();
                 let status = &tonearm.audio.status;
                 tonearm.save_session(status.state.load(Ordering::SeqCst));
                 let generation = status.generation.load(Ordering::SeqCst);
                 match status.state.load(Ordering::SeqCst) {
                     audio::PLAYING | audio::PAUSED => {
                         played = generation;
+                        let key = (generation, tonearm.version.load(Ordering::SeqCst));
+                        if key != readied {
+                            readied = key;
+                            tonearm.ready_next();
+                        }
                         // Near the end of the queue: its radio joins it,
                         // asked for on a thread of its own.
                         if tonearm.wants_top_up() && !tonearm.topping.swap(true, Ordering::SeqCst) {
@@ -1095,6 +1136,107 @@ fn watch(tonearm: Weak<Tonearm>) {
             }
         })
         .expect("cannot start the queue thread");
+}
+
+#[uniffi::export]
+impl Tonearm {
+    /// The shuffle button, as the desktop's: off, then shuffle, then smart
+    /// shuffle, which mixes in songs like the queue, then off again.
+    pub fn cycle_shuffle(self: Arc<Self>) {
+        let (shuffle, smart) = {
+            let queue = self.queue.lock().unwrap();
+            (queue.shuffle(), queue.smart())
+        };
+        if shuffle && !smart {
+            self.queue.lock().unwrap().set_smart(true);
+            self.changed();
+            let me = self.clone();
+            std::thread::spawn(move || me.mix_in_suggestions());
+        } else {
+            self.set_shuffle(!shuffle);
+        }
+    }
+}
+
+impl Tonearm {
+    /// Mixes songs like the queue into what is still to come, one after
+    /// every few, as the desktop's smart shuffle does: the playing song's
+    /// radio, less what the queue has already.
+    fn mix_in_suggestions(&self) {
+        let Some(playing) = self.now_playing() else { return };
+        // A video's radio is videos. Seed it with the song instead.
+        let seed = model::Item {
+            video_id: Some(playing.video_id.clone()),
+            title: playing.title.clone(),
+            ..model::Item::default()
+        };
+        let seed = self.client.song_for(&seed).and_then(|s| s.video_id).unwrap_or(playing.video_id.clone());
+        let Ok((items, _)) = self.client.queue(Some(&seed), None) else { return };
+        let mut queue = self.queue.lock().unwrap();
+        // Only into the same queue, still on that song, still smart.
+        if !queue.smart() || queue.current().map(|s| &s.video_id) != Some(&playing.video_id) {
+            return;
+        }
+        let known: std::collections::HashSet<String> = queue.items().iter().map(|s| s.video_id.clone()).collect();
+        let picks: Vec<Song> = items
+            .iter()
+            .filter_map(song)
+            .filter(|s| !known.contains(&s.video_id))
+            .take(tonearm_core::queue::SMART_MOST)
+            .collect();
+        if picks.is_empty() {
+            return;
+        }
+        self.suggested.lock().unwrap().extend(picks.iter().map(|s| s.video_id.clone()));
+        queue.mix_in(picks);
+        drop(queue);
+        self.changed();
+    }
+
+    /// Takes out the songs smart shuffle mixed in that are still to come.
+    fn take_out_suggestions(&self) {
+        let suggested = std::mem::take(&mut *self.suggested.lock().unwrap());
+        if suggested.is_empty() {
+            return;
+        }
+        let mut queue = self.queue.lock().unwrap();
+        queue.set_smart(false);
+        if queue.take_out(|s| suggested.contains(&s.video_id)) {
+            drop(queue);
+            self.changed();
+        }
+    }
+}
+
+impl Tonearm {
+    /// Gets the next songs ready while this one plays, as the desktop's
+    /// `prefetch_next` does: the next song fetched whole into the song
+    /// cache, so it starts at once and plays on through a dropped
+    /// connection, and the one after it given its stream link. With the
+    /// cache off, the next song gets its link only.
+    fn ready_next(self: &Arc<Self>) {
+        let (next, after) = {
+            let queue = self.queue.lock().unwrap();
+            let id = |n: usize| queue.items().get(n).map(|s| s.video_id.clone());
+            (id(queue.index() + 1), id(queue.index() + 2))
+        };
+        let resolver = self.resolver.clone();
+        std::thread::Builder::new()
+            .name("ready-next".into())
+            .spawn(move || {
+                if let Some(id) = next.filter(|id| !id.is_empty()) {
+                    if offline::cache_limit_mb() > 0 {
+                        offline::fetch_ahead(resolver.as_ref(), &id);
+                    } else if !offline::has_local(&id) {
+                        resolver.prefetch(&id);
+                    }
+                }
+                if let Some(id) = after.filter(|id| !id.is_empty() && !offline::has_local(id)) {
+                    resolver.prefetch(&id);
+                }
+            })
+            .expect("cannot start the ready-next thread");
+    }
 }
 
 /// Now Playing's background from the cover's RGBA pixels: a soft wash of

@@ -48,6 +48,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uniffi.tonearm_android.CastState
 import uniffi.tonearm_android.Item
+import uniffi.tonearm_android.SleepTimer
 import uniffi.tonearm_android.Suggestions
 import uniffi.tonearm_android.isLibraryPage
 import uniffi.tonearm_android.Tonearm as Core
@@ -86,6 +87,12 @@ fun App(core: Core, controller: MediaController?) {
     // it leaves (a device that stopped playing).
     var castOpen by remember { mutableStateOf(false) }
     var cast by remember { mutableStateOf<CastState?>(null) }
+    // The sleep timer's sheet, from Now Playing's moon, and the timer as
+    // the core has it: read every second with the cast, saying once when
+    // it has stopped the music.
+    var sleepOpen by remember { mutableStateOf(false) }
+    var sleep by remember { mutableStateOf<SleepTimer?>(null) }
+    val sleepOptions = remember(core) { core.sleepOptions() }
     var mixEdit by remember { mutableStateOf<Pair<Item, Item>?>(null) }
     val context = LocalContext.current
     LaunchedEffect(Unit) {
@@ -93,6 +100,11 @@ fun App(core: Core, controller: MediaController?) {
             withContext(Dispatchers.IO) {
                 runCatching { core.castState() }.getOrNull()?.let { cast = it }
                 runCatching { core.takeCastNote() }.getOrNull()?.let { toast = it }
+                runCatching { core.sleepTimer() }.getOrNull()?.let { now ->
+                    val before = sleep
+                    if (before != null && now.stops > before.stops) toast = "Sleep timer stopped the music"
+                    sleep = now
+                }
             }
             delay(1000)
         }
@@ -203,7 +215,9 @@ fun App(core: Core, controller: MediaController?) {
             // On the library or one of its lists, artists are followed.
             val top = stacks.getValue(tab).lastOrNull()
             val inLibrary = if (top != null) isLibraryPage(top.id) else tab == Tab.Library
-            menuItem = MenuRequest(item, inLibrary)
+            // The page's own menu, from its dots: Open would go nowhere.
+            val onPage = top != null && item.videoId == null && item.browseId == top.id
+            menuItem = MenuRequest(item, inLibrary, onPage)
         }
         override val playing: String? get() = playingId
         override fun albumMotion(album: String, artist: String, firstSong: String): String? =
@@ -282,10 +296,11 @@ fun App(core: Core, controller: MediaController?) {
     }
 
     val stack = stacks.getValue(tab)
-    BackHandler(enabled = mixEdit != null || castOpen || menuItem != null || nowPlayingOpen || stack.isNotEmpty() || tab != Tab.Home) {
+    BackHandler(enabled = mixEdit != null || castOpen || sleepOpen || menuItem != null || nowPlayingOpen || stack.isNotEmpty() || tab != Tab.Home) {
         when {
             mixEdit != null -> mixEdit = null
             castOpen -> castOpen = false
+            sleepOpen -> sleepOpen = false
             menuItem != null -> menuItem = null
             nowPlayingOpen -> nowPlayingOpen = false
             stack.isNotEmpty() -> stack.removeAt(stack.lastIndex)
@@ -365,6 +380,8 @@ fun App(core: Core, controller: MediaController?) {
                     onMenu = { menuItem = MenuRequest(it) },
                     cast = cast,
                     onCast = { castOpen = true },
+                    sleeping = (sleep?.choice ?: 0u) != 0u,
+                    onSleep = { sleepOpen = true },
                     liked = liked,
                     onLike = { flipLike() },
                     onOpenArtist = { id, name -> host.open(id, name) },
@@ -393,6 +410,31 @@ fun App(core: Core, controller: MediaController?) {
             exit = slideOutVertically { it },
         ) {
             shown?.let { ItemMenu(it, core, host) { menuItem = null } }
+        }
+        // The sleep timer's sheet, the same way.
+        AnimatedVisibility(sleepOpen, enter = fadeIn(), exit = fadeOut()) {
+            Box(
+                Modifier.fillMaxSize().background(Color(0x99000000)).clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                ) { sleepOpen = false },
+            )
+        }
+        AnimatedVisibility(
+            sleepOpen,
+            modifier = Modifier.align(Alignment.BottomCenter),
+            enter = slideInVertically { it },
+            exit = slideOutVertically { it },
+        ) {
+            SleepSheet(sleepOptions, sleep) { choice ->
+                sleepOpen = false
+                scope.launch {
+                    withContext(Dispatchers.IO) {
+                        core.setSleep(choice.toUInt())
+                        runCatching { core.sleepTimer() }.getOrNull()?.let { sleep = it }
+                    }
+                }
+            }
         }
         // The Devices sheet, the same way: dimmed behind, rising from the bottom.
         AnimatedVisibility(castOpen, enter = fadeIn(), exit = fadeOut()) {
@@ -625,6 +667,9 @@ fun HomeScreen(core: Core, actions: Actions, onSettings: () -> Unit, onAccount: 
                         }
                     }
                 }
+                // Quick access, on Home itself rather than a mood's page, as
+                // YouTube Music's speed dial: pins, then what you played.
+                if (chip == null) SpeedDial(core, actions)
             }
         },
     )
@@ -857,6 +902,8 @@ fun PageScreen(route: Route, core: Core, actions: Actions, libraryEpoch: Int, on
             load = { withContext(Dispatchers.IO) { core.browse(route.id, route.params) } },
             more = { token -> withContext(Dispatchers.IO) { core.more(token) } },
             actions = actions,
+            pageId = route.id,
+            pageParams = route.params,
             // What kind of page it is shows in its id, so the skeleton fits
             // before anything has loaded; the rest keep their title up.
             skeleton = when {

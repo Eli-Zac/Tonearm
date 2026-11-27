@@ -7,7 +7,7 @@
 //!
 //! The file is encrypted with your Windows account, like the sign in.
 
-use crate::innertube::model::{Item, Kind};
+use crate::innertube::model::{Item, Kind, Page, Shelf};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -358,6 +358,56 @@ pub fn rerank(history: &History, items: &mut Vec<Item>) {
         .collect();
     scored.sort_by(|a, b| b.0.total_cmp(&a.0));
     *items = scored.into_iter().map(|(_, item)| item).collect();
+}
+
+/// Tailors a page of search results, the same on the computer and the
+/// phone: lists put what you play first, and a strong match from your
+/// history becomes the top result. `first` is the first page of results,
+/// the only one with a top result.
+pub fn tailor_results(history: &History, query: &str, page: &mut Page, first: bool) {
+    if history.is_empty() {
+        return;
+    }
+    for shelf in &mut page.shelves {
+        // The top result's first item is YouTube Music's pick. Keep it
+        // there and only reorder what follows it.
+        let skip = usize::from(shelf.title == "Top result");
+        if shelf.items.len() > skip + 1 {
+            let mut rest = shelf.items.split_off(skip);
+            rerank(history, &mut rest);
+            shelf.items.extend(rest);
+        }
+    }
+    if !first {
+        return;
+    }
+    // A title match on something you play often, roughly: the title
+    // starts with what you typed and you have listened a few times.
+    let Some((best, rank)) = history.matches(query, 1).into_iter().next() else {
+        return;
+    };
+    if rank < 4.5 {
+        return;
+    }
+    let key = key_of(&best);
+    match page.shelves.iter_mut().find(|s| s.title == "Top result") {
+        Some(top) => {
+            if top.items.first().and_then(key_of) != key {
+                top.items.retain(|i| key_of(i) != key);
+                top.items.insert(0, best);
+            }
+        }
+        None => page.shelves.insert(
+            0,
+            Shelf {
+                title: "Top result".into(),
+                carousel: false,
+                items: vec![best],
+                more: None,
+                ..Default::default()
+            },
+        ),
+    }
 }
 
 #[cfg(test)]

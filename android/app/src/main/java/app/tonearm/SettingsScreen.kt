@@ -496,7 +496,7 @@ private fun StoragePage(core: Core, onToast: (String) -> Unit) {
     Card {
         SettingRow(
             "Listening history",
-            "Tonearm remembers what you play and open on this phone, and your recent searches. It stays on this phone.",
+            "Tonearm remembers what you play and open on this phone, and your recent searches, and puts what you play first in search. It stays on this phone, in storage only Tonearm can read.",
             Modifier.padding(20.dp),
         ) {
             PillButton("Clear") {

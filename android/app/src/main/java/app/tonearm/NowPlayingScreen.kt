@@ -71,6 +71,9 @@ fun NowPlayingScreen(
     /** The Cast devices, and the button that opens the Devices sheet. */
     cast: CastState? = null,
     onCast: () -> Unit = {},
+    /** Whether a sleep timer runs, and the button that opens its choices. */
+    sleeping: Boolean = false,
+    onSleep: () -> Unit = {},
     /** Whether the song is liked; null while unknown or signed out. */
     liked: Boolean?,
     onLike: () -> Unit,
@@ -312,6 +315,20 @@ fun NowPlayingScreen(
                     },
                 ) { toggle(Panel.Lyrics) }
                 Spacer(Modifier.weight(1f))
+                // The sleep timer: lit, with a dot, while one runs, as the desktop's.
+                Box(
+                    Modifier.size(48.dp).clip(CircleShape).clickable(onClick = onSleep),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(Icons.moon, size = 22.sp, color = if (sleeping) Tonearm.accent else Tonearm.dim)
+                    if (sleeping) {
+                        Box(
+                            Modifier.align(Alignment.BottomCenter).padding(bottom = 4.dp).size(5.dp)
+                                .clip(CircleShape).background(Tonearm.accent),
+                        )
+                    }
+                }
+                Spacer(Modifier.weight(1f))
                 // Lit while the music plays on a device, or is reaching one.
                 Box(
                     Modifier.size(48.dp).clip(CircleShape).clickable(onClick = onCast),
@@ -490,16 +507,27 @@ fun Controls(now: NowPlaying, controller: MediaController, core: Core) {
         // itself, so shuffle goes to it rather than through Media3.
         // The notification's, the car's and the watch's shuffle change it
         // too, so it follows the core.
+        // Pressed again with shuffle on, it turns to smart shuffle, which
+        // mixes in songs like the queue (the sparkle), then off, as the
+        // desktop's button does.
         var shuffle by remember(core) { mutableStateOf(core.playback().shuffle) }
+        var smart by remember(core) { mutableStateOf(core.playback().smart) }
         LaunchedEffect(core) {
             while (true) {
-                shuffle = core.playback().shuffle
+                val p = core.playback()
+                shuffle = p.shuffle
+                smart = p.smart
                 delay(500)
             }
         }
-        ModeButton(Icons.shuffle, shuffle) {
-            shuffle = !shuffle
-            core.setShuffle(shuffle)
+        ModeButton(if (smart) Icons.sparkle else Icons.shuffle, shuffle) {
+            if (shuffle && !smart) {
+                smart = true
+            } else {
+                shuffle = !shuffle
+                smart = false
+            }
+            core.cycleShuffle()
         }
         Spacer(Modifier.weight(1f))
         IconButton(Icons.rewind, size = 36) { controller.seekToPrevious() }

@@ -22,6 +22,7 @@ mod motion;
 mod update;
 mod wheel;
 
+use tonearm_core::sleep::Sleep;
 use tonearm_core::settings::{
     cover_choices as load_cover_choices, crossfade as load_crossfade, levelling as load_levelling,
     translate as load_translate, CROSSFADE_CHOICES, PANEL_ANIMATED, PANEL_CANVAS, TRANSLATE_CHOICES,
@@ -300,27 +301,6 @@ struct Planned {
 fn load_close_to_tray() -> bool {
     store::load("close-to-tray").map_or(true, |text| text.trim() != "0")
 }
-
-/// Sleep timer choices, in minutes, after Off. The last is the end of
-/// the playing song.
-const SLEEP_MINUTES: [u64; 5] = [5, 15, 30, 45, 60];
-const SLEEP_END_OF_SONG: i32 = 6;
-
-/// The sleep timer.
-#[derive(Clone, Copy, Default, PartialEq)]
-enum Sleep {
-    #[default]
-    Off,
-    /// Pauses at this time.
-    At(Instant),
-    /// Stops once the playing song ends.
-    EndOfSong,
-}
-
-/// Smart shuffle mixes in one suggested song after every this many.
-const SMART_EVERY: usize = 3;
-/// And no more than this many at a time.
-const SMART_MOST: usize = 12;
 
 /// How long before the fade the next song starts opening. Its link and
 /// first bytes can take a while to come.
@@ -2342,53 +2322,10 @@ impl App {
         self.toast("Listening history cleared");
     }
 
-    /// Tailors a page of search results: lists put what you play first,
-    /// and a strong match from your history becomes the top result.
+    /// Tailors a page of search results by what you play, as the phone
+    /// does too: see `history::tailor_results`.
     fn tailor_results(&self, query: &str, page: &mut Page, first: bool) {
-        let history = self.taste.borrow();
-        if history.is_empty() {
-            return;
-        }
-        for shelf in &mut page.shelves {
-            // The top result's first item is YouTube Music's pick. Keep it
-            // there and only reorder what follows it.
-            let skip = usize::from(shelf.title == "Top result");
-            if shelf.items.len() > skip + 1 {
-                let mut rest = shelf.items.split_off(skip);
-                history::rerank(&history, &mut rest);
-                shelf.items.extend(rest);
-            }
-        }
-        if !first {
-            return;
-        }
-        // A title match on something you play often, roughly: the title
-        // starts with what you typed and you have listened a few times.
-        let Some((best, rank)) = history.matches(query, 1).into_iter().next() else {
-            return;
-        };
-        if rank < 4.5 {
-            return;
-        }
-        let key = history::key_of(&best);
-        match page.shelves.iter_mut().find(|s| s.title == "Top result") {
-            Some(top) => {
-                if top.items.first().and_then(history::key_of) != key {
-                    top.items.retain(|i| history::key_of(i) != key);
-                    top.items.insert(0, best);
-                }
-            }
-            None => page.shelves.insert(
-                0,
-                innertube::model::Shelf {
-                    title: "Top result".into(),
-                    carousel: false,
-                    items: vec![best],
-                    more: None,
-                    ..Default::default()
-                },
-            ),
-        }
+        history::tailor_results(&self.taste.borrow(), query, page, first);
     }
 
     // --------------------------------------------------------- suggestions
@@ -3353,17 +3290,16 @@ impl App {
                     let picks: Vec<Item> = items
                         .into_iter()
                         .filter(|i| i.video_id.as_ref().is_some_and(|v| !known.contains(v)))
-                        .take(SMART_MOST)
+                        .take(tonearm_core::queue::SMART_MOST)
                         .collect();
-                    let mut at = player.index + 1;
-                    for item in picks {
-                        at = (at + SMART_EVERY).min(player.queue.len());
+                    for item in &picks {
                         if let Some(id) = item.video_id.clone() {
                             player.suggested.insert(id);
                         }
-                        player.queue.insert(at, item);
-                        at += 1;
                     }
+                    // Placed as the phone places them.
+                    let index = player.index;
+                    tonearm_core::queue::mix_in(&mut player.queue, index, picks);
                 }
                 app.rebuild_queue_model();
                 app.prefetch_next();
@@ -3444,13 +3380,7 @@ impl App {
     /// A sleep timer choice from the player: 0 is off, then the minutes in
     /// `SLEEP_MINUTES`, then the end of the song.
     fn set_sleep(self: &Rc<Self>, choice: i32) {
-        let sleep = match choice {
-            SLEEP_END_OF_SONG => Sleep::EndOfSong,
-            n if n >= 1 => SLEEP_MINUTES
-                .get(n as usize - 1)
-                .map_or(Sleep::Off, |m| Sleep::At(Instant::now() + Duration::from_secs(m * 60))),
-            _ => Sleep::Off,
-        };
+        let sleep = Sleep::from_choice(choice.max(0) as usize);
         self.sleep.set(sleep);
         self.ui.set_sleep_choice(if sleep == Sleep::Off { 0 } else { choice });
         // A song armed to follow this one is called off by the next tick.
@@ -3459,19 +3389,13 @@ impl App {
 
     /// Shows the time left, and pauses once it is up.
     fn sleep_tick(self: &Rc<Self>) {
-        let text = match self.sleep.get() {
-            Sleep::Off => String::new(),
-            Sleep::EndOfSong => "End of song".into(),
-            Sleep::At(at) => {
-                let left = at.saturating_duration_since(Instant::now());
-                if left.is_zero() {
-                    self.audio.pause();
-                    self.sleep_done();
-                    return;
-                }
-                format!("{} min left", (left.as_secs() + 59) / 60)
-            }
-        };
+        let sleep = self.sleep.get();
+        if sleep.is_due() {
+            self.audio.pause();
+            self.sleep_done();
+            return;
+        }
+        let text = sleep.text();
         if self.ui.get_sleep_text().as_str() != text {
             self.ui.set_sleep_text(text.into());
         }
@@ -3483,7 +3407,7 @@ impl App {
         self.ui.set_sleep_choice(0);
         self.ui.set_sleep_text("".into());
         self.ui.set_playing(false);
-        self.toast("Sleep timer stopped the music");
+        self.toast(tonearm_core::sleep::STOPPED);
     }
 
     // ------------------------------------------------------ levelling
