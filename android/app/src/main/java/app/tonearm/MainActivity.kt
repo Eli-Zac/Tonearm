@@ -108,6 +108,9 @@ class NowPlaying(
     val duration: Long,
     val error: String?,
     val index: Int,
+    /** The core's queue version: it moves whenever the queue changes, as
+     *  when a song's radio arrives after the song has started. */
+    val queueVersion: ULong = 0uL,
 )
 
 @Composable
@@ -116,6 +119,7 @@ fun rememberNowPlaying(controller: MediaController?, core: uniffi.tonearm_androi
     LaunchedEffect(controller) {
         val c = controller ?: run { now = null; return@LaunchedEffect }
         fun read() {
+            val playback = core.playback()
             now = if (c.mediaItemCount == 0) null else NowPlaying(
                 id = c.currentMediaItem?.mediaId,
                 meta = c.mediaMetadata,
@@ -124,9 +128,10 @@ fun rememberNowPlaying(controller: MediaController?, core: uniffi.tonearm_androi
                 position = c.currentPosition,
                 duration = c.duration,
                 // From the core: the player keeps errors from Media3.
-                error = core.playback().takeIf { it.state == uniffi.tonearm_android.PlayState.FAILED }
+                error = playback.takeIf { it.state == uniffi.tonearm_android.PlayState.FAILED }
                     ?.error?.ifEmpty { "Couldn't play this song" },
                 index = c.currentMediaItemIndex,
+                queueVersion = playback.version,
             )
         }
         val listener = object : Player.Listener {

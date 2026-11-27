@@ -21,7 +21,14 @@ import kotlin.math.PI
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sin
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.horizontalDrag
+import androidx.compose.ui.input.pointer.PointerInputChange
+import androidx.compose.ui.input.pointer.PointerInputScope
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
+import androidx.compose.ui.input.pointer.positionChange
+import kotlin.math.abs
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.*
@@ -61,6 +68,7 @@ data class CoverSong(val id: String, val cover: String?)
 fun CoverCarousel(
     song: CoverSong?,
     index: Int,
+    queueVersion: ULong,
     core: Core,
     controller: MediaController,
     modifier: Modifier = Modifier,
@@ -175,8 +183,9 @@ fun CoverCarousel(
 
     // The songs either side, looked up off the main thread once each song
     // has settled in, so their covers are loaded (off the screen's edges)
-    // before a swipe ever starts. Looked up again as the queue moves on.
-    LaunchedEffect(current?.id, index, leaving == null, pending) {
+    // before a swipe ever starts. Looked up again as the queue moves on or
+    // changes: a song's radio comes in after the song has started.
+    LaunchedEffect(current?.id, index, queueVersion, leaving == null, pending) {
         if (leaving != null || pending != 0) return@LaunchedEffect
         val id = current?.id ?: return@LaunchedEffect
         val found = withContext(Dispatchers.IO) {
@@ -205,7 +214,7 @@ fun CoverCarousel(
         modifier
             .onSizeChanged { width = it.width }
             .pointerInput(core, controller) {
-                detectHorizontalDragGestures(
+                detectSidewaysDrag(
                     onDragStart = {
                         velocity.resetTracking()
                         // A drag during a slide takes over from it, and
@@ -510,3 +519,41 @@ private fun CoverFace(song: CoverSong, core: Core, moving: Boolean, modifier: Mo
     }
 }
 
+
+/**
+ * A sideways drag, taken only when the finger goes clearly sideways. Once
+ * it has moved past the touch slop, more than half again as far across as
+ * down (within about 34 degrees of level), the drag is the cover's;
+ * otherwise it is left alone, so Now playing's swipe down gets a pull that
+ * strays a little to the side instead of skipping the song. Compose's own
+ * `detectHorizontalDragGestures` took any touch that moved the slop across,
+ * however far it had gone down.
+ */
+private suspend fun PointerInputScope.detectSidewaysDrag(
+    onDragStart: (Offset) -> Unit,
+    onDragEnd: () -> Unit,
+    onDragCancel: () -> Unit,
+    onHorizontalDrag: (PointerInputChange, Float) -> Unit,
+) = awaitEachGesture {
+    val down = awaitFirstDown(requireUnconsumed = false)
+    val slop = viewConfiguration.touchSlop
+    var moved = Offset.Zero
+    var start: PointerInputChange
+    while (true) {
+        val event = awaitPointerEvent()
+        val change = event.changes.firstOrNull { it.id == down.id } ?: return@awaitEachGesture
+        if (change.changedToUpIgnoreConsumed() || change.isConsumed) return@awaitEachGesture
+        moved += change.positionChange()
+        if (moved.getDistance() > slop) {
+            if (abs(moved.x) > abs(moved.y) * 1.5f) {
+                start = change
+                break
+            }
+            return@awaitEachGesture
+        }
+    }
+    onDragStart(start.position)
+    // The way the finger has come so far, so the cover starts under it.
+    onHorizontalDrag(start, moved.x)
+    if (horizontalDrag(start.id) { onHorizontalDrag(it, it.positionChange().x) }) onDragEnd() else onDragCancel()
+}

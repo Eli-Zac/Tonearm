@@ -222,6 +222,7 @@ fun NowPlayingScreen(
                     CoverCarousel(
                         now.id?.let { CoverSong(it, cover) },
                         now.index,
+                        now.queueVersion,
                         core,
                         controller,
                         Modifier.weight(1f, fill = false).aspectRatio(1f),
