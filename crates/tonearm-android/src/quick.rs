@@ -1,5 +1,5 @@
-//! Quick access on the phone: Home's speed dial, as YouTube Music's app
-//! has one. The pins are the desktop's, kept in the core's
+//! Quick access on the phone: a section at the top of Home, laid out as
+//! YouTube Music's app lays out its own. The pins are the desktop's, kept in the core's
 //! `quick_access` file and synced through the Tonearm account; what is
 //! left of the grid fills with what you opened and played lately.
 
@@ -13,11 +13,11 @@ use crate::pages::{self, Item};
 use crate::Tonearm;
 
 /// The grid is pages of nine, three by three, and holds this many.
-const DIAL_SIZE: usize = 27;
+const MOST: usize = 27;
 
-/// One tile of the speed dial.
+/// One tile of Quick access.
 #[derive(uniffi::Record)]
-pub struct DialItem {
+pub struct QuickTile {
     pub item: Item,
     /// Pinned to Quick access, so its tile shows the pin.
     pub pinned: bool,
@@ -25,29 +25,29 @@ pub struct DialItem {
 
 #[uniffi::export]
 impl Tonearm {
-    /// Home's speed dial: the pins first, in the order they were made,
+    /// Quick access on Home: the pins first, in the order they were made,
     /// then the albums, artists and playlists you opened lately, then the
     /// songs you played. Empty when there is nothing yet.
-    pub fn speed_dial(&self) -> Vec<DialItem> {
+    pub fn quick_access_tiles(&self) -> Vec<QuickTile> {
         let pins = QuickAccess::load();
         let mut seen: HashSet<String> = HashSet::new();
-        let mut out: Vec<DialItem> = Vec::new();
-        let mut add = |item: &model::Item, pinned: bool, out: &mut Vec<DialItem>| {
+        let mut out: Vec<QuickTile> = Vec::new();
+        let mut add = |item: &model::Item, pinned: bool, out: &mut Vec<QuickTile>| {
             let Some(key) = history::key_of(item) else { return };
-            if out.len() < DIAL_SIZE && seen.insert(key) {
-                out.push(DialItem { item: pages::item(item), pinned });
+            if out.len() < MOST && seen.insert(key) {
+                out.push(QuickTile { item: pages::item(item), pinned });
             }
         };
         for pin in pins.items() {
             add(pin, true, &mut out);
         }
         let taste = self.taste.lock().unwrap();
-        for opened in taste.recent(false, DIAL_SIZE) {
+        for opened in taste.recent(false, MOST) {
             if quick_access::can_pin(&opened) {
                 add(&opened, false, &mut out);
             }
         }
-        for played in taste.recent(true, DIAL_SIZE) {
+        for played in taste.recent(true, MOST) {
             add(&played, false, &mut out);
         }
         out

@@ -667,9 +667,9 @@ fun HomeScreen(core: Core, actions: Actions, onSettings: () -> Unit, onAccount: 
                         }
                     }
                 }
-                // Quick access, on Home itself rather than a mood's page, as
-                // YouTube Music's speed dial: pins, then what you played.
-                if (chip == null) SpeedDial(core, actions)
+                // Quick access, on Home itself rather than a mood's page:
+                // pins, then what you opened and played.
+                if (chip == null) QuickAccessShelf(core, actions)
             }
         },
     )
