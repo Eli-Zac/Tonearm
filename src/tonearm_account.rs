@@ -169,8 +169,28 @@ impl App {
     }
 
     /// Syncs at start, then every few minutes while the app is open.
+    /// Pins' covers are brought up to date after the first sync, on the same
+    /// worker, so the two never write Quick access at once.
     pub(crate) fn start_settings_sync(self: &Rc<Self>) {
-        self.sync_settings_soon();
+        let client = self.client.clone();
+        let signed_in = account::current().is_some();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(1500));
+            if signed_in {
+                if let Ok(changed) = tonearm_core::settings_sync::sync() {
+                    if !changed.is_empty() {
+                        on_ui(move |app| app.show_synced(&changed));
+                    }
+                }
+            }
+            if tonearm_core::quick_access::refresh(&client) {
+                on_ui(|app| {
+                    *app.quick_access.borrow_mut() = tonearm_core::quick_access::QuickAccess::load();
+                    app.show_quick_access();
+                    app.sync_settings_soon();
+                });
+            }
+        });
         let weak = Rc::downgrade(self);
         self.settings_timer.start(TimerMode::Repeated, Duration::from_secs(300), move || {
             if let Some(app) = weak.upgrade() {

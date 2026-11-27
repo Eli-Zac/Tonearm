@@ -56,6 +56,43 @@ pub fn from_page(header: &Header, id: &str, params: Option<&str>) -> Option<Item
     can_pin(&item).then_some(item)
 }
 
+/// Opens each pinned page again and takes its cover and title as they are
+/// now. A pin keeps the cover link it was made with, and some links expire:
+/// a playlist's own cover is a signed link that stops working after a few
+/// days, leaving the tile blank. Blocks on the network, a page per pin, so
+/// run it on a worker, once a start. Saves only when something changed,
+/// into the list as it is by then, so a pin made or removed meanwhile
+/// stays as it was. Returns whether anything changed.
+pub fn refresh(client: &crate::innertube::Client) -> bool {
+    let mut fresh: Vec<Item> = Vec::new();
+    for pin in QuickAccess::load().items() {
+        let Some(id) = key(pin) else { continue };
+        let Ok(page) = client.browse(id, pin.params.as_deref()) else { continue };
+        let Some(header) = page.header else { continue };
+        let mut item = pin.clone();
+        if !header.thumb.is_empty() {
+            item.thumb = header.thumb;
+        }
+        if !header.title.is_empty() {
+            item.title = header.title;
+        }
+        if item.thumb != pin.thumb || item.title != pin.title {
+            fresh.push(item);
+        }
+    }
+    if fresh.is_empty() {
+        return false;
+    }
+    let mut list = QuickAccess::load();
+    for item in fresh {
+        if list.contains(&item) {
+            list.put(item);
+        }
+    }
+    QuickAccess::save(list.serialize());
+    true
+}
+
 fn parse(text: &str) -> Vec<Item> {
     serde_json::from_str::<Value>(text)
         .ok()

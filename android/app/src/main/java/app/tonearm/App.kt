@@ -115,11 +115,22 @@ fun App(core: Core, controller: MediaController?) {
         withContext(Dispatchers.IO) { Updater.check(core, appContext) }
         Updater.announce?.let { toast = "Tonearm $it is available. Update it in Settings."; Updater.announce = null }
     }
-    // The shared settings follow the Tonearm account: now, then every few minutes.
+    // The shared settings follow the Tonearm account: now, then every few
+    // minutes. After the first sync the pins' covers are brought up to date,
+    // one after the other so the two never write Quick access at once.
     LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            if (runCatching { core.syncSettings() }.getOrDefault(emptyList()).isNotEmpty()) {
+                withContext(Dispatchers.Main) { Prefs.changed() }
+            }
+            if (runCatching { core.refreshQuickAccess() }.getOrDefault(false)) {
+                QuickAccess.changed()
+                Prefs.syncSoon(core)
+            }
+        }
         while (true) {
-            Prefs.syncSoon(core, wait = 0)
             delay(5 * 60_000L)
+            Prefs.syncSoon(core, wait = 0)
         }
     }
     // Bumped when something is saved to the library or an artist followed,

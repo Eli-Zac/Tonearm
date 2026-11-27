@@ -53,6 +53,14 @@ impl Tonearm {
         out
     }
 
+    /// Opens each pinned page again for its cover and title as they are now,
+    /// as a pin's cover link can expire. Blocks on the network; once a
+    /// start, after the first sync. True when a pin changed, so Home reads
+    /// Quick access again and the change is synced.
+    pub fn refresh_quick_access(&self) -> bool {
+        quick_access::refresh(&self.client)
+    }
+
     /// Whether an album, artist or playlist can be pinned to Quick access.
     pub fn can_pin(&self, item: Item) -> bool {
         quick_access::can_pin(&pages::core_item(&item))
