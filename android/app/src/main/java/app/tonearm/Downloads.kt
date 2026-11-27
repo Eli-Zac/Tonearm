@@ -16,6 +16,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
@@ -139,34 +140,12 @@ fun HeaderDownload(songs: List<Item>, onDownload: () -> Unit) {
     }
 }
 
-/** Library's way to Downloads: a row at the top, like a playlist's, there
- *  even when Library itself can't load (offline, or signed out). */
-@Composable
-fun DownloadsEntry(core: Core, onOpen: () -> Unit) {
-    val downloads = LocalDownloads.current
-    val summary by produceState("", downloads.saved) {
-        value = withContext(Dispatchers.IO) { core.downloadsSummary() }
-    }
-    Row(
-        Modifier.fillMaxWidth().clickable(onClick = onOpen).padding(horizontal = 16.dp, vertical = 7.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        DownloadsTile(50.dp)
-        Column(Modifier.weight(1f).padding(start = 14.dp)) {
-            Title("Downloads")
-            // Its line's room is kept while the count is read.
-            Dim(summary.ifEmpty { " " })
-        }
-        Icon(Icons.right, size = 18.sp, color = Tonearm.dim)
-    }
-}
-
 /** Downloads' art: the download icon on a tile of the accent, as the
  *  desktop's icon tile for the Downloads page. */
 @Composable
-fun DownloadsTile(size: Dp) {
+fun DownloadsTile(size: Dp, shape: Shape = RoundedCornerShape(size * 0.16f)) {
     Box(
-        Modifier.size(size).clip(RoundedCornerShape(size * 0.16f)).background(
+        Modifier.size(size).clip(shape).background(
             Brush.linearGradient(listOf(Tonearm.accent, Color(0xFF7A5CFF))),
         ),
         contentAlignment = Alignment.Center,

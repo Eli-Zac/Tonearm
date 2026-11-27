@@ -710,26 +710,6 @@ fun ExploreScreen(core: Core, actions: Actions) {
 }
 
 @Composable
-fun LibraryScreen(core: Core, actions: Actions, epoch: Int) {
-    PageView(
-        key = "library$epoch",
-        load = { withContext(Dispatchers.IO) { core.library() } },
-        more = { token -> withContext(Dispatchers.IO) { core.more(token) } },
-        actions = actions,
-        topWhileLoading = true,
-        top = {
-            Column {
-                TabHeading("Library")
-                // Downloads first, as YouTube Music's library has them; it
-                // stays up when the library can't load, so offline songs
-                // are always a tap away.
-                DownloadsEntry(core) { actions.open(DOWNLOADS_ROUTE, null, "Downloads") }
-            }
-        },
-    )
-}
-
-@Composable
 fun SearchScreen(core: Core, actions: Actions) {
     val focus = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
