@@ -120,7 +120,9 @@ fun NowPlayingScreen(
     // Swiped down, the screen follows the finger. Let go past a quarter of
     // the way, or with a downward flick, it slides the rest of the way off;
     // otherwise it springs back.
-    val pulled = remember { Animatable(0f) }
+    // Never above the top: a swipe up has nothing to show, and a flick up
+    // used to send the spring back past the top and bounce off it.
+    val pulled = remember { Animatable(0f).apply { updateBounds(lowerBound = 0f) } }
     val scope = rememberCoroutineScope()
     var height by remember { mutableIntStateOf(0) }
     val flick = with(LocalDensity.current) { 1000.dp.toPx() }

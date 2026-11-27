@@ -160,7 +160,13 @@ fun MiniPlayer(now: NowPlaying, controller: MediaController, onOpen: () -> Unit)
     // springs back; a long enough drag also skips.
     val drag = remember { Animatable(0f) }
     val scope = rememberCoroutineScope()
-    val reach = with(LocalDensity.current) { 56.dp.toPx() }
+    // How far the island must go to skip, or how fast a shorter flick must
+    // move it. It moves about 0.375 of the finger (0.6 of a drag measured
+    // on the island itself, which moves away under the finger), so these
+    // are about 53dp of finger, and 800dp a second.
+    val reach = with(LocalDensity.current) { 20.dp.toPx() }
+    val flick = with(LocalDensity.current) { 300.dp.toPx() }
+    val tracker = remember { androidx.compose.ui.input.pointer.util.VelocityTracker() }
     Column(
         Modifier
             .padding(horizontal = 8.dp, vertical = 6.dp)
@@ -170,16 +176,19 @@ fun MiniPlayer(now: NowPlaying, controller: MediaController, onOpen: () -> Unit)
             .background(Tonearm.island)
             .pointerInput(controller) {
                 detectHorizontalDragGestures(
-                    onDragStart = { scope.launch { drag.stop() } },
+                    onDragStart = { tracker.resetTracking(); scope.launch { drag.stop() } },
                     onDragEnd = {
                         val moved = drag.value
-                        if (moved <= -reach) controller.seekToNext()
-                        else if (moved >= reach) controller.seekToPrevious()
+                        val speed = tracker.calculateVelocity().x
+                        if (moved <= -reach || (speed < -flick && moved < 0f)) controller.seekToNext()
+                        else if (moved >= reach || (speed > flick && moved > 0f)) controller.seekToPrevious()
                         scope.launch { drag.animateTo(0f) }
                     },
                     onDragCancel = { scope.launch { drag.animateTo(0f) } },
                     onHorizontalDrag = { change, amount ->
                         change.consume()
+                        // The island's own path, which the finger's speed drives.
+                        tracker.addPosition(change.uptimeMillis, androidx.compose.ui.geometry.Offset(drag.value, 0f))
                         // Resists a little: it is a nudge, not a slide away.
                         scope.launch { drag.snapTo(drag.value + amount * 0.6f) }
                     },
