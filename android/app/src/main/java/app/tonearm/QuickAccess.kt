@@ -123,7 +123,8 @@ private fun QuickCard(tile: QuickTile, actions: Actions, modifier: Modifier) {
                         .background(Color(0xCC08080A)),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Icon(Icons.pin, size = 14.sp, filled = true)
+                    // Regular: the fill font is cut down and has no pin.
+                    Icon(Icons.pin, size = 14.sp)
                 }
             }
         }
