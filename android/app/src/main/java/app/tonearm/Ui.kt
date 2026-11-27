@@ -465,15 +465,10 @@ fun PageHeader(
             val channel = header.channelId
             val following = followed
             if (header.banner && channel != null && following != null) {
-                Box(
-                    Modifier.padding(start = 12.dp, end = 4.dp).height(32.dp).clip(RoundedCornerShape(16.dp))
-                        .border(1.dp, Color(0x66FFFFFF), RoundedCornerShape(16.dp))
-                        .clickable { followed = !following; actions.follow(channel, !following, header.title) }
-                        .padding(horizontal = 14.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Title(if (following) "Following" else "Follow", size = 14.sp)
-                }
+                PillButton(
+                    if (following) "Following" else "Follow",
+                    modifier = Modifier.padding(start = 12.dp, end = 4.dp),
+                ) { followed = !following; actions.follow(channel, !following, header.title) }
             }
             val playlist = header.playlistId
             val isSaved = saved
@@ -805,16 +800,38 @@ fun Chip(label: String, selected: Boolean = false, onClick: () -> Unit) {
 /** A chip's corners, for its bones too. */
 val CHIP_RADIUS = 8.dp
 
+/** The app's one button, as the desktop's `PillButton`: a pill, faintly
+ *  lit; white for the main action, red for one that undoes something. */
 @Composable
-fun PillButton(glyph: String, label: String, onClick: () -> Unit) {
-    Row(
-        Modifier.height(40.dp).clip(RoundedCornerShape(20.dp)).background(Tonearm.raised)
-            .clickable(onClick = onClick).padding(horizontal = 16.dp),
-        verticalAlignment = Alignment.CenterVertically,
+fun PillButton(
+    text: String,
+    primary: Boolean = false,
+    danger: Boolean = false,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    val press = remember { MutableInteractionSource() }
+    val pressed by press.collectIsPressedAsState()
+    val background = when {
+        primary -> if (pressed) Color.White else Color(0xFFF0F0F3)
+        danger -> if (pressed) Color(0x33FF4F6D) else Color(0x1AFF4F6D)
+        else -> if (pressed) Color(0x24FFFFFF) else Color(0x14FFFFFF)
+    }
+    Box(
+        modifier.height(36.dp).clip(RoundedCornerShape(18.dp)).background(background)
+            .clickable(interactionSource = press, indication = null, onClick = onClick)
+            .padding(horizontal = 18.dp),
+        contentAlignment = Alignment.Center,
     ) {
-        Icon(glyph, size = 18.sp)
-        Spacer(Modifier.width(8.dp))
-        Title(label, size = 14.sp)
+        Text(
+            text,
+            color = when {
+                primary -> Color(0xFF08080A)
+                danger -> Color(0xFFFF8095)
+                else -> Tonearm.text
+            },
+            fontFamily = Tonearm.font, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, maxLines = 1,
+        )
     }
 }
 

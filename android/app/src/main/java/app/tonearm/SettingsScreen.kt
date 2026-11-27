@@ -694,7 +694,7 @@ private fun linkLastfm(core: Core, context: android.content.Context, key: String
 
 @Composable
 internal fun Card(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
-    Box(modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(card)) { content() }
+    Box(modifier.fillMaxWidth().clip(RoundedCornerShape(Tonearm.panel)).background(card)) { content() }
 }
 
 /** A row that opens a sub page: an icon tile (or a logo on its brand
@@ -711,7 +711,7 @@ internal fun SubpageRow(
     val press = remember { MutableInteractionSource() }
     val pressed by press.collectIsPressedAsState()
     Row(
-        Modifier.fillMaxWidth().height(68.dp).clip(RoundedCornerShape(12.dp))
+        Modifier.fillMaxWidth().height(68.dp).clip(RoundedCornerShape(Tonearm.panel))
             .background(if (pressed) pressedCard else card)
             .clickable(interactionSource = press, indication = null, onClick = onClick)
             .padding(horizontal = 16.dp),
@@ -826,33 +826,6 @@ private fun AccountRow(
 }
 
 @Composable
-fun PillButton(text: String, primary: Boolean = false, danger: Boolean = false, onClick: () -> Unit) {
-    val press = remember { MutableInteractionSource() }
-    val pressed by press.collectIsPressedAsState()
-    val background = when {
-        primary -> if (pressed) Color.White else Color(0xFFF0F0F3)
-        danger -> if (pressed) Color(0x33FF4F6D) else Color(0x1AFF4F6D)
-        else -> if (pressed) Color(0x24FFFFFF) else Color(0x14FFFFFF)
-    }
-    Box(
-        Modifier.height(36.dp).clip(RoundedCornerShape(18.dp)).background(background)
-            .clickable(interactionSource = press, indication = null, onClick = onClick)
-            .padding(horizontal = 18.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text,
-            color = when {
-                primary -> Color(0xFF08080A)
-                danger -> Color(0xFFFF8095)
-                else -> Tonearm.text
-            },
-            fontFamily = Tonearm.font, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, maxLines = 1,
-        )
-    }
-}
-
-@Composable
 internal fun Field(value: String, onChange: (String) -> Unit, placeholder: String, secret: Boolean = false) {
     var focused by remember { mutableStateOf(false) }
     // While focused, the whole pill (and a little room round it) is kept
@@ -934,8 +907,8 @@ internal fun ChoiceDropdown(title: String, options: List<String>, selectedIndex:
         if (open) {
             Dialog(onDismissRequest = { open = false }) {
                 Column(
-                    Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Tonearm.raised)
-                        .border(1.dp, Tonearm.line, RoundedCornerShape(16.dp))
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(Tonearm.panel)).background(Tonearm.raised)
+                        .border(1.dp, Tonearm.line, RoundedCornerShape(Tonearm.panel))
                         .padding(vertical = 12.dp),
                 ) {
                     Title(title, size = 18.sp, weight = FontWeight.Bold,

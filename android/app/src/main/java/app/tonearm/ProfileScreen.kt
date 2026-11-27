@@ -229,7 +229,7 @@ private fun StatTile(value: Int?, label: String, modifier: Modifier = Modifier) 
     Column(
         // Numbers on one line across the tiles: from the top, so a label
         // wrapping to two lines (narrow phones) only uses room below.
-        modifier.height(84.dp).clip(RoundedCornerShape(12.dp)).background(Color(0x0AFFFFFF))
+        modifier.height(84.dp).clip(RoundedCornerShape(Tonearm.panel)).background(Color(0x0AFFFFFF))
             .padding(horizontal = 14.dp).padding(top = 12.dp),
     ) {
         Box(Modifier.height(35.dp), contentAlignment = Alignment.CenterStart) {

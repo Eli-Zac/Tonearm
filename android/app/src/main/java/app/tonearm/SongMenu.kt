@@ -89,7 +89,7 @@ fun ItemMenu(request: MenuRequest, core: Core, host: MenuHost, onClose: () -> Un
     Column(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
+            .clip(RoundedCornerShape(topStart = Tonearm.panel, topEnd = Tonearm.panel))
             .background(Tonearm.island)
             .navigationBarsPadding()
             .padding(top = 10.dp, bottom = 8.dp),

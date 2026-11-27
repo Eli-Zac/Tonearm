@@ -564,8 +564,8 @@ fun ConfirmDialog(
 ) {
     androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
         Column(
-            Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Tonearm.raised)
-                .border(1.dp, Tonearm.line, RoundedCornerShape(16.dp))
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(Tonearm.panel)).background(Tonearm.raised)
+                .border(1.dp, Tonearm.line, RoundedCornerShape(Tonearm.panel))
                 .padding(20.dp),
         ) {
             Title(title, size = 18.sp, weight = FontWeight.Bold)

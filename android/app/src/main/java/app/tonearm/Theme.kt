@@ -27,6 +27,9 @@ object Tonearm {
     val faint = Color(0x59FFFFFF)
     val accent = Color(0xFFFF4F6D)
     val radius = 14.dp
+    /** A panel's corners: cards, dialogs and the sheets' tops, as the
+     *  desktop's cards and pop-ups. */
+    val panel = 12.dp
 
     val font = FontFamily(
         Font(R.font.figtree_regular, FontWeight.Normal),

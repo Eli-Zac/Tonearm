@@ -99,7 +99,7 @@ fun CastSheet(
     Column(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
+            .clip(RoundedCornerShape(topStart = Tonearm.panel, topEnd = Tonearm.panel))
             .background(Tonearm.raised)
             .navigationBarsPadding()
             .padding(top = 10.dp),
