@@ -20,6 +20,12 @@ use super::USER_AGENT;
 const LIB_JS: &str = include_str!("ejs/yt.solver.lib.min.js");
 const CORE_JS: &str = include_str!("ejs/yt.solver.core.min.js");
 
+/// Which build of the player script to download. YouTube's main web build
+/// (`player_ias.vflset/en_US/base.js`) changed in November 2026 in a way
+/// the solver cannot read, so we take the TV build of the same player, as
+/// yt-dlp does since 2026.11.23. Kept on disk as `<id>.tv.js`.
+const PLAYER_PATH: &str = "tv-player-ias.vflset/tv-player-ias.js";
+
 /// How long the current player id is trusted before asking again.
 const PLAYER_TTL: Duration = Duration::from_secs(3600);
 /// How many downloaded player scripts to keep on disk.
@@ -125,7 +131,7 @@ pub fn solve(
 pub fn warm(http: &ureq::Agent) -> Result<(), String> {
     let player = current_player(http)?;
     if let Some(dir) = player_dir() {
-        if dir.join(format!("{}.pre.js", player.id)).is_file() {
+        if dir.join(format!("{}.tv.pre.js", player.id)).is_file() {
             return Ok(());
         }
     }
@@ -143,7 +149,7 @@ fn solve_with_player(
     n: &[String],
 ) -> Result<Solved, String> {
     let dir = player_dir();
-    let pre_file = dir.as_ref().map(|d| d.join(format!("{id}.pre.js")));
+    let pre_file = dir.as_ref().map(|d| d.join(format!("{id}.tv.pre.js")));
     if let Some(file) = &pre_file {
         if let Ok(pre) = std::fs::read_to_string(file) {
             match run_solver(&pre, true, sig, n) {
@@ -280,7 +286,7 @@ fn load_js(http: &ureq::Agent, id: &str, dir: Option<&Path>) -> Result<String, S
     if !id.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(format!("odd player id {id:?}"));
     }
-    let file = dir.map(|d| d.join(format!("{id}.js")));
+    let file = dir.map(|d| d.join(format!("{id}.tv.js")));
     if let Some(file) = &file {
         if let Ok(js) = std::fs::read_to_string(file) {
             if looks_like_player(&js) {
@@ -288,7 +294,7 @@ fn load_js(http: &ureq::Agent, id: &str, dir: Option<&Path>) -> Result<String, S
             }
         }
     }
-    let url = format!("https://www.youtube.com/s/player/{id}/player_ias.vflset/en_US/base.js");
+    let url = format!("https://www.youtube.com/s/player/{id}/{PLAYER_PATH}");
     let js = get_text(http, &url)?;
     if !looks_like_player(&js) {
         return Err("player script looks wrong".into());
@@ -310,8 +316,8 @@ fn looks_like_player(js: &str) -> bool {
     js.len() > 100_000 && js.contains("signatureTimestamp")
 }
 
-/// Deletes all but the newest few players' kept files (`<id>.js`,
-/// `<id>.pre.js`, leftover `.tmp`).
+/// Deletes all but the newest few players' kept files (`<id>.tv.js`,
+/// `<id>.tv.pre.js`, leftover `.tmp`, and older builds' `<id>.js`).
 fn prune(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     let mut ids: HashMap<String, std::time::SystemTime> = HashMap::new();
@@ -369,8 +375,10 @@ fn sts_in(js: &str) -> Option<u32> {
                 .chars()
                 .take_while(|c| c.is_ascii_digit())
                 .collect();
-            if digits.len() == 5 {
-                if let Ok(v) = digits.parse() {
+            // Five digits. Newer players can carry a longer number here,
+            // and the request then wants its first five, as yt-dlp sends.
+            if digits.len() >= 5 {
+                if let Ok(v) = digits[..5].parse() {
                     return Some(v);
                 }
             }
@@ -402,6 +410,8 @@ mod tests {
         assert_eq!(sts_in("x={sts: 20523};"), Some(20523));
         assert_eq!(sts_in("tests:12345,sts:20524"), Some(20524));
         assert_eq!(sts_in("nothing"), None);
+        assert_eq!(sts_in("{signatureTimestamp:2052614}"), Some(20526));
+        assert_eq!(sts_in("sts:2052"), None);
     }
 
     #[test]

@@ -5,13 +5,15 @@
 //! order, and take the first that hands over a link that opens. Anything
 //! odd is a `Miss`, and the resolver then falls back to yt-dlp.
 //!
-//! The visionOS client goes first, then Android VR. They state plain links,
-//! with neither a signature nor an `n` challenge to solve, and ask for no
-//! token. They take no sign in, though, so a signed in user goes to
-//! YouTube Music's web client and the Samsung TV client first and gets the
-//! account's own links. Those need the player script's challenges solved,
-//! which `challenge.rs` does. The web embedded client is left out: it wants
-//! a PO token.
+//! The visionOS client goes first. It states plain links, with neither a
+//! signature nor an `n` challenge to solve, and asks for no token. The
+//! Samsung TV client comes next, for songs visionOS will not play, such as
+//! those made for kids. Its links need the player script's challenges
+//! solved, which `challenge.rs` does. Signed in, YouTube Music's web client
+//! comes last: its links open only for Premium accounts, as anyone else
+//! needs a PO token for them. These follow yt-dlp's choices as of
+//! 2026.11.23. Android VR is left out, as it now wants sign in for every
+//! video, and so is the web embedded client, which wants a PO token.
 
 use super::challenge::{self, PlayerJs, Solved};
 use crate::resolver::Stream;
@@ -21,6 +23,9 @@ use serde_json::{json, Value};
 /// kind is for logs and the debug command.
 #[derive(Debug)]
 pub enum Miss {
+    /// The network failed under a request. Worth asking again on a fresh
+    /// connection, as a change of network leaves kept ones dead.
+    Network(String),
     /// The video wants something only yt-dlp can do: a PO token, SABR
     /// only formats, sign in for age, and so on.
     Unsupported(String),
@@ -31,6 +36,7 @@ pub enum Miss {
 impl std::fmt::Display for Miss {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Miss::Network(why) => write!(f, "network: {why}"),
             Miss::Unsupported(why) => write!(f, "unsupported: {why}"),
             Miss::Failed(why) => write!(f, "failed: {why}"),
         }
@@ -43,8 +49,6 @@ impl std::fmt::Display for Miss {
 enum Kind {
     /// The visionOS YouTube app. Plain links, no token, no sign in.
     Visionos,
-    /// The Oculus Quest YouTube app. As above.
-    AndroidVr,
     /// music.youtube.com's own web client, signed in.
     WebMusic,
     /// The Samsung TV app. Its links need the player's challenges solved.
@@ -55,15 +59,11 @@ const BROWSER_UA: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0";
 const VISIONOS_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
 const TV_SAMSUNG_UA: &str = "Mozilla/5.0 (SMART-TV; Linux; Tizen 2.4.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/2.4.0 TV Safari/538.1";
-const ANDROID_VR_VERSION: &str = "1.65.10";
-const ANDROID_VR_UA: &str = "com.google.android.apps.youtube.vr.oculus/1.65.10 \
-    (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip";
 
 impl Kind {
     fn label(self) -> &'static str {
         match self {
             Kind::Visionos => "visionos",
-            Kind::AndroidVr => "android_vr",
             Kind::WebMusic => "web_music",
             Kind::TvSamsung => "tv_samsung",
         }
@@ -71,7 +71,6 @@ impl Kind {
 
     fn user_agent(self) -> &'static str {
         match self {
-            Kind::AndroidVr => ANDROID_VR_UA,
             Kind::Visionos => VISIONOS_UA,
             Kind::TvSamsung => TV_SAMSUNG_UA,
             Kind::WebMusic => BROWSER_UA,
@@ -93,16 +92,6 @@ impl Kind {
 
     fn context(self) -> Value {
         match self {
-            Kind::AndroidVr => json!({"client": {
-                "clientName": "ANDROID_VR",
-                "clientVersion": ANDROID_VR_VERSION,
-                "deviceMake": "Oculus",
-                "deviceModel": "Quest 3",
-                "androidSdkVersion": 32,
-                "osName": "Android",
-                "osVersion": "12L",
-                "hl": "en",
-            }}),
             Kind::WebMusic => json!({"client": {
                 "clientName": "WEB_REMIX",
                 "clientVersion": super::CLIENT_VERSION,
@@ -133,9 +122,9 @@ impl Kind {
 /// The clients to ask, in order.
 fn order(signed_in: bool) -> Vec<Kind> {
     if signed_in {
-        vec![Kind::WebMusic, Kind::TvSamsung, Kind::Visionos, Kind::AndroidVr]
+        vec![Kind::Visionos, Kind::TvSamsung, Kind::WebMusic]
     } else {
-        vec![Kind::Visionos, Kind::AndroidVr, Kind::TvSamsung]
+        vec![Kind::Visionos, Kind::TvSamsung]
     }
 }
 
@@ -151,19 +140,24 @@ pub fn resolve(
     let cookie = cookie.filter(|c| super::sapisid(c).is_some());
     let mut unsupported = Vec::new();
     let mut failed = Vec::new();
+    let mut network = false;
     for kind in order(cookie.is_some()) {
         match attempt(http, kind, cookie, video_id) {
             Ok(stream) => return Ok(stream),
             Err(Miss::Unsupported(why)) => unsupported.push(format!("{}: {why}", kind.label())),
             Err(Miss::Failed(why)) => failed.push(format!("{}: {why}", kind.label())),
+            Err(Miss::Network(why)) => {
+                network = true;
+                failed.push(format!("{}: network: {why}", kind.label()));
+            }
         }
     }
     if failed.is_empty() {
-        Err(Miss::Unsupported(unsupported.join("; ")))
-    } else {
-        failed.extend(unsupported);
-        Err(Miss::Failed(failed.join("; ")))
+        return Err(Miss::Unsupported(unsupported.join("; ")));
     }
+    failed.extend(unsupported);
+    let why = failed.join("; ");
+    Err(if network { Miss::Network(why) } else { Miss::Failed(why) })
 }
 
 /// Asks one client and checks that the link it gives opens.
@@ -230,11 +224,13 @@ fn ask(
             .set("Authorization", &super::sapisid_hash(sapisid))
             .set("X-Goog-AuthUser", "0");
     }
-    request
-        .send_json(body)
-        .map_err(|e| Miss::Failed(format!("network: {e}")))?
-        .into_json()
-        .map_err(|e| Miss::Failed(format!("bad response: {e}")))
+    match request.send_json(body) {
+        Ok(response) => response
+            .into_json()
+            .map_err(|e| Miss::Failed(format!("bad response: {e}"))),
+        Err(ureq::Error::Status(code, _)) => Err(Miss::Failed(format!("player answered HTTP {code}"))),
+        Err(e) => Err(Miss::Network(e.to_string())),
+    }
 }
 
 /// A tiny ranged GET, so a link that will not open sends us on to the next
@@ -247,7 +243,7 @@ fn verify(http: &ureq::Agent, url: &str, headers: &[(String, String)]) -> Result
     match request.call() {
         Ok(_) => Ok(()),
         Err(ureq::Error::Status(code, _)) => Err(Miss::Failed(format!("link answered HTTP {code}"))),
-        Err(e) => Err(Miss::Failed(format!("link check: {e}"))),
+        Err(e) => Err(Miss::Network(format!("link check: {e}"))),
     }
 }
 

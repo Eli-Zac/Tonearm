@@ -123,8 +123,9 @@ impl Native {
         let http = self.http.read().unwrap().clone();
         match crate::innertube::player::resolve(&http, cookie.as_deref(), video_id) {
             // Network trouble may be the network having changed under a kept
-            // connection: once more on a fresh one.
-            Err(crate::innertube::player::Miss::Failed(_)) => {
+            // connection: once more on a fresh one. Only then: a client that
+            // refused would refuse again, and asking twice doubles the wait.
+            Err(crate::innertube::player::Miss::Network(_)) => {
                 let fresh = crate::innertube::agent(Duration::from_secs(15));
                 *self.http.write().unwrap() = fresh.clone();
                 crate::innertube::player::resolve(&fresh, cookie.as_deref(), video_id)
