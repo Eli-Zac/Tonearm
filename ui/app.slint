@@ -5182,7 +5182,9 @@ export component AppWindow inherits Window {
     property <length> drag-content;
     // Where the press was in the window, less the scroll at the time.
     property <length> drag-anchor;
-    // The list took the mouse from the dragged row. The window carries on.
+    // The window carries the drag on if the dragged row loses the mouse.
+    // Set as the drag starts, as the row can lose it without a word: the
+    // list drops rows that scroll out of view, and the press goes with them.
     property <bool> drag-loose;
 
     // The row at `index` has moved `offset` from its place. Picks the slot
@@ -7419,6 +7421,9 @@ export component AppWindow inherits Window {
                     drag(offset, pressed-at) => {
                         root.drag-anchor = pressed-at - root.drag-scroll;
                         root.drag-row(index, offset);
+                        // Ready to take over. While the row keeps the mouse
+                        // the window hears nothing, so this changes nothing.
+                        root.drag-loose = true;
                     }
                     drop => { root.drop-row(); }
                     loose => { root.drag-loose = true; }
@@ -9656,10 +9661,12 @@ export component AppWindow inherits Window {
         }
     }
 
-    // Carries a queue drag on once the pointer leaves the list. Lists and
-    // clipped panels take the mouse from a row whose pointer is outside
-    // them, so the row cannot follow it. This covers the window and does,
-    // back over the list too, until the button is let go.
+    // Carries a queue drag on once the dragged row loses the mouse. The
+    // list can take the mouse from it, and a drag above "Next up" scrolls
+    // the list up until the row drops out of view, and the list removes
+    // it. Either way the row cannot follow the pointer or hear the release.
+    // This covers the window and does, back over the list too, until the
+    // button is let go.
     drag-catcher := TouchArea {
         visible: root.drag-loose;
         mouse-cursor: grabbing;
