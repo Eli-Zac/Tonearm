@@ -13,6 +13,11 @@
 //! needs a PO token for them. These follow yt-dlp's choices as of
 //! 2026.11.23. Android VR is left out, as it now wants sign in for every
 //! video, and so is the web embedded client, which wants a PO token.
+//!
+//! Every request carries a visitor id, as yt-dlp's do. Without one,
+//! signed out, YouTube answers most songs with "Sign in to confirm you're
+//! not a bot". The id comes from the first reply, refused or not, and is
+//! kept for the rest of the run.
 
 use super::challenge::{self, PlayerJs, Solved};
 use crate::resolver::Stream;
@@ -82,6 +87,16 @@ impl Kind {
         matches!(self, Kind::WebMusic | Kind::TvSamsung)
     }
 
+    /// The `X-YouTube-Client-Name` number and the version, as the apps
+    /// send them.
+    fn client_header(self) -> (&'static str, &'static str) {
+        match self {
+            Kind::WebMusic => ("67", super::CLIENT_VERSION),
+            Kind::Visionos => ("101", "1.02"),
+            Kind::TvSamsung => ("7", "5.20260707"),
+        }
+    }
+
     fn endpoint(self) -> &'static str {
         match self {
             Kind::WebMusic => "https://music.youtube.com/youtubei/v1/player?prettyPrint=false",
@@ -137,6 +152,18 @@ pub fn resolve(
     video_id: &str,
 ) -> Result<Stream, Miss> {
     let cookie = cookie.filter(|c| super::sapisid(c).is_some());
+    let had_visitor = visitor().is_some();
+    let result = resolve_once(http, cookie, video_id);
+    // The first resolve of a run goes out with no visitor id, and a
+    // signed out one is then mostly refused. The replies have handed one
+    // over by now, so ask again with it.
+    match result {
+        Err(_) if !had_visitor && visitor().is_some() => resolve_once(http, cookie, video_id),
+        result => result,
+    }
+}
+
+fn resolve_once(http: &ureq::Agent, cookie: Option<&str>, video_id: &str) -> Result<Stream, Miss> {
     let mut unsupported = Vec::new();
     let mut failed = Vec::new();
     let mut network = false;
@@ -202,16 +229,28 @@ fn ask(
         "context": kind.context(),
         "contentCheckOk": true,
         "racyCheckOk": true,
+        "playbackContext": {"contentPlaybackContext": {
+            "html5Preference": "HTML5_PREF_WANTS",
+        }},
     });
     if let Some(player) = player {
-        body["playbackContext"] = json!({"contentPlaybackContext": {
-            "signatureTimestamp": player.sts,
-        }});
+        body["playbackContext"]["contentPlaybackContext"]["signatureTimestamp"] = json!(player.sts);
     }
+    let (client_name, client_version) = kind.client_header();
     let mut request = http
         .post(kind.endpoint())
         .set("User-Agent", kind.user_agent())
-        .set("Accept-Language", "en");
+        .set("Accept-Language", "en")
+        .set("X-YouTube-Client-Name", client_name)
+        .set("X-YouTube-Client-Version", client_version);
+    if kind != Kind::WebMusic {
+        request = request.set("Origin", "https://www.youtube.com");
+    }
+    let visitor = visitor();
+    if let Some(visitor) = &visitor {
+        body["context"]["client"]["visitorData"] = json!(visitor);
+        request = request.set("X-Goog-Visitor-Id", visitor);
+    }
     if kind == Kind::WebMusic {
         // Reached only when signed in, see `resolve`.
         let cookie = cookie.ok_or_else(|| Miss::Failed("no sign in".into()))?;
@@ -224,11 +263,34 @@ fn ask(
             .set("X-Goog-AuthUser", "0");
     }
     match request.send_json(body) {
-        Ok(response) => response
-            .into_json()
-            .map_err(|e| Miss::Failed(format!("bad response: {e}"))),
+        Ok(response) => {
+            let reply: Value = response
+                .into_json()
+                .map_err(|e| Miss::Failed(format!("bad response: {e}")))?;
+            if visitor.is_none() {
+                if let Some(given) = reply["responseContext"]["visitorData"].as_str() {
+                    keep_visitor(&pct_decode(given));
+                }
+            }
+            Ok(reply)
+        }
         Err(ureq::Error::Status(code, _)) => Err(Miss::Failed(format!("player answered HTTP {code}"))),
         Err(e) => Err(Miss::Network(e.to_string())),
+    }
+}
+
+static VISITOR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// The visitor id YouTube gave this run, if it has given one yet.
+fn visitor() -> Option<String> {
+    VISITOR.lock().ok()?.clone()
+}
+
+fn keep_visitor(id: &str) {
+    if let Ok(mut kept) = VISITOR.lock() {
+        if kept.is_none() && !id.is_empty() {
+            *kept = Some(id.to_string());
+        }
     }
 }
 
@@ -539,6 +601,10 @@ mod tests {
     #[ignore]
     fn resolves_a_song() {
         let http = crate::innertube::agent(std::time::Duration::from_secs(20));
+        // First, with no visitor id yet: a song YouTube answered with
+        // "confirm you're not a bot" when asked signed out without one.
+        let stream = resolve(&http, None, "olf4IO9Dx4E").unwrap();
+        assert!(stream.duration > 180.0 && stream.duration < 200.0);
         let stream = resolve(&http, None, "dQw4w9WgXcQ").unwrap();
         eprintln!("{} {:?}", stream.url, stream.headers);
         assert!(stream.url.starts_with("https://"));
