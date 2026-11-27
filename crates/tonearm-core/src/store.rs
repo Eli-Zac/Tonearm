@@ -29,7 +29,7 @@ pub fn config_dir() -> Option<PathBuf> {
     }
 }
 
-/// Where Tonearm keeps downloads, caches and yt-dlp. See `config_dir`.
+/// Where Tonearm keeps downloads and caches. See `config_dir`.
 pub fn data_dir() -> Option<PathBuf> {
     match home() {
         Some(dir) => Some(dir.join("data")),

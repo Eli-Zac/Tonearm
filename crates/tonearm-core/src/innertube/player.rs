@@ -1,9 +1,8 @@
-//! Stream links straight from InnerTube's `player` endpoint, without
-//! yt-dlp.
+//! Stream links straight from InnerTube's `player` endpoint.
 //!
 //! We ask a short list of clients that need no proof-of-origin token, in
 //! order, and take the first that hands over a link that opens. Anything
-//! odd is a `Miss`, and the resolver then falls back to yt-dlp.
+//! odd is a `Miss`, and the song then cannot play.
 //!
 //! The visionOS client goes first. It states plain links, with neither a
 //! signature nor an `n` challenge to solve, and asks for no token. The
@@ -19,14 +18,14 @@ use super::challenge::{self, PlayerJs, Solved};
 use crate::resolver::Stream;
 use serde_json::{json, Value};
 
-/// Why a native resolve gave up. Every case falls back to yt-dlp; the
-/// kind is for logs and the debug command.
+/// Why a resolve gave up. The kind is for logs and the debug command, and
+/// a network failure is asked again on a fresh connection.
 #[derive(Debug)]
 pub enum Miss {
     /// The network failed under a request. Worth asking again on a fresh
     /// connection, as a change of network leaves kept ones dead.
     Network(String),
-    /// The video wants something only yt-dlp can do: a PO token, SABR
+    /// The video wants something Tonearm cannot do: a PO token, SABR
     /// only formats, sign in for age, and so on.
     Unsupported(String),
     /// Network trouble, an odd reply, a challenge that would not solve.
@@ -234,7 +233,7 @@ fn ask(
 }
 
 /// A tiny ranged GET, so a link that will not open sends us on to the next
-/// client or yt-dlp now instead of failing at playback.
+/// client now instead of failing at playback.
 fn verify(http: &ureq::Agent, url: &str, headers: &[(String, String)]) -> Result<(), Miss> {
     let mut request = http.get(url).set("Range", "bytes=0-1023");
     for (key, value) in headers {
@@ -293,7 +292,7 @@ fn build(
 }
 
 /// M4A only, as the audio engine decodes AAC and not Opus: itag 140, then
-/// the best other AAC in an MP4, the order resolver.rs asks yt-dlp for.
+/// the best other AAC in an MP4.
 fn pick(response: &Value) -> Result<Pick, Miss> {
     let status = &response["playabilityStatus"];
     match status["status"].as_str() {

@@ -1,6 +1,6 @@
 //! Releases on GitHub: the latest one of a repository, a file from it
 //! checked against the SHA-256 GitHub reports, and comparing versions.
-//! Tonearm's own updates (`update`) and yt-dlp's (`resolver`) both use it.
+//! Tonearm's own updates use it, on the computer and the phone.
 
 use sha2::{Digest, Sha256};
 use std::io::Read;

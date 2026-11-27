@@ -4,7 +4,7 @@
 //!
 //! - `cache` holds every track that played to the end of its download, and
 //!   the next track in the queue, fetched ahead. Playing a track again starts
-//!   at once and needs no yt-dlp or network. The oldest played go first once
+//!   at once and needs no stream lookup or network. The oldest played go first once
 //!   the cache passes its size limit.
 //! - `downloads` holds the songs you chose to keep. They are never evicted,
 //!   carry their details and cover in `index.json`, and play with no
@@ -601,7 +601,7 @@ pub fn remove(video_id: &str) {
 }
 
 /// One download at a time, in the order asked, so a whole album does not
-/// start forty yt-dlp processes.
+/// start forty stream lookups and downloads at once.
 fn workers() -> &'static Mutex<crate::pool::Pool> {
     static POOL: OnceLock<Mutex<crate::pool::Pool>> = OnceLock::new();
     POOL.get_or_init(|| Mutex::new(crate::pool::Pool::new("save", 1)))

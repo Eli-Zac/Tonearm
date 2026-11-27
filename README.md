@@ -101,13 +101,14 @@ account can read it, and sends it only to music.youtube.com.
 
 ## How playback works
 
-YouTube has no public API that hands out audio streams, and the ways
-around that change often. Tonearm hands the job to
-[yt-dlp](https://github.com/yt-dlp/yt-dlp), which keeps up with those
-changes. On first play it downloads `yt-dlp.exe` from yt-dlp's GitHub
-releases into `%LOCALAPPDATA%\tonearm`, checks it against GitHub's SHA-256
-digest, and lets it update itself once per start. Some YouTube formats need
-a JavaScript runtime, so yt-dlp uses Deno, Node or Bun if one is installed.
+YouTube has no public API that hands out audio streams. Tonearm asks
+YouTube's own InnerTube `player` endpoint for a stream link, the way
+YouTube's apps do, and picks the AAC audio. Some links come locked with a
+challenge from YouTube's player script, so Tonearm runs that script in an
+embedded QuickJS with [yt-dlp's ejs solver](https://github.com/yt-dlp/ejs).
+Nothing else is downloaded or installed, and the computer and the phone
+work the same way. YouTube changes how this works every so often, and
+the clients Tonearm asks as follow the ones yt-dlp uses.
 
 The resolver lives behind one trait in `crates/tonearm-core/src/resolver.rs`. Set
 `TONEARM_TEST_STREAM` to any M4A URL to test the audio path without it.
@@ -183,13 +184,13 @@ account nothing is sent to it.
 
 * Settings, the sign in cookie and service keys are in
   `%APPDATA%\tonearm`, all encrypted with DPAPI.
-* Offline songs, the song cache, yt-dlp and Canvas clips are in
+* Offline songs, the song cache and Canvas clips are in
   `%LOCALAPPDATA%\tonearm`.
 * Listening history is kept encrypted on this computer, only to put what
   you play first in search. Settings can clear it.
 
 Tonearm talks to YouTube Music, the lyric services above, GitHub (for
-updates and yt-dlp), and Discord, Last.fm and Spotify only when you connect
+updates), and Discord, Last.fm and Spotify only when you connect
 them. Uninstalling keeps your data, in case you come back. Delete the two
 folders above to remove it.
 
@@ -260,7 +261,7 @@ app at the top and the phone app in `android/` (through
 | `crates/tonearm-core/src/innertube/` | YouTube Music API client and parsers |
 | `crates/tonearm-core/src/audio.rs`, `decode.rs` | Streaming download, decode and output |
 | `crates/tonearm-core/src/mix.rs`, `transition.rs`, `analysis.rs` | Mixes, and the tempo and key analyzer |
-| `crates/tonearm-core/src/resolver.rs` | Turns a song into an audio stream, with yt-dlp |
+| `crates/tonearm-core/src/resolver.rs` | Turns a song into an audio stream link |
 | `crates/tonearm-core/src/lyrics.rs` | Lyric services |
 | `crates/tonearm-core/src/services.rs`, `spotify.rs`, `syncing.rs` | Discord, Last.fm, Spotify and playlist sync |
 | `crates/tonearm-core/src/offline.rs` | Offline songs and the song cache |

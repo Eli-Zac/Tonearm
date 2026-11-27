@@ -52,7 +52,7 @@ const FAST_TICK: Duration = Duration::from_millis(33);
 /// How often the playing bars move. Each move redraws the whole window,
 /// so they step like a level meter instead of running at the screen's rate.
 const BEAT_TICK: Duration = Duration::from_millis(66);
-/// Links got ahead of a click at once. More would only crowd yt-dlp.
+/// Links got ahead of a click at once. More would only crowd YouTube.
 const WARM_AT_ONCE: usize = 2;
 /// How often the playback session is saved while a song plays, so a
 /// crash loses little of your place.
@@ -271,7 +271,7 @@ struct FadeNext {
     /// Its queue position and video id, to notice the queue changing.
     index: usize,
     video_id: String,
-    /// Its length as yt-dlp gave it, in seconds. Zero when unknown.
+    /// Its length as the stream lookup gave it, in seconds. Zero when unknown.
     duration: f32,
     /// With crossfade off: the engine was told to start it the moment
     /// the playing song ends.
@@ -2964,7 +2964,7 @@ impl App {
             self.extend_with_radio();
         }
         let video_id = item.video_id.unwrap_or_default();
-        // A downloaded or cached copy needs no yt-dlp and no network.
+        // A downloaded or cached copy needs no stream lookup and no network.
         if let Some(path) = offline::local_file(&video_id) {
             self.ui.set_buffering(true);
             self.load_audio(audio::Input::File(path), generation, resume);
@@ -4018,7 +4018,7 @@ impl App {
 
     /// Fetches the next track into the offline cache in the background, so
     /// skipping to it, or reaching it, starts at once. With the cache off,
-    /// it still resolves the stream link to skip the yt-dlp wait.
+    /// it still resolves the stream link to skip the lookup's wait.
     fn prefetch_next(self: &Rc<Self>) {
         let (next, after) = {
             let player = self.player.borrow();
@@ -4720,7 +4720,7 @@ impl App {
         let mut time = 0u64;
         if status.generation.load(Ordering::SeqCst) == generation {
             // A saved file states its own length, which beats the guess
-            // from the subtitle when there was no yt-dlp to ask.
+            // from the subtitle when the lookup gave no length.
             let stated = status.duration_ms.load(Ordering::SeqCst) as f32 / 1000.0;
             if stated > 0.0 && (stated - duration).abs() > 1.0 {
                 self.player.borrow_mut().duration = stated;
@@ -5329,7 +5329,7 @@ impl App {
             return;
         };
         self.client.set_cookie(Some(&cookie));
-        // Signed in, yt-dlp skips the wait YouTube puts on free accounts.
+        // Signed in, the lookup can also ask as YouTube Music's web client.
         if let Some(resolver) = &self.resolver {
             resolver.set_cookie(Some(cookie.clone()));
         }
@@ -5928,7 +5928,6 @@ fn probe(args: &[String]) {
                 Ok(stream) => {
                     println!("resolved in {:.2}s", started.elapsed().as_secs_f32());
                     println!("duration {}", stream.duration);
-                    println!("via {}", resolver::last_path());
                     println!("headers {:?}", stream.headers);
                     println!("url {}", stream.url);
                     let mut request = innertube::agent(Duration::from_secs(15))
