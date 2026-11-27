@@ -89,8 +89,10 @@ fun NowPlayingScreen(
     // A panel's button shows it, and pressed again goes back to the cover.
     val toggle = { p: Panel -> onPanel(if (panel == p) Panel.Cover else p) }
     // The song from the core's queue, by id: its cover and linked artists.
-    // The session's details can still be the last song's for a moment.
-    val playing = remember(now.id) { core.nowPlaying()?.takeIf { it.videoId == now.id } }
+    // The session's details can still be the last song's for a moment, and
+    // on a skip the session moves before the core does: looked up again as
+    // the core's queue moves on, so the song is found once it has.
+    val playing = remember(now.id, now.queueVersion) { core.nowPlaying()?.takeIf { it.videoId == now.id } }
     val cover = playing?.cover?.ifEmpty { null } ?: now.meta?.artworkUri?.toString()
     // Each song's lyrics are looked for as it comes on, so they are ready
     // when the button is pressed. The core keeps those found.
@@ -275,7 +277,7 @@ fun NowPlayingScreen(
                     // One line, scrolling when too long, as the desktop's.
                     Box(Modifier.fillMaxWidth().height(30.dp), contentAlignment = Alignment.CenterStart) {
                         if (songTitle.isEmpty()) {
-                            TextSkeleton(width = 0.6f, height = 24.dp)
+                            TextSkeleton(width = 0.6f, height = 24.dp, appearAfterMs = SONG_SKELETON_WAIT)
                         } else {
                             Marquee(
                                 songTitle,
@@ -289,7 +291,7 @@ fun NowPlayingScreen(
                     Spacer(Modifier.height(4.dp))
                     Box(Modifier.fillMaxWidth().height(24.dp), contentAlignment = Alignment.CenterStart) {
                         if (songArtist.isEmpty()) {
-                            TextSkeleton(width = 0.35f, height = 18.dp)
+                            TextSkeleton(width = 0.35f, height = 18.dp, appearAfterMs = SONG_SKELETON_WAIT)
                         } else {
                             ArtistLine(playing?.artists.orEmpty(), songArtist, onOpenArtist)
                         }
@@ -347,12 +349,17 @@ fun NowPlayingScreen(
     }
 }
 
+/** How long a song's skeletons wait before showing, in milliseconds. A song
+ *  skipped to usually has its details and lyrics at once, from the cache;
+ *  a bone that came up for those few frames would only flicker. */
+internal const val SONG_SKELETON_WAIT = 300
+
 /** Two faint lines, gently pulsing, where the lyrics preview will be. */
 @Composable
 private fun LyricsSkeleton(height: androidx.compose.ui.unit.Dp) {
     Column(Modifier.fillMaxWidth().height(height), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        TextSkeleton(0.72f, 18.dp)
-        TextSkeleton(0.46f, 18.dp)
+        TextSkeleton(0.72f, 18.dp, SONG_SKELETON_WAIT)
+        TextSkeleton(0.46f, 18.dp, SONG_SKELETON_WAIT)
     }
 }
 
@@ -369,8 +376,8 @@ private fun CloseMark() {
 
 /** A bone, `width` of the room across, where text will be. */
 @Composable
-internal fun TextSkeleton(width: Float, height: androidx.compose.ui.unit.Dp) {
-    Bone(Modifier.fillMaxWidth(width).height(height))
+internal fun TextSkeleton(width: Float, height: androidx.compose.ui.unit.Dp, appearAfterMs: Int = 0) {
+    Bone(Modifier.fillMaxWidth(width).height(height), appearAfterMs = appearAfterMs)
 }
 
 /** The song's artists, each name opening their page where YouTube Music

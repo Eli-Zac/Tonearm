@@ -122,7 +122,10 @@ fun rememberNowPlaying(controller: MediaController?, core: uniffi.tonearm_androi
             val playback = core.playback()
             now = if (c.mediaItemCount == 0) null else NowPlaying(
                 id = c.currentMediaItem?.mediaId,
-                meta = c.mediaMetadata,
+                // The item's own details, not the player's: on a skip the
+                // controller moves to the next item at once, while its
+                // metadata stays the last song's until the session answers.
+                meta = c.currentMediaItem?.mediaMetadata ?: c.mediaMetadata,
                 playing = c.playWhenReady && c.playbackState != Player.STATE_ENDED,
                 loading = c.playbackState == Player.STATE_BUFFERING,
                 position = c.currentPosition,

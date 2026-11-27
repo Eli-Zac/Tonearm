@@ -184,7 +184,7 @@ private fun LyricsSkeletonLines(modifier: Modifier) {
         Column(Modifier.fillMaxWidth().padding(top = maxHeight * 0.2f)) {
             listOf(0.82f, 0.64f, 0.9f, 0.56f, 0.74f, 0.86f, 0.5f, 0.7f).forEach { width ->
                 Box(Modifier.padding(vertical = 9.dp + 4.dp)) {
-                    TextSkeleton(width, 26.dp)
+                    TextSkeleton(width, 26.dp, SONG_SKELETON_WAIT)
                 }
             }
         }

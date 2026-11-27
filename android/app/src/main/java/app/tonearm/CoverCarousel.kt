@@ -178,8 +178,11 @@ fun CoverCarousel(
             leaving = null
         }
     }
-    // The same song's cover can arrive a moment after the song does.
+    // The same song's cover can arrive a moment after the song does. Kept in
+    // `current` as well, so the cover that slides away on the next skip is
+    // the one on show, not the one the song first came with.
     val live = if (song != null && song.id == current?.id) song else current
+    SideEffect { if (live !== current) current = live }
 
     // The songs either side, looked up off the main thread once each song
     // has settled in, so their covers are loaded (off the screen's edges)

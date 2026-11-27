@@ -1,7 +1,11 @@
 package app.tonearm
 
 import android.os.SystemClock
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.graphics.graphicsLayer
+import kotlinx.coroutines.delay
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
@@ -43,9 +47,20 @@ private const val SWEEP_MS = 1600L
  * The desktop's band is 800px wide and travels 3200px every 1.6 s over a
  * window about 1400px across; here the same proportions of the phone's
  * width. It moves in the draw phase only, so it costs no recomposition.
+ *
+ * With `appearAfterMs`, it shows only once that long has gone by, fading in:
+ * for what is often found at once, as a song's details and lyrics from the
+ * cache, so a skeleton never flashes up for a frame or two before them.
  */
 @Composable
-fun Bone(modifier: Modifier, shape: Shape = RoundedCornerShape(6.dp)) {
+fun Bone(modifier: Modifier, shape: Shape = RoundedCornerShape(6.dp), appearAfterMs: Int = 0) {
+    val shown = remember { Animatable(if (appearAfterMs > 0) 0f else 1f) }
+    if (appearAfterMs > 0) {
+        LaunchedEffect(Unit) {
+            delay(appearAfterMs.toLong())
+            shown.animateTo(1f, tween(200))
+        }
+    }
     // Only to redraw every frame; the place comes from the clock, so bones
     // that appeared at different times still share one wave.
     val tick by rememberInfiniteTransition(label = "bone").animateFloat(
@@ -55,6 +70,7 @@ fun Bone(modifier: Modifier, shape: Shape = RoundedCornerShape(6.dp)) {
     var left by remember { mutableFloatStateOf(0f) }
     Box(
         modifier
+            .graphicsLayer { alpha = shown.value }
             .clip(shape)
             .onGloballyPositioned { left = it.positionInWindow().x }
             .drawBehind {
