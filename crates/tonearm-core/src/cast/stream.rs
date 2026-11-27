@@ -4,9 +4,10 @@
 //! The engine hands its mixer to a `Pipe` in place of the sound card. The
 //! device pulls the stream, and we keep only `LEAD` ahead of what it has
 //! played, so a skip or a seek is heard within about that long (a pause
-//! goes to the device itself and is heard at once). How far
-//! the device has got comes from its media status, with the time since it
-//! connected as a floor, so a device that reports oddly never stalls.
+//! goes to the device itself and is heard at once). How far the device
+//! has got comes from its media status. A device whose report stops moving
+//! is taken to play on in real time from where it last moved, so one that
+//! reports oddly never stalls the stream.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{IpAddr, TcpListener, TcpStream};
@@ -22,8 +23,8 @@ const LEAD: f64 = 0.75;
 /// The lead until the device first plays. It won't start on less than about
 /// this much: with a shorter one it took 4 s longer to begin.
 const START_LEAD: f64 = 2.0;
-/// The most a device's own report may trail the time since it connected
-/// before that time is trusted instead.
+/// How long the stream plays on, not paused, with the device's report
+/// standing still before the device is taken to be playing all the same.
 /// It also caps how far ahead of a device that reports oddly the stream can
 /// run, and so how long a skip or pause waits behind what is already sent.
 const SLACK: f64 = 3.0;
@@ -43,6 +44,15 @@ struct Heard {
     seconds: f64,
     at: Instant,
     playing: bool,
+    /// The last report that moved on from the one before, and `Clock::open`
+    /// at that moment. The floor in `played` counts from here, not from
+    /// when the stream connected: a cast runs one stream across every
+    /// song, and a device that stalls now and then really does fall behind
+    /// the time since connecting. Counted from there, those stalls added
+    /// up until the floor won for good, and the time and lyrics shown ran
+    /// ahead of the device for the rest of the cast.
+    moved: f64,
+    moved_open: f64,
 }
 
 #[derive(Default)]
@@ -66,7 +76,8 @@ impl Clock {
             Some(h) => {
                 let reported =
                     h.seconds + if h.playing { h.at.elapsed().as_secs_f64() } else { 0.0 };
-                reported.max(self.open - SLACK).max(0.0)
+                let floor = h.moved + (self.open - h.moved_open) - SLACK;
+                reported.max(floor).max(0.0)
             }
         }
     }
@@ -158,10 +169,17 @@ impl Pipe {
             self.started.store(true, Ordering::SeqCst);
         }
         let mut clock = self.clock.lock().unwrap();
+        let seconds = seconds - clock.base;
+        let (moved, moved_open) = match &clock.heard {
+            Some(h) if (seconds - h.seconds).abs() < 0.01 => (h.moved, h.moved_open),
+            _ => (seconds, clock.open),
+        };
         clock.heard = Some(Heard {
-            seconds: seconds - clock.base,
+            seconds,
             at: Instant::now(),
             playing,
+            moved,
+            moved_open,
         });
     }
 
@@ -375,6 +393,29 @@ fn wav_header(rate: u32) -> Vec<u8> {
     h.extend_from_slice(b"data");
     h.extend_from_slice(&u32::MAX.to_le_bytes());
     h
+}
+
+/// A device that stalled for a while long ago, and has played steadily
+/// since, is trusted where it says it is.
+#[test]
+fn old_stalls_do_not_pile_up() {
+    let mut clock = Clock::default();
+    // Ten seconds of stalls early on: 100 s connected, 90 s played.
+    clock.open = 100.0;
+    clock.heard = Some(Heard {
+        seconds: 90.0,
+        at: Instant::now(),
+        playing: true,
+        moved: 89.0,
+        moved_open: 99.0,
+    });
+    assert!((clock.played() - 90.0).abs() < 0.1, "{}", clock.played());
+    // A report that has stood still for 5 s of stream: it plays all the same.
+    clock.open = 105.0;
+    clock.heard.as_mut().unwrap().playing = false;
+    clock.heard.as_mut().unwrap().moved = 90.0;
+    clock.heard.as_mut().unwrap().moved_open = 100.0;
+    assert!((clock.played() - 92.0).abs() < 0.1, "{}", clock.played());
 }
 
 /// A test feed: a tone that ends after `left` samples.

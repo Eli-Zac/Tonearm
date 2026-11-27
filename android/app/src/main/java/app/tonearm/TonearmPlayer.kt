@@ -91,6 +91,7 @@ class TonearmPlayer(private val context: Context, private val core: Tonearm) :
         noisy(now.state == PlayState.PLAYING)
         // The phone's volume keys move the device's volume while casting.
         val on = core.casting()
+        CarLag.casting = on
         val level = if (on) core.castState().volume else castLevel
         if (on != castOn || (on && volumeStep(level) != volumeStep(castLevel))) {
             castOn = on

@@ -27,6 +27,11 @@ object CarLag {
         connected.remove(uid)
     }
 
+    /** Whether the music plays on a Cast device. The car then plays none of
+     *  it, and the core already takes the device's own delay off the time. */
+    @Volatile
+    var casting = false
+
     /** The delay to take off the song's time shown on the phone, 0 outside the car. */
-    fun ms(): Long = if (connected.isEmpty()) 0 else LAG_MS
+    fun ms(): Long = if (connected.isEmpty() || casting) 0 else LAG_MS
 }
