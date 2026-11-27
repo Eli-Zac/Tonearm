@@ -155,12 +155,12 @@ fn apply_endpoint(ep: &Value, item: &mut Item) {
         item.params = string(w, "params");
         item.kind = Kind::Playlist;
     } else if let Some(b) = ep.get("browseEndpoint") {
-        item.browse_id = string(b, "browseId");
+        item.browse_id = string(b, "browseId").map(|id| super::model::artist_page(&id));
         item.params = string(b, "params");
         let page_type = find(b, "pageType").and_then(Value::as_str).unwrap_or("");
         item.kind = match page_type {
             "MUSIC_PAGE_TYPE_ALBUM" | "MUSIC_PAGE_TYPE_AUDIOBOOK" => Kind::Album,
-            "MUSIC_PAGE_TYPE_ARTIST" | "MUSIC_PAGE_TYPE_USER_CHANNEL" => Kind::Artist,
+            "MUSIC_PAGE_TYPE_ARTIST" | "MUSIC_PAGE_TYPE_USER_CHANNEL" | "MUSIC_PAGE_TYPE_LIBRARY_ARTIST" => Kind::Artist,
             "MUSIC_PAGE_TYPE_PLAYLIST" => Kind::Playlist,
             _ => Kind::Other,
         };
@@ -802,6 +802,13 @@ pub fn account(v: &Value) -> Option<Account> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_library_artist_opens_their_artist_page() {
+        assert_eq!(super::super::model::artist_page("MPLAUCabc"), "UCabc");
+        assert_eq!(super::super::model::artist_page("MPREb_1"), "MPREb_1");
+        assert_eq!(super::super::model::artist_page("MPLAXYZ"), "MPLAXYZ");
+    }
+
     use super::*;
     use serde_json::json;
 

@@ -224,7 +224,7 @@ fun DownloadsScreen(core: Core, actions: Actions, onBack: () -> Unit) {
                 }
             }
         }
-        StatusBar(listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 0)
+        StatusBar(listState.canScrollBackward)
         Box(
             Modifier.statusBarsPadding().padding(8.dp).size(40.dp).clip(RoundedCornerShape(20.dp))
                 .background(Color(0x9908080A)).clickable(onClick = onBack),

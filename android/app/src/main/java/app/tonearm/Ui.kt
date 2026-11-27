@@ -1007,7 +1007,10 @@ private fun PageViewBody(
                 }
             }
             LaunchedEffect(state) {
-                snapshotFlow { state.firstVisibleItemIndex > 0 || state.firstVisibleItemScrollOffset > 0 }
+                // Whether it can go back up: at the top it can't, even when
+                // the first item is the empty `top` of a page with a header,
+                // which the list counts as scrolled past.
+                snapshotFlow { state.canScrollBackward }
                     .collect { onScrolled(it) }
             }
             LazyColumn(state = state, contentPadding = PaddingValues(bottom = 24.dp)) {

@@ -28,6 +28,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
 /** One sweep across the screen and out the other side, as the desktop's. */
@@ -114,23 +115,50 @@ fun PageSkeletonView(kind: PageSkeleton, modifier: Modifier = Modifier) {
                 repeat(10) { RowSkeleton(it + 2) }
             }
             PageSkeleton.Detail, PageSkeleton.Artist -> {
-                // As PageHeader: the art across the top, from the edge, the
-                // byline and the buttons under it, then the songs.
+                // Laid out as PageHeader, piece for piece, so nothing moves
+                // when the page comes: the art across the top from the edge
+                // (the title is drawn over it), the lines under it, then the
+                // row of buttons with the play disc at the right end.
+                val artist = kind == PageSkeleton.Artist
                 Bone(
-                    Modifier.fillMaxWidth().aspectRatio(headerRatio(kind == PageSkeleton.Artist)),
+                    Modifier.fillMaxWidth().aspectRatio(headerRatio(artist)),
                     androidx.compose.ui.graphics.RectangleShape,
                 )
-                Bone(Modifier.padding(start = 16.dp, top = 10.dp).width(110.dp).height(14.dp))
-                Bone(Modifier.padding(start = 16.dp, top = 8.dp).width(170.dp).height(12.dp))
+                Column(Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
+                    // An album's artist (15sp), then its label and meta (13sp);
+                    // an artist has the label and meta alone.
+                    if (!artist) TextBone(width = 120.dp, line = 19.dp)
+                    TextBone(width = if (artist) 230.dp else 170.dp, line = 17.dp, modifier = Modifier.padding(top = 2.dp))
+                }
                 Row(
-                    Modifier.padding(start = 16.dp, top = 8.dp, bottom = 6.dp),
+                    Modifier.fillMaxWidth().padding(start = 4.dp, end = 16.dp, top = 8.dp, bottom = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
-                    Bone(Modifier.size(56.dp), CircleShape)
-                    repeat(if (kind == PageSkeleton.Detail) 3 else 2) {
-                        Bone(Modifier.size(28.dp), RoundedCornerShape(8.dp))
+                    if (artist) {
+                        // Follow, then the page's menu.
+                        Bone(Modifier.padding(start = 12.dp, end = 4.dp).size(width = 96.dp, height = 36.dp), RoundedCornerShape(18.dp))
+                        IconBone()
+                    } else {
+                        // Save, download, then the page's menu.
+                        repeat(3) { IconBone() }
                     }
+                    Spacer(Modifier.weight(1f))
+                    if (!artist) IconBone()
+                    Spacer(Modifier.width(8.dp))
+                    Bone(Modifier.size(56.dp), CircleShape)
+                }
+                if (artist) {
+                    // About the artist: three lines.
+                    Column(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+                        TextBone(width = 340.dp, line = 17.dp)
+                        TextBone(width = 320.dp, line = 17.dp)
+                        TextBone(width = 210.dp, line = 17.dp)
+                    }
+                    // Their "Popular" shelf's title, then its numbered songs.
+                    Bone(
+                        Modifier.padding(start = 16.dp, top = 22.dp, bottom = 10.dp).width(90.dp).height(20.dp),
+                        RoundedCornerShape(7.dp),
+                    )
                 }
                 repeat(8) { RowSkeleton(it + 2) }
             }
@@ -194,3 +222,20 @@ fun RowSkeleton(seed: Int) {
 // The desktop's #ffffff0e block and #ffffff16 band.
 private val BASE = Color(0x0EFFFFFF)
 private val LIGHT = Color(0x16FFFFFF)
+
+/** A line of text's bone: as tall as the letters, in a box as tall as the
+ *  line, so the lines under it sit where the text's will. */
+@Composable
+private fun TextBone(width: Dp, line: Dp, modifier: Modifier = Modifier) {
+    Box(modifier.height(line), contentAlignment = Alignment.CenterStart) {
+        Bone(Modifier.widthIn(max = width).fillMaxWidth().height(line * 0.62f))
+    }
+}
+
+/** A HeroIcon's bone: its glyph's size, in its 48dp place. */
+@Composable
+private fun IconBone() {
+    Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+        Bone(Modifier.size(26.dp), CircleShape)
+    }
+}

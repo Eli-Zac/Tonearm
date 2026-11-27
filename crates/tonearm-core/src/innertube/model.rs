@@ -127,7 +127,7 @@ impl Item {
             duration: s("duration").unwrap_or_default(),
             video_id: s("video"),
             playlist_id: s("playlist"),
-            browse_id: s("browse"),
+            browse_id: s("browse").map(|id| artist_page(&id)),
             params: s("params"),
             artists: Item::artists_from_json(e.get("artist_links")),
             album: Item::album_from_json(e.get("album")),
@@ -253,4 +253,15 @@ pub struct Page {
     pub continuation: Option<String>,
     /// Only artist, album and playlist pages have one.
     pub header: Option<Header>,
+}
+
+/// The artist's own page for a link to them in the library. YouTube's
+/// library lists an artist as `MPLA` before their channel id, a page that
+/// is their artist page all the same, which then offered "Go to artist"
+/// to the page it already was. Other ids are as they come.
+pub fn artist_page(id: &str) -> String {
+    match id.strip_prefix("MPLA") {
+        Some(channel) if channel.starts_with("UC") => channel.to_string(),
+        _ => id.to_string(),
+    }
 }

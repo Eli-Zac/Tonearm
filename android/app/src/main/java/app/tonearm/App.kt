@@ -229,7 +229,9 @@ fun App(core: Core, controller: MediaController?) {
             val top = stacks.getValue(tab).lastOrNull()
             val inLibrary = if (top != null) isLibraryPage(top.id) else tab == Tab.Library
             // The page's own menu, from its dots: Open would go nowhere.
-            val onPage = top != null && item.videoId == null && item.browseId == top.id
+            val onPage = top != null && item.videoId == null &&
+                // An artist's page opened by its library id is the same page.
+                (item.browseId == top.id || "MPLA${item.browseId}" == top.id)
             menuItem = MenuRequest(item, inLibrary, onPage)
         }
         override val playing: String? get() = playingId
