@@ -37,25 +37,45 @@ const FEWEST_BEATS: usize = 8;
 
 static MODEL: &[u8] = include_bytes!("../../../assets/models/beat_this_q8.onnx");
 
-struct Loaded {
-    // Kept so the runtime outlives its session.
-    _environment: ort::environment::Environment,
-    session: Session,
+/// The runtime, set up once. None when it cannot be.
+fn environment() -> Option<&'static ort::environment::Environment> {
+    static ENVIRONMENT: OnceLock<Option<ort::environment::Environment>> = OnceLock::new();
+    ENVIRONMENT
+        .get_or_init(|| ort::init().with_name("tonearm").build().map_err(|e| eprintln!("beat model: {e}")).ok())
+        .as_ref()
 }
 
-fn session() -> Option<&'static Mutex<Loaded>> {
-    static SESSION: OnceLock<Option<Mutex<Loaded>>> = OnceLock::new();
-    SESSION
-        .get_or_init(|| {
-            let load = || -> Result<Loaded, ort::Error> {
-                let environment = ort::init().with_name("tonearm").build()?;
-                // Two threads: it runs in the background while songs play.
-                let session = Session::builder(&environment)?.with_intra_threads(2)?.commit_from_memory(MODEL)?;
-                Ok(Loaded { _environment: environment, session })
-            };
-            load().map_err(|e| eprintln!("beat model: {e}")).ok().map(Mutex::new)
-        })
-        .as_ref()
+/// The model, while songs are being analyzed. `release` drops it when the
+/// queue is empty: what the runtime holds for a run is hundreds of
+/// megabytes, and it would otherwise keep that until the app closes.
+static SESSION: Mutex<Option<Session>> = Mutex::new(None);
+/// Set once the model has failed to load, so it is not tried for every song.
+static BROKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn load() -> Option<Session> {
+    if BROKEN.load(std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    let build = || -> Result<Session, ort::Error> {
+        // Two threads: it runs in the background while songs play. Without
+        // the arena, what a run takes goes back when it ends instead of
+        // being kept for the next one. The memory plan stays: runs are a
+        // third slower without it.
+        Ok(Session::builder(environment().ok_or_else(|| ort::Error::new("no runtime"))?)?
+            .with_execution_providers([ort::ep::CPU::default().with_arena_allocator(false).build()])?
+            .with_intra_threads(2)?
+            .commit_from_memory(MODEL)?)
+    };
+    let session = build().map_err(|e| eprintln!("beat model: {e}")).ok();
+    if session.is_none() {
+        BROKEN.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    session
+}
+
+/// Lets go of the model and all it holds. It loads again when next needed.
+pub fn release() {
+    SESSION.lock().unwrap_or_else(|e| e.into_inner()).take();
 }
 
 // ------------------------------------------------------------ front end
@@ -168,7 +188,11 @@ fn spectrogram(samples: &[f32]) -> (Vec<f32>, usize) {
 
 /// The model's beat and downbeat logits for each frame.
 fn run(spec: &[f32], frames: usize, progress: &dyn Fn(f32)) -> Option<(Vec<f32>, Vec<f32>)> {
-    let mut loaded = session()?.lock().unwrap_or_else(|e| e.into_inner());
+    let mut slot = SESSION.lock().unwrap_or_else(|e| e.into_inner());
+    if slot.is_none() {
+        *slot = Some(load()?);
+    }
+    let session = slot.as_mut()?;
     let (mut beat, mut down) = (vec![0.0f32; frames], vec![0.0f32; frames]);
     let stride = CHUNK - 2 * BORDER;
     let mut start = 0;
@@ -179,7 +203,7 @@ fn run(spec: &[f32], frames: usize, progress: &dyn Fn(f32)) -> Option<(Vec<f32>,
         }
         let chunk = spec[start * BANDS..(start + length) * BANDS].to_vec();
         let input = Tensor::from_array(([1usize, length, BANDS], chunk)).map_err(|e| eprintln!("beat model: {e}")).ok()?;
-        let out = loaded.session.run(ort::inputs![input]).map_err(|e| eprintln!("beat model: {e}")).ok()?;
+        let out = session.run(ort::inputs![input]).map_err(|e| eprintln!("beat model: {e}")).ok()?;
         let (_, b) = out[0].try_extract_tensor::<f32>().map_err(|e| eprintln!("beat model: {e}")).ok()?;
         let (_, d) = out[1].try_extract_tensor::<f32>().map_err(|e| eprintln!("beat model: {e}")).ok()?;
         let keep_from = if start == 0 { 0 } else { BORDER };

@@ -423,13 +423,21 @@ fn worker() -> std::sync::MutexGuard<'static, Worker> {
                     }
                     // Not current any more before the app hears of it, so
                     // it finds the song done.
-                    {
+                    let idle = {
                         let mut done = worker();
                         done.current = None;
                         if failed {
                             done.failed.insert(video_id.clone());
                         }
+                        done.pending.is_empty()
+                    };
+                    // Nothing more to do for now: give back the model's memory.
+                    #[cfg(feature = "beat-model")]
+                    if idle {
+                        crate::beat_model::release();
                     }
+                    #[cfg(not(feature = "beat-model"))]
+                    let _ = idle;
                     EVENTS.emit(Event::Ready(video_id));
                 })
                 .expect("cannot start the analysis thread");
