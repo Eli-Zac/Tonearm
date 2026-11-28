@@ -100,6 +100,10 @@ pub struct Playback {
     pub shuffle: bool,
     /// Smart shuffle: shuffle that also mixes in suggested songs.
     pub smart: bool,
+    /// "In Eli's Party" while this phone is a guest in a Party: the song,
+    /// queue and place are the host's, and the buttons go to the host.
+    /// Empty otherwise.
+    pub party: String,
 }
 
 /// In Kotlin, a `TonearmException` whose message says what went wrong.
@@ -480,6 +484,10 @@ impl Tonearm {
         };
         let id = first.video_id.clone();
         self.set_queue(vec![first], 0)?;
+        // A guest's song went to the Party; its radio is the host's to find.
+        if self.party_remote_view().is_some() {
+            return Ok(());
+        }
         // The radio comes after the song has started.
         let (items, _) = self.client.queue(Some(&id), None)?;
         let more: Vec<Song> = items.iter().filter_map(song).filter(|s| s.video_id != id).collect();
@@ -535,6 +543,13 @@ impl Tonearm {
         index: u32,
         playlist_id: Option<String>,
     ) -> Result<(), TonearmError> {
+        // A guest's pick plays in the Party, or joins its queue when the
+        // host only lets others add songs. Their own queue stays as it is.
+        if let Some(song) = songs.get(index as usize) {
+            if self.party_guest_play(song) {
+                return Ok(());
+            }
+        }
         self.preview_mix.lock().unwrap().take();
         let mixed = playlist_id
             .as_ref()
@@ -552,15 +567,24 @@ impl Tonearm {
 
     /// Plays the song at `index` in the queue.
     pub fn skip_to(&self, index: u32) -> Result<(), TonearmError> {
+        if self.party_remote_skip(index as usize) {
+            return Ok(());
+        }
         self.step(Step::Play(index as usize))
     }
 
     pub fn next(&self) -> Result<(), TonearmError> {
+        if self.party_remote("next", serde_json::json!({})) {
+            return Ok(());
+        }
         let step = self.queue.lock().unwrap().next();
         self.step(step)
     }
 
     pub fn previous(&self) -> Result<(), TonearmError> {
+        if self.party_remote("previous", serde_json::json!({})) {
+            return Ok(());
+        }
         let position = match self.waiting() {
             Some((_, ms)) => ms,
             None => self.audio.status.position_ms.load(Ordering::SeqCst),
@@ -572,6 +596,9 @@ impl Tonearm {
     /// Moves the song at `from` in the queue to `to`, as a row dragged in
     /// the queue view. The song playing carries on.
     pub fn move_in_queue(&self, from: u32, to: u32) {
+        if self.party_remote_move(from as usize, to as usize) {
+            return;
+        }
         self.queue.lock().unwrap().move_item(from as usize, to as usize);
         self.changed();
     }
@@ -715,18 +742,29 @@ impl Tonearm {
         Ok(self.client.add_to_playlist(&playlist_id, &video_id)?)
     }
 
+    /// The queue, or for a guest the Party's: the host's song, then what
+    /// plays next there.
     pub fn queue(&self) -> Vec<Song> {
+        if let Some(remote) = self.party_remote_view() {
+            return remote.songs;
+        }
         self.queue.lock().unwrap().items().to_vec()
     }
 
-    /// The song playing, or the one the queue is on.
+    /// The song playing, or the one the queue is on. A guest's is the host's.
     pub fn now_playing(&self) -> Option<Song> {
-        self.queue.lock().unwrap().current().cloned()
+        if let Some(remote) = self.party_remote_view() {
+            return remote.songs.into_iter().next();
+        }
+        self.current_song()
     }
 
     /// Shuffle on mixes the songs after the one playing; off puts the
     /// queue back in its order.
     pub fn set_shuffle(&self, on: bool) {
+        if self.party_remote_view().is_some() {
+            return;
+        }
         if !on {
             self.take_out_suggestions();
         }
@@ -735,6 +773,9 @@ impl Tonearm {
     }
 
     pub fn set_repeat(&self, mode: RepeatMode) {
+        if self.party_remote_view().is_some() {
+            return;
+        }
         self.queue.lock().unwrap().repeat = match mode {
             RepeatMode::Off => Repeat::Off,
             RepeatMode::All => Repeat::All,
@@ -743,9 +784,12 @@ impl Tonearm {
         self.changed();
     }
 
+    /// Pauses, or for a guest asks the host to.
     pub fn pause(&self) {
-        self.play_hold.set(false);
-        self.audio.pause();
+        if self.party_remote("pause", serde_json::json!({})) {
+            return;
+        }
+        self.pause_here();
     }
 
     /// The phone's audio outputs changed: a car, earbuds or headphones
@@ -755,6 +799,9 @@ impl Tonearm {
     }
 
     pub fn resume(self: Arc<Self>) {
+        if self.party_remote("play", serde_json::json!({})) {
+            return;
+        }
         // The song put back from last time opens now, at its place.
         if self.play_waiting() {
             return;
@@ -764,6 +811,9 @@ impl Tonearm {
     }
 
     pub fn seek(&self, seconds: f32) {
+        if self.party_remote("seek", serde_json::json!({ "ms": (seconds.max(0.0) * 1000.0) as u64 })) {
+            return;
+        }
         // A song put back and not opened yet moves its starting place.
         if let Some((song, _)) = self.waiting() {
             *self.resume_at.lock().unwrap() = Some((song.video_id, (seconds.max(0.0) * 1000.0) as u64));
@@ -792,7 +842,23 @@ impl Tonearm {
         }
     }
 
+    /// Where playback stands. A guest's is the host's song, as the host
+    /// last told it and run on since.
     pub fn playback(&self) -> Playback {
+        if let Some(remote) = self.party_remote_view() {
+            return Playback {
+                state: if remote.clock.playing { PlayState::Playing } else { PlayState::Paused },
+                position_ms: remote.clock.position_ms(),
+                duration_ms: remote.clock.duration_ms(),
+                error: String::new(),
+                index: 0,
+                version: self.version.load(Ordering::SeqCst),
+                repeat: RepeatMode::Off,
+                shuffle: false,
+                smart: false,
+                party: remote.line,
+            };
+        }
         let status = &self.audio.status;
         if let Some((song, ms)) = self.waiting().filter(|_| !self.loading.load(Ordering::SeqCst)) {
             let queue = self.queue.lock().unwrap();
@@ -805,7 +871,8 @@ impl Tonearm {
                 version: self.version.load(Ordering::SeqCst),
                 repeat: repeat_mode(queue.repeat),
                 shuffle: queue.shuffle(),
-            smart: queue.smart(),
+                smart: queue.smart(),
+                party: String::new(),
             };
         }
         let note = self.note.lock().unwrap().clone();
@@ -847,6 +914,7 @@ impl Tonearm {
             repeat: repeat_mode(queue.repeat),
             shuffle: queue.shuffle(),
             smart: queue.smart(),
+            party: String::new(),
         }
     }
 }
@@ -912,6 +980,17 @@ impl Tonearm {
 
     fn changed(&self) {
         self.version.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// The song this phone's own queue is on, whatever a Party shows.
+    pub(crate) fn current_song(&self) -> Option<Song> {
+        self.queue.lock().unwrap().current().cloned()
+    }
+
+    /// Pauses this phone's own player, never a Party's host.
+    pub(crate) fn pause_here(&self) {
+        self.play_hold.set(false);
+        self.audio.pause();
     }
 
     /// Says what came of adding a song to the queue, and starts it when the
@@ -1153,6 +1232,10 @@ impl Tonearm {
     /// The shuffle button, as the desktop's: off, then shuffle, then smart
     /// shuffle, which mixes in songs like the queue, then off again.
     pub fn cycle_shuffle(self: Arc<Self>) {
+        // A guest's shuffle would only stir their own queue, out of sight.
+        if self.party_remote_view().is_some() {
+            return;
+        }
         let (shuffle, smart) = {
             let queue = self.queue.lock().unwrap();
             (queue.shuffle(), queue.smart())
@@ -1173,7 +1256,7 @@ impl Tonearm {
     /// every few, as the desktop's smart shuffle does: the playing song's
     /// radio, less what the queue has already.
     fn mix_in_suggestions(&self) {
-        let Some(playing) = self.now_playing() else { return };
+        let Some(playing) = self.current_song() else { return };
         // A video's radio is videos. Seed it with the song instead.
         let seed = model::Item {
             video_id: Some(playing.video_id.clone()),

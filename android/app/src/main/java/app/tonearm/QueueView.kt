@@ -116,7 +116,7 @@ private fun PlayerStrip(now: NowPlaying, controller: MediaController, onOpen: ()
             Art(now.meta?.artworkUri?.toString(), 44.dp)
             Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
                 Title(now.meta?.title?.toString() ?: "", size = 15.sp)
-                Dim(now.error ?: now.meta?.artist?.toString() ?: "", 13.sp)
+                PlayerLine(now)
             }
             IconButton(if (now.playing) Icons.pause else Icons.play, size = 26) {
                 if (now.playing) controller.pause() else controller.play()
@@ -155,6 +155,8 @@ private fun QueuePane(core: Core, party: PartyUi, onMenu: (Song) -> Unit, modifi
     LaunchedEffect(core) { party.follow(core) }
     // The row picked up, among those up next; -1 when none.
     var from by remember { mutableIntStateOf(-1) }
+    // A guest whose host only lets others add songs: the list is to look at.
+    var locked by remember { mutableStateOf(core.party()?.let { !it.canControl } ?: false) }
     // Where the finger is down the list's view, and where on the row it
     // took hold.
     var fingerY by remember { mutableFloatStateOf(0f) }
@@ -183,6 +185,7 @@ private fun QueuePane(core: Core, party: PartyUi, onMenu: (Song) -> Unit, modifi
                 val party = withContext(Dispatchers.IO) { core.partyVersion() }
                 if (read.third != null || party != seenParty) {
                     seenParty = party
+                    locked = withContext(Dispatchers.IO) { core.party()?.let { !it.canControl } ?: false }
                     val list = songs
                     adders = withContext(Dispatchers.IO) {
                         list.mapNotNull { s -> core.partyAdder(s.videoId)?.let { s.videoId to it } }.toMap()
@@ -244,7 +247,8 @@ private fun QueuePane(core: Core, party: PartyUi, onMenu: (Song) -> Unit, modifi
                     // A press on a row's handle picks the row up. Caught here,
                     // ahead of the list, so the list doesn't scroll instead,
                     // and so the drag lives on when the row scrolls away.
-                    .pointerInput(index, upNext.size) {
+                    .pointerInput(index, upNext.size, locked) {
+                        if (locked) return@pointerInput
                         awaitEachGesture {
                             val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
                             if (down.position.x < size.width - handlePx) return@awaitEachGesture
@@ -313,7 +317,7 @@ private fun QueuePane(core: Core, party: PartyUi, onMenu: (Song) -> Unit, modifi
                     QueueRow(
                         song,
                         current = false,
-                        handle = true,
+                        handle = !locked,
                         adder = adders[song.videoId],
                         // The row picked up leaves a gap; its raised copy
                         // is drawn over the list.
@@ -324,8 +328,8 @@ private fun QueuePane(core: Core, party: PartyUi, onMenu: (Song) -> Unit, modifi
                             translationY = if (from < 0) 0f else shift
                             alpha = if (lifted) 0f else 1f
                         },
-                        onClick = {
-                            scope.launch(Dispatchers.IO) { runCatching { core.skipTo((index + 1 + i).toUInt()) } }
+                        onClick = if (locked) null else {
+                            { scope.launch(Dispatchers.IO) { runCatching { core.skipTo((index + 1 + i).toUInt()) } } }
                         },
                         onLongClick = { onMenu(song) },
                     )

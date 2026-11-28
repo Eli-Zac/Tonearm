@@ -2870,6 +2870,9 @@ component QueueRow inherits Rectangle {
     in property <length> shift;
     // Who in the Party added it; an empty letter for none.
     in property <PartyAdder> adder;
+    // A Party guest's row the host doesn't let them move or play: only the
+    // menu, for adding songs.
+    in property <bool> still;
     callback activated;
     callback menu(length, length);
     // How far the pointer has moved since the press, while dragging, and
@@ -2960,7 +2963,7 @@ component QueueRow inherits Rectangle {
     touch := TouchArea {
         // The raised copy only shows. The row in the list does the work.
         enabled: !root.raised;
-        mouse-cursor: root.dragging ? grabbing : pointer;
+        mouse-cursor: root.still ? default : root.dragging ? grabbing : pointer;
         pointer-event(event) => {
             if event.kind == PointerEventKind.down && event.button == PointerEventButton.right {
                 root.menu(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
@@ -2978,7 +2981,7 @@ component QueueRow inherits Rectangle {
             }
         }
         moved => {
-            if self.pressed && !root.dragging && abs(self.mouse-y - self.pressed-y) > 6px {
+            if self.pressed && !root.still && !root.dragging && abs(self.mouse-y - self.pressed-y) > 6px {
                 root.dragging = true;
             }
             if root.dragging {
@@ -5501,6 +5504,11 @@ export component AppWindow inherits Window {
     in property <[PartyMember]> party-members;
     // Guests may play, pause and skip, not only add songs.
     in property <bool> party-others;
+    // A guest whose host only lets others add songs: the queue is to look at.
+    in property <bool> party-locked;
+    // "In Eli's Party" under the song while a guest: the player bar is a
+    // remote for the host. Empty otherwise.
+    in property <string> party-line;
     in-out property <bool> party-invite-open;
     in-out property <bool> party-members-open;
     in-out property <bool> party-joining;
@@ -7835,6 +7843,7 @@ export component AppWindow inherits Window {
                 for entry[index] in root.up-next: QueueRow {
                     item: entry;
                     adder: root.up-next-adders[index];
+                    still: root.party-locked;
                     lifted: index == root.drag-from;
                     // Rows between where the dragged one was and where it is
                     // going step up or down by a row to open its gap.
@@ -7842,7 +7851,11 @@ export component AppWindow inherits Window {
                         : root.drag-to > root.drag-from && index > root.drag-from && index <= root.drag-to ? -60px
                         : root.drag-to < root.drag-from && index >= root.drag-to && index < root.drag-from ? 60px
                         : 0px;
-                    activated => { root.queue-activated(root.queue-index + 1 + index); }
+                    activated => {
+                        if !root.party-locked {
+                            root.queue-activated(root.queue-index + 1 + index);
+                        }
+                    }
                     menu(x, y) => { root.show-menu(1, root.queue-index + 1 + index, x, y); }
                     drag(offset, pressed-at) => {
                         root.drag-anchor = pressed-at - root.drag-scroll;
@@ -9303,7 +9316,14 @@ export component AppWindow inherits Window {
         // The heart sits right after the longer of the two lines, as far
         // as the side has room.
         property <length> info-room: max(60px, side - 78px - 52px);
-        property <length> info-width: min(info-room, max(song-title.preferred-width, artist-line.line-width));
+        property <length> info-width: min(info-room, max(song-title.preferred-width, root.party-line != "" ? party-measure.preferred-width : artist-line.line-width));
+        // Measures the Party line, which sits inside an `if` out of reach.
+        party-measure := Text {
+            visible: false;
+            text: root.party-line;
+            font-size: 12px;
+            font-weight: 600;
+        }
         song-title := Text {
             x: 78px;
             y: parent.height / 2 - 20px + 10px * (1 - root.name-in);
@@ -9343,7 +9363,7 @@ export component AppWindow inherits Window {
             opacity: 1 - root.name-out;
         }
         artist-line := RunLine {
-            opacity: root.name-in;
+            opacity: root.party-line != "" ? 0 : root.name-in;
             x: 78px;
             y: parent.height / 2 + 2px + 10px * (1 - root.name-in);
             font-size: 12px;
@@ -9353,6 +9373,19 @@ export component AppWindow inherits Window {
             runs: root.has-track ? root.track-runs : [];
             open(b) => { root.open-browse(b); }
             menu(x, y) => { root.show-menu(2, 0, x, y); }
+        }
+        if root.party-line != "": Text {
+            x: 78px;
+            y: parent.height / 2 + 2px + 10px * (1 - root.name-in);
+            width: info-width;
+            height: 16px;
+            text: root.party-line;
+            color: Theme.accent;
+            font-size: 12px;
+            font-weight: 600;
+            overflow: elide;
+            vertical-alignment: center;
+            opacity: root.name-in;
         }
         if root.has-track: IconButton {
             x: 78px + info-width + 8px;
@@ -9379,8 +9412,9 @@ export component AppWindow inherits Window {
             height: 32px;
             icon: root.smart-shuffle ? Icons.sparkle : Icons.shuffle;
             size: 16px;
-            tint: root.shuffle ? Theme.accent : Theme.dim;
-            dot: root.shuffle;
+            // A Party guest's queue is the host's: shuffle is out of reach.
+            tint: root.party-line != "" ? Theme.faint : root.shuffle ? Theme.accent : Theme.dim;
+            dot: root.shuffle && root.party-line == "";
             // Off, then shuffle, then smart shuffle: the tip names the next.
             tip: root.smart-shuffle ? "Turn off shuffle" : root.shuffle ? "Smart shuffle" : "Shuffle";
             clicked => { root.toggle-shuffle(); }
@@ -9434,8 +9468,8 @@ export component AppWindow inherits Window {
             height: 32px;
             icon: root.repeat == 2 ? Icons.repeat-one : Icons.repeat;
             size: 16px;
-            tint: root.repeat != 0 ? Theme.accent : Theme.dim;
-            dot: root.repeat != 0;
+            tint: root.party-line != "" ? Theme.faint : root.repeat != 0 ? Theme.accent : Theme.dim;
+            dot: root.repeat != 0 && root.party-line == "";
             tip: root.repeat == 0 ? "Repeat" : root.repeat == 1 ? "Repeat one" : "Turn off repeat";
             clicked => { root.cycle-repeat(); }
         }

@@ -273,7 +273,7 @@ impl Tonearm {
         if !shows {
             return;
         }
-        let Some(song) = self.now_playing() else { return };
+        let Some(song) = self.current_song() else { return };
         // The app finds lyrics only while its screen is open. With the
         // phone locked or the app in the background the cast asks for
         // them itself, once a song, so the device still shows them.

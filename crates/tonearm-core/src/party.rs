@@ -122,6 +122,122 @@ pub fn song_from(v: &Value) -> Option<crate::innertube::model::Item> {
     })
 }
 
+/// Milliseconds since 1970, as a host stamps when it measured its place in
+/// the song.
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// How often a host sends its state while nothing changes, so a guest who
+/// missed a message catches up.
+pub const STATE_EVERY: Duration = Duration::from_secs(15);
+
+/// Decides when a host sends its state: when anything other than the place
+/// in the song changed, when the place jumped (a seek), and every
+/// [`STATE_EVERY`] anyway. The place moving on as the song plays is no
+/// change: guests run their own clock between states.
+#[derive(Default)]
+pub struct Pacer {
+    key: String,
+    position: u64,
+    playing: bool,
+    sent_at: Option<Instant>,
+}
+
+impl Pacer {
+    /// Whether `state` should go now. When it says so, it counts as sent.
+    pub fn due(&mut self, state: &Value) -> bool {
+        let mut rest = state.clone();
+        if let Some(map) = rest.as_object_mut() {
+            map.remove("position_ms");
+            map.remove("at");
+        }
+        let key = rest.to_string();
+        let position = state["position_ms"].as_u64().unwrap_or(0);
+        let due = match self.sent_at {
+            None => true,
+            Some(at) => {
+                let expected = if self.playing { self.position + at.elapsed().as_millis() as u64 } else { self.position };
+                key != self.key || at.elapsed() >= STATE_EVERY || position.abs_diff(expected) > 2000
+            }
+        };
+        if due {
+            self.key = key;
+            self.position = position;
+            self.playing = state["playing"].as_bool().unwrap_or(false);
+            self.sent_at = Some(Instant::now());
+        }
+        due
+    }
+
+    /// Sends the next state whatever it is, as after reconnecting.
+    pub fn reset(&mut self) {
+        self.sent_at = None;
+    }
+}
+
+/// The host's song as a guest's clock runs it between states.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Clock {
+    position_ms: u64,
+    duration_ms: u64,
+    pub playing: bool,
+    at: Instant,
+}
+
+impl Clock {
+    /// From a state just arrived. `stored` is for one the room kept (as a
+    /// welcome carries it), measured a while ago: the time since the host
+    /// stamped it is added on. A state passed on at once is taken as it is,
+    /// so the two devices' clocks needn't agree.
+    pub fn of(state: &Value, stored: bool) -> Clock {
+        let playing = state["playing"].as_bool().unwrap_or(false);
+        let mut position_ms = state["position_ms"].as_u64().unwrap_or(0);
+        let stamped = state["at"].as_u64().unwrap_or(0);
+        if stored && playing && stamped > 0 {
+            position_ms += now_ms().saturating_sub(stamped).min(STATE_EVERY.as_millis() as u64 * 2);
+        }
+        Clock { position_ms, duration_ms: state["duration_ms"].as_u64().unwrap_or(0), playing, at: Instant::now() }
+    }
+
+    /// Where the song is now, in milliseconds.
+    pub fn position_ms(&self) -> u64 {
+        let ran = if self.playing { self.at.elapsed().as_millis() as u64 } else { 0 };
+        let position = self.position_ms + ran;
+        if self.duration_ms > 0 { position.min(self.duration_ms) } else { position }
+    }
+
+    pub fn duration_ms(&self) -> u64 {
+        self.duration_ms
+    }
+
+    /// What a guest just asked the host for, shown at once until the host's
+    /// next state says how it went: a new place, playing or paused.
+    pub fn expect(&mut self, position_ms: Option<u64>, playing: Option<bool>) {
+        self.position_ms = position_ms.unwrap_or_else(|| self.position_ms());
+        self.at = Instant::now();
+        if let Some(playing) = playing {
+            self.playing = playing;
+        }
+    }
+}
+
+/// The songs in a host's state, the one playing first, each with who in
+/// the Party added it (None for the host's own, the radio's and autoplay's).
+/// Empty when nothing plays.
+pub fn state_songs(state: &Value) -> Vec<(crate::innertube::model::Item, Option<String>)> {
+    let adder = |v: &Value| v["added_by"].as_str().filter(|n| !n.is_empty()).map(str::to_string);
+    let Some(first) = song_from(&state["song"]) else { return Vec::new() };
+    let mut songs = vec![(first, adder(&state["song"]))];
+    if let Some(next) = state["next"].as_array() {
+        songs.extend(next.iter().filter_map(|v| Some((song_from(v)?, adder(v)))));
+    }
+    songs
+}
+
 /// A request to the server with no account sign-in: a Party's own token, or none.
 fn call(method: &str, path: &str, token: Option<&str>, body: Option<Value>) -> Result<Value, String> {
     let url = format!("{}{path}", account::server());
@@ -569,6 +685,47 @@ mod tests {
     fn a_party_qr_is_square() {
         let qr = qr("K7Q-M4P").unwrap();
         assert_eq!(qr.dark.len(), qr.size * qr.size);
+    }
+
+    #[test]
+    fn the_host_sends_changes_and_seeks_not_the_song_playing_on() {
+        let mut pacer = Pacer::default();
+        let state = |title: &str, position: u64| json!({"song": {"title": title}, "playing": true, "position_ms": position, "at": 1});
+        assert!(pacer.due(&state("A", 1000)));
+        // Played on a little: no news.
+        assert!(!pacer.due(&state("A", 1100)));
+        // Seeked well ahead.
+        assert!(pacer.due(&state("A", 60_000)));
+        // Another song.
+        assert!(pacer.due(&state("B", 0)));
+        pacer.reset();
+        assert!(pacer.due(&state("B", 0)));
+    }
+
+    #[test]
+    fn a_guest_reads_the_hosts_songs_and_who_added_them() {
+        let state = json!({
+            "song": {"video_id": "a", "title": "A"},
+            "next": [{"video_id": "b", "title": "B", "added_by": "Sam"}, {"title": "no id"}, {"video_id": "c", "added_by": ""}],
+            "playing": false, "position_ms": 5000, "duration_ms": 200_000, "at": 1,
+        });
+        let songs = state_songs(&state);
+        let names: Vec<_> = songs.iter().map(|(i, by)| (i.video_id.clone().unwrap(), by.clone())).collect();
+        assert_eq!(names, [("a".into(), None), ("b".into(), Some("Sam".into())), ("c".into(), None)]);
+        // Paused: the place stays put, stored or not.
+        assert_eq!(Clock::of(&state, true).position_ms(), 5000);
+        assert!(state_songs(&json!({"song": null})).is_empty());
+    }
+
+    #[test]
+    fn a_stored_state_catches_up_on_the_time_since() {
+        let state = json!({"playing": true, "position_ms": 1000, "duration_ms": 300_000, "at": now_ms() - 4000});
+        let caught_up = Clock::of(&state, true).position_ms();
+        assert!((5000..5500).contains(&caught_up), "{caught_up}");
+        assert!(Clock::of(&state, false).position_ms() < 1500);
+        // Never past the song's end.
+        let late = json!({"playing": true, "position_ms": 299_000, "duration_ms": 300_000, "at": now_ms() - 10_000});
+        assert_eq!(Clock::of(&late, true).position_ms(), 300_000);
     }
 
     #[test]

@@ -17,6 +17,27 @@ use std::time::Duration;
 use tonearm_core::party::{self, Event, Live};
 use tonearm_core::store;
 
+/// A host's state in one line: the song, where in it, and what's next.
+fn describe(state: &serde_json::Value) -> String {
+    let clock = party::Clock::of(state, false);
+    let songs = party::state_songs(state);
+    let name = |(item, by): &(tonearm_core::innertube::model::Item, Option<String>)| match by {
+        Some(by) => format!("{} [{by}]", item.title),
+        None => item.title.clone(),
+    };
+    match songs.split_first() {
+        None => "state: nothing playing".into(),
+        Some((now, next)) => format!(
+            "state: {} {} at {}s/{}s | next: {}",
+            if clock.playing { "playing" } else { "paused" },
+            name(now),
+            clock.position_ms() / 1000,
+            clock.duration_ms() / 1000,
+            next.iter().map(name).collect::<Vec<_>>().join(", "),
+        ),
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let arg = |i: usize| args.get(i).map(String::as_str).unwrap_or("");
@@ -56,9 +77,19 @@ fn main() {
         }
     });
     let mut members = Vec::new();
+    let mut last_state = serde_json::Value::Null;
     loop {
         if let Some(event) = live.next_event(Duration::from_millis(200)) {
-            println!("event: {event:?}");
+            match &event {
+                Event::State(state) | Event::Welcome { state, .. } => {
+                    last_state = state.clone();
+                    println!("{}", describe(state));
+                }
+                _ => {}
+            }
+            if !matches!(event, Event::State(_)) {
+                println!("event: {event:?}");
+            }
             match &event {
                 Event::Welcome { members: m, .. } | Event::Members(m) => members = m.clone(),
                 Event::Command { from, command, .. } if command == "add" && ticket.host => {
@@ -89,6 +120,22 @@ fn main() {
                     let (id, title) = rest.split_once(' ').unwrap_or((rest, ""));
                     json!({ "type": "add", "item": { "video_id": id, "title": title }, "next": false })
                 }
+                // move <from> <to>: places among the next songs, from 0.
+                "move" => {
+                    let mut n = rest.split_whitespace().filter_map(|w| w.parse::<u64>().ok());
+                    let (Some(from), Some(to)) = (n.next(), n.next()) else {
+                        println!("move <from> <to>");
+                        continue;
+                    };
+                    let id = last_state["next"][from as usize]["video_id"].clone();
+                    json!({ "type": "move", "from": from, "to": to, "video_id": id })
+                }
+                // pick <n>: plays the nth next song, from 0.
+                "pick" => {
+                    let n: usize = rest.trim().parse().unwrap_or(0);
+                    json!({ "type": "play_item", "item": last_state["next"][n].clone(), "index": n })
+                }
+                "seek" => json!({ "type": "seek", "ms": rest.trim().parse::<u64>().unwrap_or(0) * 1000 }),
                 "end" | "leave" | "next" | "pause" | "play" | "previous" => json!({ "type": word }),
                 _ => {
                     println!("?");

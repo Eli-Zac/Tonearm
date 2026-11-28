@@ -571,7 +571,7 @@ impl Tonearm {
     pub fn mix_preview_position(&self) -> Option<f32> {
         let preview = self.preview_mix.lock().unwrap();
         let preview = preview.as_ref()?;
-        let song = self.now_playing()?;
+        let song = self.current_song()?;
         // What is heard, not what the mixer has made: while casting, the
         // device plays the stream a moment behind it.
         let status = &self.audio.status;
@@ -598,7 +598,7 @@ impl Tonearm {
         let Some(preview) = preview.as_ref() else {
             return false;
         };
-        let Some(song) = self.now_playing() else {
+        let Some(song) = self.current_song() else {
             return false;
         };
         if song.video_id != preview.from && song.video_id != preview.to {

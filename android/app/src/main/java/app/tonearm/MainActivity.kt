@@ -132,6 +132,9 @@ class NowPlaying(
     /** The core's queue version: it moves whenever the queue changes, as
      *  when a song's radio arrives after the song has started. */
     val queueVersion: ULong = 0uL,
+    /** "In Eli's Party" while a guest in a Party: the player is a remote
+     *  for the host. Empty otherwise. */
+    val party: String = "",
 )
 
 @Composable
@@ -156,6 +159,7 @@ fun rememberNowPlaying(controller: MediaController?, core: uniffi.tonearm_androi
                     ?.error?.ifEmpty { "Couldn't play this song" },
                 index = c.currentMediaItemIndex,
                 queueVersion = playback.version,
+                party = playback.party,
             )
         }
         val listener = object : Player.Listener {
@@ -224,10 +228,7 @@ fun MiniPlayer(now: NowPlaying, controller: MediaController, onOpen: () -> Unit)
             Art(now.meta?.artworkUri?.toString(), 44.dp)
             Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
                 Title(now.meta?.title?.toString() ?: "", size = 15.sp)
-                Dim(
-                    now.error ?: now.meta?.artist?.toString() ?: "",
-                    13.sp,
-                )
+                PlayerLine(now)
             }
             IconButton(Icons.rewind) { controller.seekToPrevious() }
             IconButton(if (now.playing) Icons.pause else Icons.play, size = 26) {
@@ -239,6 +240,17 @@ fun MiniPlayer(now: NowPlaying, controller: MediaController, onOpen: () -> Unit)
         Box(Modifier.fillMaxWidth().height(2.dp).background(Tonearm.line)) {
             Box(Modifier.fillMaxWidth(progress).fillMaxHeight().background(Tonearm.text))
         }
+    }
+}
+
+/** The mini-player's second line: the artist, or for a guest in a Party
+ *  "In Eli's Party" in the accent, as casting names the device. */
+@Composable
+fun PlayerLine(now: NowPlaying) {
+    when {
+        now.error != null -> Dim(now.error, 13.sp)
+        now.party.isNotEmpty() -> Title(now.party, size = 13.sp, color = Tonearm.accent)
+        else -> Dim(now.meta?.artist?.toString() ?: "", 13.sp)
     }
 }
 

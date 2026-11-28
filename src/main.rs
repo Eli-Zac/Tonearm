@@ -2656,6 +2656,12 @@ impl App {
         shuffle: bool,
         at: Option<f32>,
     ) {
+        // A Party guest's pick goes to the Party; their own queue stays.
+        if let Some(item) = items.get(index) {
+            if self.party_guest_play(item) {
+                return;
+            }
+        }
         *self.playing_from.borrow_mut() = from;
         let first = items.get(index).and_then(|i| i.video_id.clone());
         let (items, index) = {
@@ -3085,6 +3091,10 @@ impl App {
     /// Saves the queue, the playing song and how far into it you are, in
     /// the background.
     fn save_session(&self) {
+        // The host's songs showing in a Party are not this computer's queue.
+        if self.party_showing() {
+            return;
+        }
         let text = {
             let player = self.player.borrow();
             if player.queue.is_empty() {
@@ -3163,6 +3173,9 @@ impl App {
     /// Seeks the playing song. A restored song that has not started yet
     /// moves its start point instead.
     fn seek_to(&self, seconds: f32) {
+        if self.party_remote("seek", serde_json::json!({ "ms": (seconds.max(0.0) * 1000.0) as u64 })) {
+            return;
+        }
         let pending = {
             let player = self.player.borrow();
             let current = player.queue.get(player.index).and_then(|i| i.video_id.clone());
@@ -3186,6 +3199,10 @@ impl App {
     /// Shuffles the songs after the playing one, or puts the queue back in
     /// its old order.
     fn toggle_shuffle(self: &Rc<Self>) {
+        // A Party guest's queue is the host's, to look at.
+        if self.party_showing() {
+            return;
+        }
         // Off, then shuffle, then smart shuffle, then off again.
         let smart = {
             let mut player = self.player.borrow_mut();
@@ -3227,6 +3244,9 @@ impl App {
     }
 
     fn cycle_repeat(self: &Rc<Self>) {
+        if self.party_showing() {
+            return;
+        }
         let repeat = {
             let mut player = self.player.borrow_mut();
             player.repeat = player.repeat.next();
@@ -4208,6 +4228,10 @@ impl App {
     }
 
     fn toggle_play(self: &Rc<Self>) {
+        // A Party guest's button is the host's.
+        if self.party_remote_toggle() {
+            return;
+        }
         // Toggles what is shown, so a quick second press undoes the first.
         match self.play_hold.apply(self.audio.status.state.load(Ordering::SeqCst)) {
             audio::PLAYING => {
@@ -4227,6 +4251,9 @@ impl App {
     }
 
     fn next(self: &Rc<Self>) {
+        if self.party_remote("next", serde_json::json!({})) {
+            return;
+        }
         let index = {
             let player = self.player.borrow();
             let next = player.index + 1;
@@ -4240,6 +4267,9 @@ impl App {
     }
 
     fn previous(self: &Rc<Self>) {
+        if self.party_remote("previous", serde_json::json!({})) {
+            return;
+        }
         let (index, len, repeat) = {
             let player = self.player.borrow();
             (player.index, player.queue.len(), player.repeat)
@@ -4742,6 +4772,9 @@ impl App {
             } else {
                 0.0
             });
+        } else if let Some(at) = self.party_tick_clock() {
+            // A Party guest's player runs on the host's clock.
+            time = at;
         }
 
         let lyrics_live = seen && matches!(ui.get_panel(), 2 | 3) && self.lyrics.borrow().synced;
@@ -6330,8 +6363,11 @@ translate: Cell::new(load_translate()),
     on!(on_item_rested, |app, id| app.item_rested(id as usize));
     on!(on_item_play, |app, id| app.item_play(id as usize));
     on!(on_lyrics_width_changed, |app| app.rewrap_lyrics());
-    on!(on_queue_activated, |app, index| app
-        .play_index(index as usize));
+    on!(on_queue_activated, |app, index| {
+        if !app.party_remote_pick(index as usize) {
+            app.play_index(index as usize);
+        }
+    });
     on!(on_load_more, |app| app.load_more());
     on!(on_sort_by, |app, column| app.sort_by(column));
     on!(on_recommend_add, |app, id| app.add_recommended(id as usize));
@@ -6372,7 +6408,9 @@ translate: Cell::new(load_translate()),
         let weak = Rc::downgrade(&app);
         slint::Timer::single_shot(Duration::ZERO, move || {
             if let Some(app) = weak.upgrade() {
-                app.move_queued(from as usize, to as usize);
+                if !app.party_remote_move(from as usize, to as usize) {
+                    app.move_queued(from as usize, to as usize);
+                }
             }
         });
     });
@@ -6507,6 +6545,11 @@ translate: Cell::new(load_translate()),
     app.check_update(true);
     app.schedule_syncs();
     app.start_cast_search();
+    // Opened with a Party's link (tonearm://party/K7Q-M4P or its web link):
+    // join it.
+    if let Some(link) = args.iter().find(|a| tonearm_core::party::code_from(a).is_some()) {
+        app.party_join(link.clone());
+    }
     // Not `run`, which quits as soon as the window hides in the tray.
     #[cfg(windows)]
     instance.listen(|| on_ui(|app| app.show_window()));

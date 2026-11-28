@@ -285,7 +285,8 @@ fun NowPlayingScreen(
                     }
                     Spacer(Modifier.height(4.dp))
                     Box(Modifier.fillMaxWidth().height(24.dp), contentAlignment = Alignment.CenterStart) {
-                        if (songArtist.isEmpty()) {
+                        // A Party's song can come with no artist: nothing to wait for.
+                        if (songArtist.isEmpty() && now.party.isEmpty()) {
                             TextSkeleton(width = 0.35f, height = 18.dp, appearAfterMs = SONG_SKELETON_WAIT)
                         } else {
                             ArtistLine(playing?.artists.orEmpty(), songArtist, onOpenArtist)
@@ -298,7 +299,11 @@ fun NowPlayingScreen(
                     if (liked != null) LikeButton(liked, onLike)
                 }
             }
-            Spacer(Modifier.height(22.dp))
+            // A guest's "In Eli's Party", in the room that is always kept
+            // here, so nothing moves on joining or leaving.
+            Box(Modifier.fillMaxWidth().height(22.dp), contentAlignment = Alignment.CenterStart) {
+                if (now.party.isNotEmpty()) Title(now.party, size = 13.sp, color = Tonearm.accent)
+            }
             SeekBar(now, controller)
             Spacer(Modifier.height(18.dp))
             Controls(now, controller, core)
@@ -527,7 +532,10 @@ fun Controls(now: NowPlaying, controller: MediaController, core: Core) {
                 delay(500)
             }
         }
-        ModeButton(if (smart) Icons.sparkle else Icons.shuffle, shuffle) {
+        // A Party guest's queue is the host's: shuffle and repeat are out
+        // of reach, shown faint.
+        val guest = now.party.isNotEmpty()
+        ModeButton(if (smart) Icons.sparkle else Icons.shuffle, shuffle && !guest, faint = guest) {
             if (shuffle && !smart) {
                 smart = true
             } else {
@@ -547,7 +555,7 @@ fun Controls(now: NowPlaying, controller: MediaController, core: Core) {
         IconButton(Icons.fastForward, size = 36) { controller.seekToNext() }
         Spacer(Modifier.weight(1f))
         val repeat = controller.repeatMode
-        ModeButton(if (repeat == Player.REPEAT_MODE_ONE) Icons.repeatOne else Icons.repeat, repeat != Player.REPEAT_MODE_OFF) {
+        ModeButton(if (repeat == Player.REPEAT_MODE_ONE) Icons.repeatOne else Icons.repeat, repeat != Player.REPEAT_MODE_OFF && !guest, faint = guest) {
             controller.repeatMode = when (repeat) {
                 Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
                 Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
@@ -559,9 +567,9 @@ fun Controls(now: NowPlaying, controller: MediaController, core: Core) {
 
 /** Shuffle or repeat: the accent and a dot under it while on. */
 @Composable
-private fun ModeButton(glyph: String, on: Boolean, onClick: () -> Unit) {
-    Box(Modifier.size(48.dp).clip(CircleShape).clickable(onClick = onClick), contentAlignment = Alignment.Center) {
-        Icon(glyph, size = 22.sp, color = if (on) Tonearm.accent else Tonearm.dim)
+private fun ModeButton(glyph: String, on: Boolean, faint: Boolean = false, onClick: () -> Unit) {
+    Box(Modifier.size(48.dp).clip(CircleShape).clickable(enabled = !faint, onClick = onClick), contentAlignment = Alignment.Center) {
+        Icon(glyph, size = 22.sp, color = if (faint) Tonearm.faint else if (on) Tonearm.accent else Tonearm.dim)
         if (on) {
             Box(
                 Modifier.align(Alignment.BottomCenter).padding(bottom = 4.dp).size(5.dp)

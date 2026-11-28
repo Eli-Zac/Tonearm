@@ -77,18 +77,23 @@ class TonearmPlayer(private val context: Context, private val core: Tonearm) :
         val before = playback
         playback = now
         if (now.version != before.version) queue = core.queue()
+        // A guest in a Party is a remote: the host's phone plays, so this
+        // one holds no audio focus and never pauses for calls or unplugged
+        // headphones (that would pause the whole Party).
+        val remote = now.party.isNotEmpty()
+        if (remote && hasFocus) abandonFocus()
         // Songs also start from the app's own screens, straight through
         // the core. Whoever started it, playing means holding focus.
-        if (now.state == PlayState.PLAYING && !hasFocus && !focus()) {
+        if (!remote && now.state == PlayState.PLAYING && !hasFocus && !focus()) {
             core.pause()
         }
         if (now.state != before.state || now.version != before.version ||
             now.durationMs != before.durationMs || now.repeat != before.repeat ||
-            now.error != before.error
+            now.error != before.error || now.party != before.party
         ) {
             invalidateState()
         }
-        noisy(now.state == PlayState.PLAYING)
+        noisy(!remote && now.state == PlayState.PLAYING)
         // The phone's volume keys move the device's volume while casting.
         val on = core.casting()
         CarLag.casting = on
@@ -185,7 +190,7 @@ class TonearmPlayer(private val context: Context, private val core: Tonearm) :
     override fun handleSetPlayWhenReady(playWhenReady: Boolean): ListenableFuture<*> {
         pausedForFocus = false
         if (playWhenReady) {
-            if (focus()) core.resume()
+            if (playback.party.isNotEmpty() || focus()) core.resume()
         } else {
             core.pause()
         }
@@ -306,6 +311,7 @@ class TonearmPlayer(private val context: Context, private val core: Tonearm) :
     // ---------------------------------------------------------- audio focus
 
     private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
+        if (playback.party.isNotEmpty()) return@OnAudioFocusChangeListener
         when (change) {
             AudioManager.AUDIOFOCUS_LOSS -> {
                 // Another app is playing now. Stay paused.

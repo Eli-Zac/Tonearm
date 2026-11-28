@@ -105,7 +105,7 @@ impl Tonearm {
     /// Sends the song under `generation` its levelling gain, looking its
     /// loudness up first when that is not known yet.
     pub(crate) fn apply_gain(self: &Arc<Self>, generation: u64) {
-        let Some(video_id) = self.now_playing().map(|s| s.video_id) else { return };
+        let Some(video_id) = self.current_song().map(|s| s.video_id) else { return };
         let known = self.loudness.lock().unwrap().contains_key(&video_id);
         if known {
             self.audio.gain(generation, self.gain_for(&video_id));
@@ -284,7 +284,7 @@ impl Tonearm {
             // through the mix and past it.
             let in_preview = {
                 let preview = self.preview_mix.lock().unwrap();
-                let song = self.now_playing();
+                let song = self.current_song();
                 preview
                     .as_ref()
                     .zip(song)
@@ -296,7 +296,7 @@ impl Tonearm {
             }
             return;
         };
-        let Some(playing) = self.now_playing().map(|song| song.video_id) else {
+        let Some(playing) = self.current_song().map(|song| song.video_id) else {
             return;
         };
         let seconds = self.crossfade.load(Ordering::SeqCst) as f64;
@@ -478,7 +478,7 @@ impl Tonearm {
         for moment in moments {
             match moment {
                 Moment::Started => {
-                    let Some(song) = self.now_playing() else { continue };
+                    let Some(song) = self.current_song() else { continue };
                     self.remember(&song, 0.25);
                     self.played_here(&song.video_id);
                     let seconds = if duration > 0.0 { duration } else { crate::lyrics::seconds_of(&song.duration) };
@@ -502,7 +502,7 @@ impl Tonearm {
                 }
                 Moment::Scrobble => self.services.send(services::Event::Scrobble),
                 Moment::Counted => {
-                    let Some(song) = self.now_playing() else { continue };
+                    let Some(song) = self.current_song() else { continue };
                     self.remember(&song, 0.75);
                     // And in the account's YouTube Music history, as a play
                     // in YouTube Music's own player would be.

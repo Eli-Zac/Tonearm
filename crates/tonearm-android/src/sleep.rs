@@ -55,7 +55,7 @@ impl Tonearm {
     /// Pauses once a timed timer runs out. From the queue thread's tick.
     pub(crate) fn sleep_tick(self: &Arc<Self>) {
         if self.sleep.lock().unwrap().0.is_due() {
-            self.pause();
+            self.pause_here();
             self.sleep_done();
         }
     }

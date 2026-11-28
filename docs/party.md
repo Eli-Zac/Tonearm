@@ -75,7 +75,10 @@ way a Tonearm Connect remote works (see `docs/tonearm-connect.md`).
 - **On the desktop,** the installer registers `tonearm://` for the current user
   (in HKCU, so no admin rights). The web page has an "Open in Tonearm" button
   that opens `tonearm://party/K7Q-M4P`. Pasting the link or the code into the
-  app's Join box works everywhere.
+  app's Join box works everywhere. The desktop app started with a Party
+  link as its argument joins it (registering `tonearm://` in the installer
+  is still to do, and a link given while Tonearm already runs only brings
+  that copy forward).
 - The phone's in-app scanner also accepts party links, next to pairing links.
 
 ### The server
@@ -99,11 +102,27 @@ Routes:
 Messages over the socket are JSON objects with a `type`, as in Tonearm
 Connect.
 
-From the host: `state` (the song, playing or paused, position and when it
-was measured, the queue with who added each song, the settings).
+From the host: `state`:
+
+```json
+{ "song": {...}, "playing": true, "position_ms": 61000, "duration_ms": 197373,
+  "at": 1795850850313, "next": [{..., "added_by": "Sam"}, ...] }
+```
+
+`at` is when the host measured `position_ms` (milliseconds since 1970).
+Each song carries `added_by` when a Party member added it. The next 30
+songs are sent. The host sends it when anything other than the place in
+the song changes, when the place jumps (a seek), and every 15 seconds
+(core `party::Pacer`).
 
 From a guest: `add {item, next}`, and when allowed `play`, `pause`, `next`,
-`previous`, `seek`, `move {from, to}`, `play_item {item}`.
+`previous`, `seek {ms}`, `move {from, to, video_id}` and `play_item {item,
+index}`. `from`, `to` and `index` are places among the next songs (0 is the
+song after the one playing); the host checks the song there is still the
+one the guest saw (`video_id`, or the item's) before acting. `play_item`
+without a matching `index` (a song picked anywhere else in the app) plays
+the song next, then skips to it. The room refuses everything but `add`
+while the host doesn't let others change what's playing.
 
 From the room: `state` (passed on to the guests), `members` (on every join
 and leave), `command` (a guest's request, passed to the host), `removed` (to
@@ -118,20 +137,44 @@ after 12 hours whatever happens.
 
 - Carries out guests' commands through the same functions its own buttons
   call. Adds land after the songs other people added, before the rest of
-  the queue, as Spotify does it.
-- Sends `state` when something changes, and every 15 seconds while playing.
-- Remembers who added each song, so the queue can show it.
+  the queue, as Spotify does it (phone and desktop alike).
+- Sends `state` when something changes, and every 15 seconds.
+- Remembers who added each song, and sends it with the queue so guests
+  show the same avatars.
 - Only the host scrobbles and records history. Guests do neither for songs
   they did not play themselves.
 
 ### A guest's device
 
-- While in a Party, the player bar and Now playing show the Party's song and
-  progress, with "In <host>'s Party" under it, as casting shows "Playing on".
-- Add to queue and Play next anywhere in the app go to the Party.
-- Pressing a song to play it asks "Add to the Party's queue?" when the host
-  doesn't let others change what's playing.
-- Leaving the Party gives the device back its own queue, as it was.
+A guest's player is a remote for the host's, once the host's first state
+has come:
+
+- The player bar, Now playing and the queue show the host's song, its
+  progress and the host's queue, with the adders' avatars, and "In Eli's
+  Party" under the song in the accent colour, as casting names the device.
+  The progress runs on a clock between states (core `party::Clock`): a state
+  passed on at once is taken as it arrives, and the one in a welcome (kept
+  by the room, up to 15 seconds old) has the time since `at` added on.
+- Play, pause, next, previous, seek, tapping a queued song and dragging one
+  go to the host. While allowed, play, pause, seek and drags show at once;
+  a refusal puts back the host's last state and says why.
+- With "Let others change what's playing" off, the queue is to look at
+  (no drag handles, taps do nothing) and only adding songs works.
+- Add to queue and Play next anywhere in the app go to the Party. Picking a
+  song to play anywhere in the app plays it in the Party, or, while the host
+  only lets others add songs, adds it to the Party's queue with a note.
+- Shuffle and repeat are faint and do nothing.
+- The guest's own music stops on joining. Their queue is left as it was
+  and comes back on leaving, paused at the same place.
+- On the phone the bridge's `playback`, `queue` and `now_playing` answer with
+  the Party, so the notification, lock screen and car follow too. A guest's
+  player holds no audio focus and doesn't pause for calls or unplugged
+  headphones, which would pause the whole Party. On the desktop the host's
+  songs stand in for the queue while the guest's own is put aside, and
+  nothing of the Party is saved as the session.
+- Not yet: the confirmation "Add to the Party's queue?" when a guest picks a
+  song to play and the host doesn't let others change what's playing (a
+  note says it was added instead).
 
 ### Who can join
 
