@@ -25,6 +25,8 @@ rusqlite = { version = "0.43.0", features = ["bundled"] }
 # Runs YouTube's player script to solve stream link challenges.
 rquickjs = { version = "0.14", default-features = false }
 qrcode = { version = "0.15.0", default-features = false }
+# A Party's live connection to its room on the server, over the TLS below.
+tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
 # Statically linked. No GPU providers, which come with copy-dylibs.
 ort = { version = "=2.0.0-rc.15", optional = true, default-features = false, features = ["std", "download-binaries", "tls-native", "api-31"] }
 
@@ -37,6 +39,8 @@ native-tls = "0.2"
 [target.'cfg(target_os = "android")'.dependencies]
 ureq = { version = "2.12", default-features = false, features = ["json", "gzip", "tls", "proxy-from-env"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# The roots ureq trusts, for a Party's connection.
+webpki-roots = "1"
 # QuickJS ships no ready-made bindings for Android, so they are generated
 # with the NDK's libclang (build-rust.ps1 sets LIBCLANG_PATH).
 rquickjs = { version = "0.14", default-features = false, features = ["bindgen"] }

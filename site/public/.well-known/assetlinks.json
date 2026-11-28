@@ -1,0 +1,13 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "app.tonearm",
+      "sha256_cert_fingerprints": [
+        "90:BA:81:04:25:B4:87:00:25:D4:04:9A:97:D3:5E:07:F2:C0:F6:A4:2B:C0:4B:E2:BB:5D:DA:78:ED:78:EE:44",
+        "1F:E9:35:DF:8C:7C:D3:9C:E2:C3:5E:18:3D:41:78:30:D2:0D:55:67:A6:11:02:B8:3A:7C:03:8C:4E:A9:F6:98"
+      ]
+    }
+  }
+]

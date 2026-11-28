@@ -1,10 +1,15 @@
 // Tonearm's account server: email-code sign-in, a device list, and settings
 // shared by an account's devices. Plain JSON over HTTPS under /v1.
 import { sendMail, type MailEnv } from "./mail";
+import { PartyRoom, partyCode, cleanPartyCode } from "./party";
+
+export { PartyRoom };
 
 interface Env extends MailEnv {
   DB: any; // D1Database
+  PARTY: any; // DurableObjectNamespace of PartyRoom
   BASE_HOST: string;
+  PARTY_LINK: string;
 }
 
 const CODE_TTL_MS = 10 * 60_000;
@@ -343,6 +348,93 @@ async function writeSettings(s: Session, env: Env, req: Request): Promise<Respon
   return json({ now, settings: stored });
 }
 
+const PARTY_FAILS_PER_MINUTE = 60; // lookups of codes that don't exist, across everyone
+
+const room = (env: Env, code: string) => env.PARTY.get(env.PARTY.idFromName(code));
+
+/** Asks a Party's room, passing the request's body and sign-in along. */
+function ask(env: Env, code: string, op: string, req: Request, body?: unknown): Promise<Response> {
+  const headers = new Headers();
+  for (const name of ["authorization", "upgrade", "connection", "sec-websocket-key", "sec-websocket-version", "sec-websocket-protocol", "sec-websocket-extensions"]) {
+    const value = req.headers.get(name);
+    if (value) headers.set(name, value);
+  }
+  const url = new URL(req.url);
+  const target = `https://party${op}${url.search}`;
+  return room(env, code).fetch(
+    new Request(target, {
+      method: body === undefined ? req.method : "POST",
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    }),
+  );
+}
+
+/** Lets the landing page show a Party to someone without the app. */
+function shared(response: Response): Response {
+  const out = new Response(response.body, response);
+  out.headers.set("access-control-allow-origin", "*");
+  return out;
+}
+
+// POST /v1/party {name?, host_name?}  (signed in)  ->  {code, name, link, token, member_id}
+async function startParty(s: Session, env: Env, req: Request): Promise<Response> {
+  const input = await body(req);
+  for (let tries = 0; tries < 5; tries++) {
+    const code = partyCode();
+    const made = await room(env, code).fetch(
+      new Request("https://party/create", {
+        method: "POST",
+        body: JSON.stringify({ code, name: input.name, host_name: input.host_name, account_id: s.account_id }),
+      }),
+    );
+    if (made.status === 409) continue;
+    const answer: any = await made.json();
+    return json({ ...answer, link: `${env.PARTY_LINK}${code}` });
+  }
+  throw new Fail(503, "couldn't find a free Party code; try again");
+}
+
+/** Counts lookups of codes that don't exist, so codes can't be guessed quickly. */
+async function partyMiss(env: Env, response: Response): Promise<Response> {
+  if (response.status === 404) {
+    await env.DB.prepare("INSERT INTO party_fails (at) VALUES (?)").bind(Date.now()).run();
+  }
+  return response;
+}
+
+async function partyRoute(req: Request, env: Env, path: string): Promise<Response | null> {
+  const method = req.method;
+  if (path === "/v1/party" && method === "POST") return startParty(await session(req, env), env, req);
+  const match = path.match(/^\/v1\/party\/([^/]+)(\/join|\/live)?$/);
+  if (!match) return null;
+  const code = cleanPartyCode(decodeURIComponent(match[1]));
+  const op = match[2] ?? "";
+  if (!code) throw new Fail(404, "no such Party, or it has ended");
+
+  if (method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: { "access-control-allow-origin": "*", "access-control-allow-methods": "GET", "access-control-max-age": "86400" },
+    });
+  }
+  // Guessing: lookups and joins of codes that don't exist are limited.
+  if ((op === "" && method === "GET") || op === "/join") {
+    const now = Date.now();
+    await env.DB.prepare("DELETE FROM party_fails WHERE at < ?").bind(now - 60_000).run();
+    const fails = await env.DB.prepare("SELECT COUNT(*) AS n FROM party_fails").first();
+    if (fails.n >= PARTY_FAILS_PER_MINUTE) throw new Fail(429, "too many wrong codes; wait a minute");
+  }
+  if (op === "" && method === "GET") return shared(await partyMiss(env, await ask(env, code, "/summary", req)));
+  if (op === "/join" && method === "POST") {
+    const input = await body(req);
+    return partyMiss(env, await ask(env, code, "/join", req, { name: input.name }));
+  }
+  if (op === "/live" && method === "GET") return ask(env, code, "/live", req);
+  if (op === "" && method === "DELETE") return ask(env, code, "/end", req);
+  return null;
+}
+
 async function route(req: Request, env: Env): Promise<Response> {
   const url = new URL(req.url);
   const path = url.pathname.replace(/\/+$/, "") || "/";
@@ -354,6 +446,10 @@ async function route(req: Request, env: Env): Promise<Response> {
   if (path === "/v1/auth/code" && method === "POST") return requestCode(req, env);
   if (path === "/v1/auth/verify" && method === "POST") return verifyCode(req, env);
   if (path === "/v1/pair/claim" && method === "POST") return claimPairing(req, env);
+  if (path === "/v1/party" || path.startsWith("/v1/party/")) {
+    const answer = await partyRoute(req, env, path);
+    if (answer) return answer;
+  }
 
   if (path.startsWith("/v1/")) {
     const s = await session(req, env);

@@ -19,7 +19,15 @@
       "migrations_dir": "migrations"
     }
   ],
+  // One PartyRoom per Party (src/party.ts), with SQLite storage, which the
+  // free plan includes.
+  "durable_objects": {
+    "bindings": [{ "name": "PARTY", "class_name": "PartyRoom" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["PartyRoom"] }],
   "vars": {
+    // Where Party links point: the landing page, which opens the app.
+    "PARTY_LINK": "https://tonearm.eli-zac.dev/party/",
     // Public address of this server, and the sender of sign-in emails.
     "BASE_HOST": "api.tonearm.eli-zac.dev",
     "MAIL_FROM": "Tonearm <no-reply@tonearm.eli-zac.dev>"

@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Join the Party · Tonearm</title>
+  <link rel="icon" href="/logo.svg">
+  <style>
+    @font-face { font-family: Figtree; font-weight: 400; font-display: swap; src: url(/fonts/Figtree-Regular.ttf) format("truetype"); }
+    @font-face { font-family: Figtree; font-weight: 600; font-display: swap; src: url(/fonts/Figtree-SemiBold.ttf) format("truetype"); }
+    @font-face { font-family: Figtree; font-weight: 800; font-display: swap; src: url(/fonts/Figtree-ExtraBold.ttf) format("truetype"); }
+    :root {
+      --bg: #08080a; --island: #131316; --raised: #1c1c21; --line: #ffffff14;
+      --text: #f5f5f7; --dim: #9c9ca6; --accent: #ff4f6d; --radius: 14px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; min-height: 100dvh; display: grid; place-items: center;
+      background: var(--bg); color: var(--text); font: 400 16px/1.5 Figtree, system-ui, sans-serif;
+      padding: 24px;
+    }
+    main { width: 100%; max-width: 420px; text-align: center; }
+    .logo { width: 56px; height: 56px; margin-bottom: 20px; }
+    .card { background: var(--island); border: 1px solid var(--line); border-radius: var(--radius); padding: 24px; }
+    h1 { font-weight: 800; font-size: 28px; line-height: 1.2; margin: 0 0 4px; min-height: 34px; }
+    .host { color: var(--dim); margin: 0 0 20px; min-height: 24px; }
+    .playing { display: flex; gap: 12px; align-items: center; text-align: left; background: var(--raised); border-radius: 10px; padding: 10px; margin-bottom: 20px; min-height: 68px; }
+    .playing img, .playing .art { width: 48px; height: 48px; border-radius: 6px; background: #ffffff10; flex: none; object-fit: cover; }
+    .playing .what { min-width: 0; }
+    .playing .label { color: var(--dim); font-size: 13px; }
+    .playing .title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .btn {
+      display: block; width: 100%; padding: 14px; border-radius: 999px; border: 0; cursor: pointer;
+      font: 600 16px Figtree, sans-serif; text-decoration: none; background: var(--raised); color: var(--text); margin-top: 10px;
+    }
+    .btn.primary { background: var(--text); color: var(--bg); }
+    .code { color: var(--dim); font-size: 14px; margin-top: 18px; }
+    .code b { color: var(--text); letter-spacing: 0.08em; }
+    .gone { color: var(--dim); }
+    .skeleton { display: inline-block; height: 1em; width: 60%; border-radius: 6px; background: #ffffff10; vertical-align: middle; }
+  </style>
+</head>
+<body>
+  <main>
+    <img class="logo" src="/logo.svg" alt="Tonearm">
+    <div class="card">
+      <h1 id="name"><span class="skeleton"></span></h1>
+      <p class="host" id="host"><span class="skeleton" style="width:40%"></span></p>
+      <div class="playing" id="playing">
+        <div class="art" id="art"></div>
+        <div class="what">
+          <div class="label">Playing now</div>
+          <div class="title" id="title"><span class="skeleton"></span></div>
+        </div>
+      </div>
+      <a class="btn primary" id="open" href="#">Open in Tonearm</a>
+      <a class="btn" href="https://github.com/Eli-Zac/Tonearm/releases/latest">Get Tonearm</a>
+      <p class="code">Or type the code in Tonearm under Join a Party: <b id="code"></b></p>
+    </div>
+  </main>
+  <script>
+    // The code from the address: /party/K7Q-M4P.
+    const raw = decodeURIComponent(location.pathname.split("/").filter(Boolean)[1] || "");
+    const clean = raw.toUpperCase().replace(/[^A-Z0-9]/g, "");
+    const code = clean.length === 6 ? `${clean.slice(0, 3)}-${clean.slice(3)}` : "";
+    const $ = (id) => document.getElementById(id);
+    $("code").textContent = code || "?";
+    $("open").href = `tonearm://party/${code}`;
+
+    function gone(message) {
+      $("name").textContent = "Party not found";
+      $("host").textContent = message;
+      $("host").className = "host gone";
+      $("playing").style.visibility = "hidden";
+      $("open").style.display = "none";
+    }
+
+    if (!code) {
+      gone("That link doesn't have a Party code in it.");
+    } else {
+      fetch(`https://api.tonearm.eli-zac.dev/v1/party/${code}`)
+        .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+        .then((p) => {
+          $("name").textContent = p.name;
+          document.title = `${p.name} · Tonearm`;
+          $("host").textContent = `Hosted by ${p.host} · ${p.members} ${p.members === 1 ? "person" : "people"}`;
+          const song = p.state && p.state.song;
+          if (song && song.title) {
+            $("title").textContent = song.artist ? `${song.title} · ${song.artist}` : song.title;
+            if (song.art) {
+              const img = document.createElement("img");
+              img.alt = "";
+              img.src = song.art;
+              $("art").replaceWith(img);
+            }
+          } else {
+            $("title").textContent = "Nothing yet";
+          }
+        })
+        .catch((status) => gone(status === 404 ? "It may have ended. Ask the host for a new link." : "Couldn't reach Tonearm. Try again in a moment."));
+    }
+  </script>
+</body>
+</html>
