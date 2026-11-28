@@ -85,6 +85,16 @@ impl Tonearm {
         account::pair_qr(&code).map(|qr| QrMatrix { size: qr.size as u32, dark: qr.dark })
     }
 
+    /// The QR code for a Party: its link, for a phone's camera to open.
+    pub fn party_qr(&self, code: String) -> Option<QrMatrix> {
+        tonearm_core::party::qr(&code).map(|qr| QrMatrix { size: qr.size as u32, dark: qr.dark })
+    }
+
+    /// A Party's link, for Copy link and the car's join page.
+    pub fn party_link(&self, code: String) -> String {
+        tonearm_core::party::link(&code)
+    }
+
     /// The pairing code in what a QR scan read, or None if it isn't one.
     pub fn account_scan_code(&self, text: String) -> Option<String> {
         account::pair_code_from_scan(&text)

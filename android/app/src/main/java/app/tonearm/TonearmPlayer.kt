@@ -197,11 +197,20 @@ class TonearmPlayer(private val context: Context, private val core: Tonearm) :
     @Volatile
     var pending: List<Song>? = null
 
+    /** Set when the car picked a Party action: the items coming are the
+     *  queue as it already is, so nothing changes. */
+    @Volatile
+    var keepQueue = false
+
     override fun handleSetMediaItems(
         mediaItems: MutableList<MediaItem>,
         startIndex: Int,
         startPositionMs: Long,
     ): ListenableFuture<*> {
+        if (keepQueue) {
+            keepQueue = false
+            return com.google.common.util.concurrent.Futures.immediateVoidFuture()
+        }
         // A queue built for a pick in the car comes whole, with every
         // song's details; the media items carry only some of them.
         val built = pending?.takeIf { it.map(Song::videoId) == mediaItems.map { m -> m.mediaId } }

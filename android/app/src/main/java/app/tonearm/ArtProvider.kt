@@ -21,8 +21,12 @@ class ArtProvider : ContentProvider() {
     override fun onCreate() = true
 
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor {
-        val source = uri.getQueryParameter("u") ?: throw FileNotFoundException("no cover")
         val context = context ?: throw FileNotFoundException("not ready")
+        // A Party's pictures, drawn here rather than fetched.
+        if (uri.path in PARTY_PATHS) {
+            return ParcelFileDescriptor.open(PartyArt.file(context, uri), ParcelFileDescriptor.MODE_READ_ONLY)
+        }
+        val source = uri.getQueryParameter("u") ?: throw FileNotFoundException("no cover")
         val file = if (source.startsWith("/")) {
             // A download's cover: only from the app's own downloads folder.
             File(source).canonicalFile.takeIf {
@@ -80,7 +84,7 @@ class ArtProvider : ContentProvider() {
         files.sortedBy { it.lastModified() }.take(files.size - 500).forEach { it.delete() }
     }
 
-    override fun getType(uri: Uri) = "image/jpeg"
+    override fun getType(uri: Uri) = if (uri.path in PARTY_PATHS) "image/png" else "image/jpeg"
     override fun query(uri: Uri, projection: Array<out String>?, selection: String?, args: Array<out String>?, sort: String?): Cursor? = null
     override fun insert(uri: Uri, values: ContentValues?): Uri? = null
     override fun delete(uri: Uri, selection: String?, args: Array<out String>?) = 0
@@ -90,6 +94,21 @@ class ArtProvider : ContentProvider() {
         private const val AUTHORITY = "app.tonearm.art"
         private const val VERSION = "2"
         private val HOSTS = listOf("googleusercontent.com", "ggpht.com", "ytimg.com", "music.youtube.com", "gstatic.com", "scdn.co", "spotifycdn.com")
+
+        private val PARTY_PATHS = setOf("/party-qr", "/avatar", "/tile")
+
+        /** A Party's QR code, for the car's join tile. */
+        fun partyQr(code: String): Uri = party("party-qr", "c", code)
+
+        /** A round picture with a name's first letter, for a member. */
+        fun avatar(name: String): Uri = party("avatar", "n", name)
+
+        /** One of the app's icons on a tile, for the car: "members" or "end". */
+        fun tile(icon: String): Uri = party("tile", "i", icon)
+
+        private fun party(path: String, key: String, value: String): Uri =
+            Uri.Builder().scheme("content").authority(AUTHORITY).path(path)
+                .appendQueryParameter("v", VERSION).appendQueryParameter(key, value).build()
 
         /** The car's way to a cover: a link or a download's file path. */
         fun uri(art: String?): Uri? {

@@ -27,6 +27,7 @@ pub mod mix;
 /// UI-agnostic editor state and picture data for playlist transitions.
 pub mod mix_editor;
 pub mod offline;
+pub mod party;
 pub mod pool;
 pub mod queue;
 pub mod quick_access;

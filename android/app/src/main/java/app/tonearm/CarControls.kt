@@ -37,7 +37,7 @@ class CarControls(private val core: Core, private val work: ListeningExecutorSer
     private var shown: List<CommandButton> = emptyList()
     private var error = ""
 
-    val commands = listOf(SHUFFLE, REPEAT, LIKE).map { SessionCommand(it, Bundle.EMPTY) }
+    val commands = listOf(SHUFFLE, REPEAT, LIKE, PARTY).map { SessionCommand(it, Bundle.EMPTY) }
 
     fun start(session: MediaSession) {
         this.session = session
@@ -108,7 +108,15 @@ class CarControls(private val core: Core, private val work: ListeningExecutorSer
         }
         // No skip buttons here: the notification and car draw their own, and
         // these would show again beside them as extra buttons.
-        return listOfNotNull(heart, shuffleButton, repeatButton)
+        // Start a Party, or, while one runs, View Party. Its page is the
+        // first tab of the car's browse list.
+        val party = CommandButton.Builder(CommandButton.ICON_UNDEFINED)
+            .setCustomIconResId(if (PartyDemo.active) R.drawable.ic_button_party_on else R.drawable.ic_button_party)
+            .setDisplayName(if (PartyDemo.active) "View Party" else "Start a Party")
+            .setSessionCommand(commands[3])
+            .setSlots(CommandButton.SLOT_OVERFLOW)
+            .build()
+        return listOfNotNull(heart, shuffleButton, repeatButton, party)
     }
 
     /** Whether a controller gets the extra buttons: the notification (which
@@ -133,6 +141,15 @@ class CarControls(private val core: Core, private val work: ListeningExecutorSer
                 val id = likedFor ?: return
                 // Fills at once, and goes back if YouTube Music says no.
                 work.execute { LikeState.flip(core, id); main.post { update() } }
+            }
+            // Starting one when there is none; with one running, the
+            // button only names it (the car can't be sent to a page).
+            PARTY -> {
+                android.util.Log.i("Tonearm", "party: button pressed, active=${PartyDemo.active}")
+                val started = !PartyDemo.active
+                PartyDemo.start()
+                // The car can't be sent to Home, so it is told where to look.
+                tellCarOnce(if (started) "Party started. It's at the top of Home." else "Your Party is at the top of Home.")
             }
         }
         update()
@@ -173,6 +190,15 @@ class CarControls(private val core: Core, private val work: ListeningExecutorSer
         }
     }
 
+    /** A short note to the car's screen that isn't a failure: playback
+     *  carries on, and Android Auto shows it briefly. */
+    private fun tellCarOnce(message: String) {
+        val session = session ?: return
+        session.connectedControllers
+            .filter { session.isAutoCompanionController(it) || session.isAutomotiveController(it) }
+            .forEach { session.sendError(it, androidx.media3.session.SessionError(androidx.media3.session.SessionError.INFO_CANCELLED, message)) }
+    }
+
     private fun tellCar(message: String) {
         val session = session ?: return
         val exception = if (message.isEmpty()) null else
@@ -186,5 +212,6 @@ class CarControls(private val core: Core, private val work: ListeningExecutorSer
         const val SHUFFLE = "app.tonearm.SHUFFLE"
         const val REPEAT = "app.tonearm.REPEAT"
         const val LIKE = "app.tonearm.LIKE"
+        const val PARTY = "app.tonearm.PARTY"
     }
 }

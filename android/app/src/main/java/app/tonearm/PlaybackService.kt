@@ -40,6 +40,7 @@ class PlaybackService : MediaLibraryService() {
     private var session: MediaLibrarySession? = null
     private var devices: AudioDeviceCallback? = null
     private var controls: CarControls? = null
+    private var party: (() -> Unit)? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -67,6 +68,18 @@ class PlaybackService : MediaLibraryService() {
             )
             .build()
             .also { car.start(it) }
+        // The car's Party pages follow the Party.
+        val partyChanged = {
+            Handler(Looper.getMainLooper()).post {
+                session?.run {
+                    notifyChildrenChanged(AutoLibrary.HOME, Int.MAX_VALUE, null)
+                    notifyChildrenChanged(AutoLibrary.PARTY_MEMBERS, Int.MAX_VALUE, null)
+                }
+            }
+            Unit
+        }
+        PartyDemo.watch(partyChanged)
+        party = partyChanged
         // A car, earbuds or headphones coming or going: the core's output
         // stays on the device it opened, which on Android may have left
         // (Android Auto's stream goes silent rather than following), so it
@@ -169,6 +182,17 @@ class PlaybackService : MediaLibraryService() {
             )
         }
 
+        /** Any page the car opens can be followed, so a change to it (a
+         *  Party starting or ending on Home) reaches the car. Media3's own
+         *  check looks the page up through onGetItem, which this library
+         *  doesn't answer, and so turned every subscription away. */
+        override fun onSubscribe(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            parentId: String,
+            params: LibraryParams?,
+        ): ListenableFuture<LibraryResult<Void>> = Futures.immediateFuture(LibraryResult.ofVoid())
+
         override fun onGetChildren(
             session: MediaLibrarySession,
             browser: MediaSession.ControllerInfo,
@@ -200,6 +224,20 @@ class PlaybackService : MediaLibraryService() {
             startPositionMs: Long,
         ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
             val picked = mediaItems.singleOrNull()?.mediaId
+            // A Party action (End Party, Remove): done, and the car is handed
+            // back the queue as it is, so the music carries on untouched.
+            if (picked != null && library.isAction(picked)) {
+                library.act(picked)
+                val queue = core.queue()
+                if (queue.isEmpty()) return Futures.immediateFailedFuture(UnsupportedOperationException("done"))
+                val p = core.playback()
+                player.keepQueue = true
+                return Futures.immediateFuture(
+                    MediaSession.MediaItemsWithStartPosition(
+                        queue.map(TonearmPlayer::mediaItem), p.index.toInt().coerceIn(0, queue.size - 1), p.positionMs.toLong(),
+                    ),
+                )
+            }
             if (picked == null || !library.knows(picked)) {
                 return super.onSetMediaItems(mediaSession, controller, mediaItems, startIndex, startPositionMs)
             }
@@ -256,6 +294,8 @@ class PlaybackService : MediaLibraryService() {
         devices = null
         controls?.stop()
         controls = null
+        party?.let(PartyDemo::unwatch)
+        party = null
         session?.run {
             player.release()
             release()

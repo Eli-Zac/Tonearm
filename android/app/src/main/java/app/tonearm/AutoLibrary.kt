@@ -59,6 +59,7 @@ class AutoLibrary(private val core: Core) {
     /** A folder's contents. Blocks on the network. */
     fun children(id: String): List<MediaItem> {
         saved = core.downloadMarks().saved.toSet()
+        partyChildren(id)?.let { return it }
         if (id == ROOT) {
             return TABS.map { (tab, title) ->
                 nodes[TAB + tab] = TabNode(tab)
@@ -76,11 +77,107 @@ class AutoLibrary(private val core: Core) {
             is TabNode -> if (node.tab == "downloads") {
                 val songs = core.downloadsPage().shelves.flatMap { it.items }.filter { it.videoId != null }
                 songs.mapIndexed { i, item -> playable(item, How.List, songs, i, null, LIST) }
+            } else if (node.tab == "home") {
+                // A running Party sits at the top of Home. Android Auto
+                // reads its tabs once per connection and shows four at
+                // most, so the Party can't be a tab of its own.
+                android.util.Log.i("Tonearm", "party: car asked for Home, party=${PartyDemo.active}")
+                val party = if (PartyDemo.active) partyTiles(PartyDemo.NAME) else emptyList()
+                party + pageChildren(tabPage(node.tab))
             } else {
                 pageChildren(tabPage(node.tab))
             }
             is PageNode -> pageChildren(core.browse(node.browseId, node.params))
             else -> emptyList()
+        }
+    }
+
+    /**
+     * The Party's pages, or null when `id` isn't one of them. The tab
+     * holds three tiles: the QR code to join by (with the code under it, for
+     * a camera that won't read the screen), Members, and End Party. A
+     * member opens a page with Remove on it.
+     */
+    private fun partyChildren(id: String): List<MediaItem>? {
+        if (!id.startsWith(PARTY)) return null
+        if (!PartyDemo.active) return emptyList()
+        val members = PartyDemo.members
+        return when {
+            id == PARTY -> partyTiles(null)
+            // Opened from the QR tile: the code and link, as text.
+            id == PARTY_QR -> listOf(
+                info("Code: ${PartyDemo.CODE}", "Type it in Tonearm under Join a Party"),
+                info(core.partyLink(PartyDemo.CODE).removePrefix("https://"), "Or open this link on a phone"),
+            )
+            id == PARTY_MEMBERS -> members.map { m ->
+                val line = when {
+                    m.host -> "Host"
+                    m.added == 0 -> "Joined"
+                    m.added == 1 -> "Added 1 song"
+                    else -> "Added ${m.added} songs"
+                }
+                // The host has nothing to open; a guest opens Remove.
+                if (m.host) info(m.name, line, ArtProvider.avatar(m.name))
+                else folder(PARTY_MEMBER + m.name, m.name, line, null, hint = LIST, artUri = ArtProvider.avatar(m.name))
+            }
+            id.startsWith(PARTY_MEMBER) -> {
+                val name = id.removePrefix(PARTY_MEMBER)
+                if (members.none { it.name == name }) emptyList()
+                else listOf(action(PARTY_REMOVE + name, "Remove $name", "From the Party", ArtProvider.tile("end"), LIST))
+            }
+            else -> emptyList()
+        }
+    }
+
+    /** The Party's three tiles, under `group` as a titled row when given. */
+    private fun partyTiles(group: String?): List<MediaItem> = listOf(
+        folder(PARTY_QR, "Scan to join", PartyDemo.CODE, null, hint = LIST, group = group, single = GRID, artUri = ArtProvider.partyQr(PartyDemo.CODE)),
+        folder(PARTY_MEMBERS, "Members", "${PartyDemo.members.size} in the Party", null, hint = LIST, group = group, single = GRID, artUri = ArtProvider.tile("members")),
+        action(PARTY_END, "End Party", "Ends it for everyone", ArtProvider.tile("end"), GRID, group),
+    )
+
+    /** A row that does something when picked, rather than play. */
+    private fun action(id: String, title: String, subtitle: String, art: android.net.Uri, single: Int, group: String? = null): MediaItem =
+        MediaItem.Builder().setMediaId(id).setMediaMetadata(
+            MediaMetadata.Builder()
+                .setTitle(title)
+                .setSubtitle(subtitle)
+                .setArtist(subtitle)
+                .setArtworkUri(art)
+                .setIsPlayable(true)
+                .setIsBrowsable(false)
+                .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
+                .setExtras(
+                    Bundle().apply {
+                        putInt(MediaConstants.EXTRAS_KEY_CONTENT_STYLE_SINGLE_ITEM, single)
+                        group?.let { putString(MediaConstants.EXTRAS_KEY_CONTENT_STYLE_GROUP_TITLE, it) }
+                    },
+                )
+                .build(),
+        ).build()
+
+    /** A row to read, with nothing behind it. */
+    private fun info(title: String, subtitle: String, art: android.net.Uri? = null): MediaItem =
+        MediaItem.Builder().setMediaId("$PARTY_INFO$title").setMediaMetadata(
+            MediaMetadata.Builder()
+                .setTitle(title)
+                .setSubtitle(subtitle)
+                .setArtist(subtitle)
+                .setArtworkUri(art)
+                .setIsPlayable(false)
+                .setIsBrowsable(false)
+                .setMediaType(MediaMetadata.MEDIA_TYPE_MIXED)
+                .build(),
+        ).build()
+
+    /** Whether a pick was one of the Party's actions. */
+    fun isAction(id: String) = id == PARTY_END || id.startsWith(PARTY_REMOVE)
+
+    /** Carries out a Party action picked in the car. */
+    fun act(id: String) {
+        when {
+            id == PARTY_END -> PartyDemo.end()
+            id.startsWith(PARTY_REMOVE) -> PartyDemo.remove(id.removePrefix(PARTY_REMOVE))
         }
     }
 
@@ -174,6 +271,8 @@ class AutoLibrary(private val core: Core) {
         single: Int? = null,
         /** A tab's icon, in place of art. */
         icon: android.net.Uri? = null,
+        /** Art already made into the car's kind of address. */
+        artUri: android.net.Uri? = null,
     ): MediaItem {
         val extras = Bundle().apply {
             // How what is inside shows: albums as tiles or rows, songs as rows.
@@ -187,7 +286,7 @@ class AutoLibrary(private val core: Core) {
                 .setTitle(title)
                 .setSubtitle(subtitle.ifEmpty { null })
                 .setArtist(subtitle.ifEmpty { null })
-                .setArtworkUri(icon ?: art?.let(ArtProvider::uri))
+                .setArtworkUri(icon ?: artUri ?: art?.let(ArtProvider::uri))
                 .setIsPlayable(false)
                 .setIsBrowsable(true)
                 .setMediaType(MediaMetadata.MEDIA_TYPE_FOLDER_MIXED)
@@ -227,6 +326,14 @@ class AutoLibrary(private val core: Core) {
         const val RECENT = "recent"
         private const val RESUME = "recent:song"
         private const val TAB = "tab:"
+        const val HOME = "tab:home"
+        const val PARTY = "party"
+        const val PARTY_MEMBERS = "party:members"
+        private const val PARTY_QR = "party:qr"
+        private const val PARTY_MEMBER = "party:member:"
+        private const val PARTY_END = "party:end"
+        private const val PARTY_REMOVE = "party:remove:"
+        private const val PARTY_INFO = "party:info:"
         private val TABS = listOf("home" to "Home", "explore" to "Explore", "library" to "Library", "downloads" to "Downloads")
 
         const val STYLE_SUPPORTED = "android.media.browse.CONTENT_STYLE_SUPPORTED"
