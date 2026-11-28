@@ -20,6 +20,7 @@ path = "uniffi-bindgen.rs"
 [dependencies]
 tonearm-core = { path = "../tonearm-core" }
 uniffi = { version = "0.32", features = ["cli"] }
+serde_json = "1"
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"

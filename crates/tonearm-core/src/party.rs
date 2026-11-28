@@ -267,7 +267,7 @@ fn event(v: &Value) -> Option<Event> {
 /// host's latest `state`, which is sent again on reconnecting.
 pub struct Live {
     out: Sender<Value>,
-    events: Receiver<Event>,
+    events: std::sync::Mutex<Receiver<Event>>,
     stop: Arc<AtomicBool>,
 }
 
@@ -282,7 +282,7 @@ impl Live {
             .name("party".into())
             .spawn(move || run(ticket, outgoing, incoming, quit))
             .ok();
-        Live { out, events, stop }
+        Live { out, events: std::sync::Mutex::new(events), stop }
     }
 
     /// Sends one message to the room: `{"type": "add", ...}` and so on.
@@ -297,12 +297,12 @@ impl Live {
 
     /// Events since the last call.
     pub fn events(&self) -> Vec<Event> {
-        self.events.try_iter().collect()
+        self.events.lock().map(|e| e.try_iter().collect()).unwrap_or_default()
     }
 
     /// Waits up to `wait` for the next event.
     pub fn next_event(&self, wait: Duration) -> Option<Event> {
-        self.events.recv_timeout(wait).ok()
+        self.events.lock().ok()?.recv_timeout(wait).ok()
     }
 }
 

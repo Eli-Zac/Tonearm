@@ -81,8 +81,7 @@ class AutoLibrary(private val core: Core) {
                 // A running Party sits at the top of Home. Android Auto
                 // reads its tabs once per connection and shows four at
                 // most, so the Party can't be a tab of its own.
-                android.util.Log.i("Tonearm", "party: car asked for Home, party=${PartyDemo.active}")
-                val party = if (PartyDemo.active) partyTiles(PartyDemo.NAME) else emptyList()
+                val party = CarParty.view?.let { partyTiles(it.name) } ?: emptyList()
                 party + pageChildren(tabPage(node.tab))
             } else {
                 pageChildren(tabPage(node.tab))
@@ -100,41 +99,39 @@ class AutoLibrary(private val core: Core) {
      */
     private fun partyChildren(id: String): List<MediaItem>? {
         if (!id.startsWith(PARTY)) return null
-        if (!PartyDemo.active) return emptyList()
-        val members = PartyDemo.members
+        val party = CarParty.view ?: return emptyList()
+        val members = party.members
         return when {
             id == PARTY -> partyTiles(null)
             // Opened from the QR tile: the code and link, as text.
             id == PARTY_QR -> listOf(
-                info("Code: ${PartyDemo.CODE}", "Type it in Tonearm under Join a Party"),
-                info(core.partyLink(PartyDemo.CODE).removePrefix("https://"), "Or open this link on a phone"),
+                info("Code: ${party.code}", "Type it in Tonearm under Join a Party"),
+                info(party.link.removePrefix("https://"), "Or open this link on a phone"),
             )
             id == PARTY_MEMBERS -> members.map { m ->
-                val line = when {
-                    m.host -> "Host"
-                    m.added == 0 -> "Joined"
-                    m.added == 1 -> "Added 1 song"
-                    else -> "Added ${m.added} songs"
-                }
-                // The host has nothing to open; a guest opens Remove.
-                if (m.host) info(m.name, line, ArtProvider.avatar(m.name))
-                else folder(PARTY_MEMBER + m.name, m.name, line, null, hint = LIST, artUri = ArtProvider.avatar(m.name))
+                // Only the host can remove someone: a guest opens Remove.
+                if (m.host || !party.host) info(m.name, m.line, ArtProvider.avatar(m.name))
+                else folder(PARTY_MEMBER + m.id, m.name, m.line, null, hint = LIST, artUri = ArtProvider.avatar(m.name))
             }
             id.startsWith(PARTY_MEMBER) -> {
-                val name = id.removePrefix(PARTY_MEMBER)
-                if (members.none { it.name == name }) emptyList()
-                else listOf(action(PARTY_REMOVE + name, "Remove $name", "From the Party", ArtProvider.tile("end"), LIST))
+                val member = members.firstOrNull { it.id == id.removePrefix(PARTY_MEMBER) }
+                if (member == null) emptyList()
+                else listOf(action(PARTY_REMOVE + member.id, "Remove ${member.name}", "From the Party", ArtProvider.tile("end"), LIST))
             }
             else -> emptyList()
         }
     }
 
     /** The Party's three tiles, under `group` as a titled row when given. */
-    private fun partyTiles(group: String?): List<MediaItem> = listOf(
-        folder(PARTY_QR, "Scan to join", PartyDemo.CODE, null, hint = LIST, group = group, single = GRID, artUri = ArtProvider.partyQr(PartyDemo.CODE)),
-        folder(PARTY_MEMBERS, "Members", "${PartyDemo.members.size} in the Party", null, hint = LIST, group = group, single = GRID, artUri = ArtProvider.tile("members")),
-        action(PARTY_END, "End Party", "Ends it for everyone", ArtProvider.tile("end"), GRID, group),
-    )
+    private fun partyTiles(group: String?): List<MediaItem> {
+        val party = CarParty.view ?: return emptyList()
+        return listOf(
+            folder(PARTY_QR, "Scan to join", party.code, null, hint = LIST, group = group, single = GRID, artUri = ArtProvider.partyQr(party.code)),
+            folder(PARTY_MEMBERS, "Members", "${party.members.size} in the Party", null, hint = LIST, group = group, single = GRID, artUri = ArtProvider.tile("members")),
+            if (party.host) action(PARTY_END, "End Party", "Ends it for everyone", ArtProvider.tile("end"), GRID, group)
+            else action(PARTY_END, "Leave Party", "The music here goes back to yours", ArtProvider.tile("end"), GRID, group),
+        )
+    }
 
     /** A row that does something when picked, rather than play. */
     private fun action(id: String, title: String, subtitle: String, art: android.net.Uri, single: Int, group: String? = null): MediaItem =
@@ -176,9 +173,10 @@ class AutoLibrary(private val core: Core) {
     /** Carries out a Party action picked in the car. */
     fun act(id: String) {
         when {
-            id == PARTY_END -> PartyDemo.end()
-            id.startsWith(PARTY_REMOVE) -> PartyDemo.remove(id.removePrefix(PARTY_REMOVE))
+            id == PARTY_END -> core.partyEnd()
+            id.startsWith(PARTY_REMOVE) -> core.partyRemove(id.removePrefix(PARTY_REMOVE))
         }
+        CarParty.poll(core)
     }
 
     private fun tabOf(id: String): Node? =

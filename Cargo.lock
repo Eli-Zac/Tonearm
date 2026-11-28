@@ -5406,6 +5406,7 @@ version = "0.10.0"
 dependencies = [
  "jni 0.21.1",
  "ndk-context",
+ "serde_json",
  "tonearm-core",
  "uniffi",
 ]

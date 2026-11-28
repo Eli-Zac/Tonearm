@@ -108,11 +108,11 @@ class CarControls(private val core: Core, private val work: ListeningExecutorSer
         }
         // No skip buttons here: the notification and car draw their own, and
         // these would show again beside them as extra buttons.
-        // Start a Party, or, while one runs, View Party. Its page is the
-        // first tab of the car's browse list.
+        // Start a Party, or, while one runs, View Party. Its tiles sit at
+        // the top of the car's Home.
         val party = CommandButton.Builder(CommandButton.ICON_UNDEFINED)
-            .setCustomIconResId(if (PartyDemo.active) R.drawable.ic_button_party_on else R.drawable.ic_button_party)
-            .setDisplayName(if (PartyDemo.active) "View Party" else "Start a Party")
+            .setCustomIconResId(if (CarParty.active) R.drawable.ic_button_party_on else R.drawable.ic_button_party)
+            .setDisplayName(if (CarParty.active) "View Party" else "Start a Party")
             .setSessionCommand(commands[3])
             .setSlots(CommandButton.SLOT_OVERFLOW)
             .build()
@@ -145,11 +145,19 @@ class CarControls(private val core: Core, private val work: ListeningExecutorSer
             // Starting one when there is none; with one running, the
             // button only names it (the car can't be sent to a page).
             PARTY -> {
-                android.util.Log.i("Tonearm", "party: button pressed, active=${PartyDemo.active}")
-                val started = !PartyDemo.active
-                PartyDemo.start()
                 // The car can't be sent to Home, so it is told where to look.
-                tellCarOnce(if (started) "Party started. It's at the top of Home." else "Your Party is at the top of Home.")
+                if (CarParty.active) {
+                    tellCarOnce("Your Party is at the top of Home.")
+                } else {
+                    tellCarOnce("Starting a Party…")
+                    work.execute {
+                        val failed = CarParty.start(core)
+                        main.post {
+                            tellCarOnce(failed ?: "Party started. It's at the top of Home.")
+                            update()
+                        }
+                    }
+                }
             }
         }
         update()
@@ -162,6 +170,8 @@ class CarControls(private val core: Core, private val work: ListeningExecutorSer
             val p = core.playback()
             shuffle = p.shuffle
             repeat = p.repeat
+            // The Party, started or ended from the phone, the car or a guest.
+            work.execute { CarParty.poll(core) }
             val id = core.nowPlaying()?.videoId
             likedFor = id
             if (id != null && core.signedIn() && LikeState.of(id) == null) {

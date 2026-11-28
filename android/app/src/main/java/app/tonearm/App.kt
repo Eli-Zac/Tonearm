@@ -102,6 +102,8 @@ fun App(core: Core, controller: MediaController?) {
             withContext(Dispatchers.IO) {
                 runCatching { core.castState() }.getOrNull()?.let { cast = it }
                 runCatching { core.takeCastNote() }.getOrNull()?.let { toast = it }
+                // "Sam added Guide Light", "The host ended the Party".
+                runCatching { core.partyNotes() }.getOrNull()?.lastOrNull()?.let { toast = it }
                 runCatching { core.sleepTimer() }.getOrNull()?.let { now ->
                     val before = sleep
                     if (before != null && now.stops > before.stops) toast = "Sleep timer stopped the music"

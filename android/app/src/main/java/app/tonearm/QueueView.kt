@@ -60,6 +60,9 @@ fun QueuePane(core: Core, onMenu: (Song) -> Unit, modifier: Modifier = Modifier)
     val scope = rememberCoroutineScope()
     var songs by remember { mutableStateOf<List<Song>>(emptyList()) }
     var index by remember { mutableIntStateOf(-1) }
+    // Who added each song in a Party, by video id. Only songs a member
+    // added are here, never ones the radio or autoplay put in.
+    var adders by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     // The row picked up, among those up next; -1 when none.
     var from by remember { mutableIntStateOf(-1) }
     // Where the finger is down the list's view, and where on the row it
@@ -73,6 +76,7 @@ fun QueuePane(core: Core, onMenu: (Song) -> Unit, modifier: Modifier = Modifier)
     // while a row is being dragged, which would pull the list from under it.
     LaunchedEffect(core) {
         var seen: ULong? = null
+        var seenParty: ULong? = null
         while (true) {
             if (from < 0) {
                 val read = withContext(Dispatchers.IO) {
@@ -84,13 +88,25 @@ fun QueuePane(core: Core, onMenu: (Song) -> Unit, modifier: Modifier = Modifier)
                     read.third?.let { songs = it; seen = read.first }
                     index = read.second
                 }
+                // Adders follow both the queue and the Party.
+                val party = withContext(Dispatchers.IO) { core.partyVersion() }
+                if (read.third != null || party != seenParty) {
+                    seenParty = party
+                    val list = songs
+                    adders = withContext(Dispatchers.IO) {
+                        list.mapNotNull { s -> core.partyAdder(s.videoId)?.let { s.videoId to it } }.toMap()
+                    }
+                }
             }
             delay(400)
         }
     }
 
     if (index !in songs.indices) {
-        Box(modifier, contentAlignment = Alignment.Center) { Dim("Play something to start a queue", 15.sp) }
+        Column(modifier) {
+            PartyHeader(core)
+            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) { Dim("Play something to start a queue", 15.sp) }
+        }
         return
     }
     val upNext = songs.subList(index + 1, songs.size)
@@ -123,8 +139,9 @@ fun QueuePane(core: Core, onMenu: (Song) -> Unit, modifier: Modifier = Modifier)
     }
 
     Column(modifier) {
+        PartyHeader(core)
         SectionLabel("Now playing")
-        QueueRow(songs[index], current = true, onLongClick = { onMenu(songs[index]) })
+        QueueRow(songs[index], current = true, adder = adders[songs[index].videoId], onLongClick = { onMenu(songs[index]) })
         if (upNext.isNotEmpty()) {
             Spacer(Modifier.height(12.dp))
             SectionLabel("Next up")
@@ -193,6 +210,7 @@ fun QueuePane(core: Core, onMenu: (Song) -> Unit, modifier: Modifier = Modifier)
                         song,
                         current = false,
                         handle = true,
+                        adder = adders[song.videoId],
                         // The row picked up leaves a gap; its raised copy
                         // is drawn over the list.
                         modifier = Modifier.graphicsLayer {
@@ -216,6 +234,7 @@ fun QueuePane(core: Core, onMenu: (Song) -> Unit, modifier: Modifier = Modifier)
                     current = false,
                     lifted = true,
                     handle = true,
+                    adder = adders[song.videoId],
                     modifier = Modifier.offset {
                         IntOffset(0, (fingerY - grab).coerceIn(0f, (viewHeight - rowPx).coerceAtLeast(0f)).roundToInt())
                     },
@@ -243,6 +262,8 @@ private fun QueueRow(
     current: Boolean,
     lifted: Boolean = false,
     handle: Boolean = false,
+    /** Who in the Party added it; null for the radio's and the phone's own. */
+    adder: String? = null,
     modifier: Modifier = Modifier,
     onClick: (() -> Unit)? = null,
     onLongClick: (() -> Unit)? = null,
@@ -276,6 +297,10 @@ private fun QueueRow(
                 Spacer(Modifier.height(3.dp))
                 Dim(song.artist, 14.sp)
             }
+        }
+        // Who added it, as Spotify's Jam marks a guest's song.
+        if (adder != null) {
+            Box(Modifier.padding(end = if (handle) 0.dp else 8.dp)) { PartyAvatar(adder, 22.dp) }
         }
         if (handle) {
             // Six dots: hold and drag to move the song.

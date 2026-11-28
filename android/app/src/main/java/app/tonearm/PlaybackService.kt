@@ -78,7 +78,7 @@ class PlaybackService : MediaLibraryService() {
             }
             Unit
         }
-        PartyDemo.watch(partyChanged)
+        CarParty.watch(partyChanged)
         party = partyChanged
         // A car, earbuds or headphones coming or going: the core's output
         // stays on the device it opened, which on Android may have left
@@ -294,7 +294,7 @@ class PlaybackService : MediaLibraryService() {
         devices = null
         controls?.stop()
         controls = null
-        party?.let(PartyDemo::unwatch)
+        party?.let(CarParty::unwatch)
         party = null
         session?.run {
             player.release()

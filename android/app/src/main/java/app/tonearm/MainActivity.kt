@@ -59,6 +59,27 @@ class MainActivity : ComponentActivity() {
                 App(core, controller)
             }
         }
+        joinParty(intent)
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        joinParty(intent)
+    }
+
+    /** A Party link opened the app (a phone camera's scan, or a link in a
+     *  message): join it. The queue shows the Party; a note says it worked. */
+    private fun joinParty(intent: android.content.Intent?) {
+        val link = intent?.data?.toString() ?: return
+        val core = (application as TonearmApp).core
+        val code = core.partyCodeFrom(link) ?: return
+        // Once: the same intent comes back when the screen is rebuilt.
+        intent.data = null
+        Thread {
+            val name = runCatching { core.account()?.name }.getOrNull()?.trim()?.split(" ")?.firstOrNull()?.takeIf { it.isNotBlank() }
+                ?: Build.MODEL
+            runCatching { core.partyJoin(code, name) }
+        }.start()
     }
 
     /** Looks for Cast devices while the app is on screen. */

@@ -25,6 +25,7 @@ mod lyrics;
 mod mix;
 mod menu;
 mod pages;
+mod party;
 mod playing;
 mod profile;
 mod quick;
@@ -581,7 +582,12 @@ impl Tonearm {
     /// to tell the user, empty when the song simply starts.
     pub fn play_next(&self, item: Item) -> Result<String, TonearmError> {
         let song = song(&pages::core_item(&item)).ok_or_else(|| "Nothing to play".to_string())?;
+        // A guest in a Party adds to the Party instead.
+        if let Some(told) = self.party_guest_add(&song, true) {
+            return Ok(told);
+        }
         let (id, title) = (song.video_id.clone(), song.title.clone());
+        self.party_forget_adder(&id);
         let added = self.queue.lock().unwrap().play_next(song, |s| s.video_id == id);
         self.after_adding(added, format!("{title} plays next"), format!("{title} already plays next"))
     }
@@ -589,7 +595,11 @@ impl Tonearm {
     /// Add to queue: at the end, unless it is queued already.
     pub fn add_to_queue(&self, item: Item) -> Result<String, TonearmError> {
         let song = song(&pages::core_item(&item)).ok_or_else(|| "Nothing to add".to_string())?;
+        if let Some(told) = self.party_guest_add(&song, false) {
+            return Ok(told);
+        }
         let (id, title) = (song.video_id.clone(), song.title.clone());
+        self.party_forget_adder(&id);
         let added = self.queue.lock().unwrap().add(song, |s| s.video_id == id);
         self.after_adding(added, format!("Added {title} to the queue"), String::new())
     }
