@@ -10,6 +10,7 @@ mod images;
 mod media_keys;
 mod menu;
 mod mixing;
+mod party;
 mod recommend;
 #[cfg(windows)]
 mod shell;
@@ -520,6 +521,9 @@ struct App {
     /// shows nothing; and when Discord was last told.
     presence: Cell<(Option<u64>, Instant)>,
     toast_timer: Timer,
+    /// The Party this computer is in, and its tick (src/party.rs).
+    party: RefCell<Option<party::Here>>,
+    party_timer: Timer,
     /// What the toast's button does, while it shows one.
     toast_action: RefCell<Option<Box<dyn Fn(&Rc<App>)>>>,
     release: RefCell<Option<update::Release>>,
@@ -6255,6 +6259,8 @@ translate: Cell::new(load_translate()),
         attached: Cell::new(false),
         minimized: Cell::new(false),
         toast_timer: Timer::default(),
+        party: RefCell::new(None),
+        party_timer: Timer::default(),
         toast_action: RefCell::default(),
         release: RefCell::new(None),
         suggest: RefCell::default(),
@@ -6384,6 +6390,12 @@ translate: Cell::new(load_translate()),
     on!(on_tonearm_sign_in, |app, email, code| app.tonearm_sign_in(email.to_string(), code.to_string()));
     on!(on_tonearm_pair_claim, |app, code| app.tonearm_pair_claim(code.to_string()));
     on!(on_tonearm_pair_start, |app| app.tonearm_pair_start());
+    on!(on_party_start, |app| app.party_start());
+    on!(on_party_join, |app, text| app.party_join(text.to_string()));
+    on!(on_party_copy_link, |app| app.party_copy_link());
+    on!(on_party_end, |app| app.party_end());
+    on!(on_party_set_others, |app, on| app.party_set_others(on));
+    on!(on_party_remove, |app, id| app.party_remove(id.to_string()));
     on!(on_tonearm_sign_out, |app| app.tonearm_sign_out());
     on!(on_tonearm_remove_device, |app, index| app.tonearm_remove_device(index.max(0) as usize));
     app.show_tonearm_account();

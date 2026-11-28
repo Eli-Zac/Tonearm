@@ -686,6 +686,9 @@ impl App {
         let Some(video_id) = item.video_id.clone() else {
             return;
         };
+        if self.party_guest_add(&item, true) {
+            return;
+        }
         if self.player.borrow().queue.is_empty() {
             self.set_queue(vec![item], 0);
             return;
@@ -725,6 +728,9 @@ impl App {
         let Some(video_id) = item.video_id.clone() else {
             return;
         };
+        if self.party_guest_add(&item, false) {
+            return;
+        }
         let (empty, known) = {
             let player = self.player.borrow();
             let known = player

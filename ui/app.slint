@@ -193,6 +193,17 @@ export struct AccountDevice {
     current: bool,
 }
 
+// Someone in the Party, for the queue's Party header.
+export struct PartyMember {
+    id: string,
+    name: string,
+    // "Host", "Added 3 songs", "Joined", "Away".
+    line: string,
+    letter: string,
+    color: color,
+    host: bool,
+}
+
 // The cast button's icon: a screen with the corner waves, as a filled
 // path in a 24 unit box. The icon font has no cast glyph.
 global CastIcon {
@@ -5379,6 +5390,33 @@ export component AppWindow inherits Window {
     // The QR code of that pairing code, for a phone to scan.
     in property <image> tonearm-pair-qr;
     in property <[AccountDevice]> tonearm-devices;
+
+    // The Party (docs/party.md), at the top of the queue.
+    in property <bool> party-on;
+    in property <bool> party-host;
+    // Starting or joining, waiting for the server.
+    in property <bool> party-busy;
+    in property <string> party-name;
+    in property <string> party-code;
+    // Why starting or joining failed, or "Reconnecting…".
+    in property <string> party-note;
+    // A guest's line: what the host is playing.
+    in property <string> party-playing;
+    in property <image> party-qr;
+    in property <[PartyMember]> party-members;
+    // Guests may play, pause and skip, not only add songs.
+    in property <bool> party-others;
+    in-out property <bool> party-invite-open;
+    in-out property <bool> party-members-open;
+    in-out property <bool> party-joining;
+    callback party-start();
+    callback party-join(string);
+    callback party-copy-link();
+    // The host ends the Party; a guest leaves it.
+    callback party-end();
+    callback party-set-others(bool);
+    callback party-remove(string);
+
     callback tonearm-open();
     callback tonearm-request-code(string);
     callback tonearm-sign-in(string, string);
@@ -7353,10 +7391,251 @@ export component AppWindow inherits Window {
             clicked => { root.show-panel(3); }
         }
 
+        // The Party, above the queue: start or join one, or, in one, its
+        // name, who's in it, the invite card with the link and QR code, and
+        // whether guests may change what's playing. Always laid out (hidden
+        // with the panel) so the queue below can sit under its height.
+        party-box := VerticalLayout {
+            x: 20px;
+            y: 52px + root.panel-rise(root.queue-t);
+            width: root.panel-width - 40px;
+            // Only as tall as what it holds, never stretched over the queue.
+            height: self.preferred-height;
+            alignment: start;
+            visible: root.queue-t > 0;
+            opacity: root.queue-t;
+            spacing: 10px;
+            padding-bottom: 16px;
+            if !root.party-on && !root.party-joining: HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                PillButton {
+                    text: root.party-busy ? "Starting…" : "Start a Party";
+                    clicked => {
+                        if !root.party-busy {
+                            root.party-start();
+                        }
+                    }
+                }
+                PillButton {
+                    text: "Join a Party";
+                    clicked => { root.party-joining = true; }
+                }
+            }
+            if !root.party-on && root.party-joining: HorizontalLayout {
+                spacing: 8px;
+                join-field := Field {
+                    placeholder: "Party code or link";
+                    horizontal-stretch: 1;
+                    accepted(text) => { root.party-join(text); }
+                }
+                PillButton {
+                    text: root.party-busy ? "Joining…" : "Join";
+                    primary: true;
+                    clicked => {
+                        if !root.party-busy {
+                            root.party-join(join-field.text);
+                        }
+                    }
+                }
+                CloseButton {
+                    y: 2px;
+                    clicked => { root.party-joining = false; }
+                }
+            }
+            if root.party-on: Text {
+                text: root.party-name;
+                color: Theme.text;
+                font-size: 22px;
+                font-weight: 800;
+                overflow: elide;
+            }
+            if root.party-on && !root.party-host && root.party-playing != "": Text {
+                text: root.party-playing;
+                color: Theme.dim;
+                font-size: 14px;
+                overflow: elide;
+            }
+            if root.party-on: HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                // The first few members, overlapping; opens the list.
+                Rectangle {
+                    width: min(root.party-members.length, 4) * 22px + 12px;
+                    height: 36px;
+                    for member[index] in root.party-members: Rectangle {
+                        visible: index < 4;
+                        x: index * 22px;
+                        y: 2px;
+                        width: 32px;
+                        height: 32px;
+                        border-radius: 16px;
+                        border-width: 2px;
+                        border-color: root.panel-color;
+                        background: member.color;
+                        Text {
+                            text: member.letter;
+                            color: #ffffff;
+                            font-size: 14px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                    TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.party-members-open = !root.party-members-open; }
+                    }
+                }
+                PillButton {
+                    text: "Invite";
+                    clicked => { root.party-invite-open = !root.party-invite-open; }
+                }
+                PillButton {
+                    text: "Members";
+                    clicked => { root.party-members-open = !root.party-members-open; }
+                }
+                PillButton {
+                    text: root.party-host ? "End" : "Leave";
+                    clicked => { root.party-end(); }
+                }
+            }
+            if root.party-note != "": Text {
+                text: root.party-note;
+                color: root.party-on ? Theme.dim : #ff8095;
+                font-size: 13px;
+                wrap: word-wrap;
+            }
+            if root.party-on && root.party-invite-open: Rectangle {
+                height: 236px;
+                border-radius: 14px;
+                background: #ffffff0d;
+                Text {
+                    x: 16px;
+                    y: 14px;
+                    width: parent.width - 64px;
+                    text: "Invite friends to your Party";
+                    color: Theme.text;
+                    font-size: 15px;
+                    font-weight: 700;
+                }
+                Text {
+                    x: 16px;
+                    y: 38px;
+                    width: parent.width - 64px;
+                    text: "Copy and share the link, or ask them to scan the QR code with their phone's camera.";
+                    color: Theme.dim;
+                    font-size: 13px;
+                    wrap: word-wrap;
+                }
+                CloseButton {
+                    x: parent.width - self.width - 8px;
+                    y: 8px;
+                    clicked => { root.party-invite-open = false; }
+                }
+                Rectangle {
+                    y: 88px;
+                    height: 1px;
+                    background: #ffffff14;
+                }
+                PillButton {
+                    x: (parent.width - 128px - 32px - self.width) / 2 + 8px;
+                    y: 88px + (148px - self.height) / 2 - 12px;
+                    text: "Copy link";
+                    primary: true;
+                    clicked => { root.party-copy-link(); }
+                }
+                Text {
+                    x: 16px;
+                    y: 88px + (148px - 36px) / 2 + 32px;
+                    width: parent.width - 128px - 32px;
+                    text: root.party-code;
+                    color: Theme.dim;
+                    font-size: 14px;
+                    font-weight: 600;
+                    letter-spacing: 1px;
+                    horizontal-alignment: center;
+                }
+                Rectangle {
+                    x: parent.width - 128px - 16px;
+                    y: 88px + 10px;
+                    width: 128px;
+                    height: 128px;
+                    border-radius: 10px;
+                    background: #ffffff;
+                    clip: true;
+                    Image {
+                        width: 128px;
+                        height: 128px;
+                        source: root.party-qr;
+                        image-rendering: pixelated;
+                    }
+                }
+            }
+            if root.party-on && root.party-host: MixToggle {
+                title: "Let others change what's playing";
+                on: root.party-others;
+                toggled => { root.party-set-others(!root.party-others); }
+            }
+            if root.party-on && root.party-members-open: VerticalLayout {
+                spacing: 2px;
+                Text {
+                    text: "Members";
+                    color: Theme.dim;
+                    font-size: 13px;
+                    font-weight: 600;
+                }
+                for member in root.party-members: Rectangle {
+                    height: 48px;
+                    Rectangle {
+                        x: 0;
+                        y: 6px;
+                        width: 36px;
+                        height: 36px;
+                        border-radius: 18px;
+                        background: member.color;
+                        Text {
+                            text: member.letter;
+                            color: #ffffff;
+                            font-size: 15px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                    Text {
+                        x: 48px;
+                        y: 6px;
+                        width: parent.width - 48px - 90px;
+                        text: member.name;
+                        color: Theme.text;
+                        font-size: 15px;
+                        font-weight: 600;
+                        overflow: elide;
+                    }
+                    Text {
+                        x: 48px;
+                        y: 26px;
+                        width: parent.width - 48px - 90px;
+                        text: member.line;
+                        color: Theme.dim;
+                        font-size: 13px;
+                        overflow: elide;
+                    }
+                    if root.party-host && !member.host: PillButton {
+                        x: parent.width - self.width;
+                        y: 6px;
+                        text: "Remove";
+                        clicked => { root.party-remove(member.id); }
+                    }
+                }
+            }
+        }
+
         // Queue: what plays now, then what plays next. Drag to reorder.
         if root.queue-t > 0 && root.queue-index < 0: Text {
             x: 20px;
-            y: 56px + root.panel-rise(root.queue-t);
+            y: 52px + party-box.preferred-height + root.panel-rise(root.queue-t);
             opacity: root.queue-t;
             text: "Play something to start a queue";
             color: Theme.dim;
@@ -7364,10 +7643,10 @@ export component AppWindow inherits Window {
         }
         if root.queue-t > 0 && root.queue-index >= 0: Rectangle {
             x: 0;
-            y: 52px + root.panel-rise(root.queue-t);
+            y: 52px + party-box.preferred-height + root.panel-rise(root.queue-t);
             opacity: root.queue-t;
             width: parent.width;
-            height: parent.height - 52px;
+            height: parent.height - 52px - party-box.preferred-height;
             SectionLabel {
                 x: 20px;
                 y: 0;

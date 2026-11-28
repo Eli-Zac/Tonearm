@@ -8,7 +8,7 @@
 //!       or `end` sends that.
 //!   cargo run -p tonearm-core --example party -- <profile> look <code>
 //!   cargo run -p tonearm-core --example party -- <profile> join <code> <name>
-//!       joins and prints what happens; typing `add <video id>`, `next`,
+//!       joins and prints what happens; typing `add <video id> [title]`, `next`,
 //!       `pause` or `leave` sends that.
 
 use serde_json::json;
@@ -84,7 +84,11 @@ fn main() {
                         continue;
                     }
                 },
-                "add" => json!({ "type": "add", "item": { "video_id": rest }, "next": false }),
+                // add <video id> [title]
+                "add" => {
+                    let (id, title) = rest.split_once(' ').unwrap_or((rest, ""));
+                    json!({ "type": "add", "item": { "video_id": id, "title": title }, "next": false })
+                }
                 "end" | "leave" | "next" | "pause" | "play" | "previous" => json!({ "type": word }),
                 _ => {
                     println!("?");

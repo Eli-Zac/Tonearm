@@ -85,6 +85,43 @@ pub struct Member {
     pub online: bool,
 }
 
+/// A song as it travels in a Party: a guest's add, the host's queue.
+pub fn song_json(item: &crate::innertube::model::Item) -> Value {
+    json!({
+        "video_id": item.video_id,
+        "title": item.title,
+        "subtitle": item.subtitle,
+        "artists": item.artists.iter().map(|(name, _)| name).collect::<Vec<_>>(),
+        "art": item.thumb,
+        "duration": item.duration,
+        "explicit": item.explicit,
+    })
+}
+
+/// A song from a Party message. None without a video id.
+pub fn song_from(v: &Value) -> Option<crate::innertube::model::Item> {
+    let video_id = v["video_id"].as_str().filter(|id| !id.is_empty())?.to_string();
+    let artists: Vec<(String, Option<String>)> = v["artists"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|n| n.as_str()).map(|n| (n.to_string(), None)).collect())
+        .unwrap_or_default();
+    let subtitle = match text(v, "subtitle") {
+        s if s.is_empty() => artists.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", "),
+        s => s,
+    };
+    Some(crate::innertube::model::Item {
+        kind: crate::innertube::model::Kind::Song,
+        title: text(v, "title"),
+        subtitle,
+        thumb: text(v, "art"),
+        duration: text(v, "duration"),
+        video_id: Some(video_id),
+        artists,
+        explicit: v["explicit"].as_bool().unwrap_or(false),
+        ..Default::default()
+    })
+}
+
 /// A request to the server with no account sign-in: a Party's own token, or none.
 fn call(method: &str, path: &str, token: Option<&str>, body: Option<Value>) -> Result<Value, String> {
     let url = format!("{}{path}", account::server());
