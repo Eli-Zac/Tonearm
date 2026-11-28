@@ -2723,6 +2723,11 @@ impl App {
             .filter_map(|i| player.model.row_data(i))
             .collect();
         player.up_next.set_vec(rows);
+        // Who in a Party added each, row for row.
+        let adders: Vec<PartyAdder> = player.queue.iter().skip(player.index + 1).map(|i| self.party_adder(i)).collect();
+        self.ui.set_up_next_adders(ModelRc::new(VecModel::from(adders)));
+        self.ui
+            .set_queue_now_adder(player.queue.get(player.index).map(|i| self.party_adder(i)).unwrap_or_default());
     }
 
     /// Moves a queued song from one place to another, by queue position.

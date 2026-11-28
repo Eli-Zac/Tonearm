@@ -6,6 +6,7 @@
 use crate::{on_ui, App};
 use serde_json::{json, Value};
 use slint::{Image, ModelRc, Timer, TimerMode, VecModel};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -25,6 +26,9 @@ pub(crate) struct Here {
     /// The host's last state as sent, to send only changes.
     sent: String,
     sent_at: Instant,
+    /// Who added each song guests put in, by video id, for the avatars on
+    /// the queue's rows. Never the radio's, autoplay's or the host's own.
+    adders: HashMap<String, String>,
 }
 
 /// Avatar colours, picked by name, as the car's avatars are.
@@ -155,6 +159,7 @@ impl App {
             members: Vec::new(),
             sent: String::new(),
             sent_at: Instant::now() - STATE_EVERY,
+            adders: HashMap::new(),
         });
         let weak = Rc::downgrade(self);
         self.party_timer.start(TimerMode::Repeated, Duration::from_millis(250), move || {
@@ -173,6 +178,8 @@ impl App {
         self.ui.set_party_note("".into());
         self.ui.set_party_invite_open(false);
         self.ui.set_party_members_open(false);
+        // The adders' avatars go with the Party.
+        self.sync_up_next();
         if !note.is_empty() {
             self.toast(note);
         }
@@ -228,6 +235,20 @@ impl App {
         drop(party);
         self.toast(format!("Added {} to {name}", item.title));
         true
+    }
+
+    /// Who in the Party added a queued song, as its row's avatar. An empty
+    /// letter when nobody in it did.
+    pub(crate) fn party_adder(&self, item: &Item) -> crate::PartyAdder {
+        let party = self.party.borrow();
+        let name = item.video_id.as_ref().and_then(|id| party.as_ref()?.adders.get(id));
+        match name {
+            Some(name) => crate::PartyAdder {
+                letter: name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default().into(),
+                color: colour(name),
+            },
+            None => crate::PartyAdder::default(),
+        }
     }
 
     fn party_show_members(&self, members: &[Member]) {
@@ -347,7 +368,18 @@ impl App {
             "add" => {
                 let Some(item) = party::song_from(&args["item"]) else { return };
                 let title = item.title.clone();
-                if args["next"].as_bool().unwrap_or(false) {
+                // The guest's avatar goes on the song's row. Not on a song
+                // already queued, which Add to queue leaves as it is.
+                let next = args["next"].as_bool().unwrap_or(false);
+                if let Some(id) = item.video_id.clone() {
+                    let queued = self.player.borrow().queue.iter().any(|i| i.video_id.as_deref() == Some(id.as_str()));
+                    if next || !queued {
+                        if let Some(here) = self.party.borrow_mut().as_mut() {
+                            here.adders.insert(id, from_name.to_string());
+                        }
+                    }
+                }
+                if next {
                     self.play_next(item);
                 } else {
                     self.add_to_queue(item);

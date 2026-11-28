@@ -147,7 +147,10 @@ after 12 hours whatever happens.
 ### Desktop and phone: the queue
 
 At the top of the Queue panel (desktop) and the queue sheet (phone), above
-Now playing, as in Spotify's Jam:
+Now playing, as in Spotify's Jam. On the phone the queue is a full-screen
+sheet over Now playing (same flowing backdrop, a slim player along the
+bottom), and the Party header, Now playing and Next up are one scrolling
+list, so the header scrolls away and the songs get the screen.
 
 **No Party:** a "Start a Party" row with a short line under it ("Listen
 together. Friends add songs from their phones."), and a "Join a Party" button
@@ -156,8 +159,9 @@ that opens the Join box (paste a link or code; on the phone also Scan).
 **In a Party (host):**
 
 ```
-Eli's Party
-(avatars)  [Invite]  [Members]  [End]
+(avatars) Eli's Party          [Invite]  [⋯]
+          3 people                        ├ Members
+                                          └ End the Party
 
 ┌ Invite friends to your Party ──────────── × ┐
 │ Copy and share the link, or ask them to     │
@@ -167,21 +171,24 @@ Eli's Party
 │                              │   QR    │    │
 │   K7Q-M4P                    └─────────┘    │
 └─────────────────────────────────────────────┘
-Let others change what's playing          (on)
+Let others change what's playing          (o)   one slim row, small switch
 
 Now playing
 ...
 Next from: Liked Songs   (rows show the adder's avatar)
 ```
 
-- The invite card shows when the Party starts and when Invite is pressed. Its
-  × closes it.
-- The avatars are the first few members. Tapping them, or Members, opens the
-  member list (name, avatar, "Host", the host can remove).
-- End asks once before ending.
+- The invite card shows once when the Party starts and after that only when
+  Invite is pressed. Its × closes it.
+- The avatars are the first few members. Tapping them or the name, or
+  Members in ⋯, opens the member list (name, avatar, "Host", the host can
+  remove).
+- Queue rows show the adder's avatar only for songs a member added, never
+  the radio's, autoplay's or the host's own.
 
-**In a Party (guest):** the same header with the host's name, the avatars,
-Invite (so guests can pass it on), Members and Leave. No switch.
+**In a Party (guest):** the same row with the Party's name and what the host
+plays under it, Invite (so guests can pass it on), and ⋯ for Members and
+Leave the Party. No switch.
 
 Everything that loads (avatars, the QR) keeps its final size from the start,
 with a skeleton in its place, so nothing in the queue moves.
