@@ -4,6 +4,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.animation.core.animateFloatAsState
@@ -79,8 +80,13 @@ fun App(core: Core, controller: MediaController?) {
     // Whether Now Playing last left by being swiped off; reset as it opens.
     var swipedAway by remember { mutableStateOf(false) }
     LaunchedEffect(nowPlayingOpen) { if (nowPlayingOpen) swipedAway = false }
-    // What Now Playing shows above the song: the cover, lyrics or queue.
+    // What Now Playing shows above the song: the cover or the lyrics.
     var panel by rememberSaveable { mutableStateOf(Panel.Cover) }
+    // The queue's sheet over Now Playing, and its Party header's state,
+    // kept while the sheet comes and goes.
+    var queueOpen by remember { mutableStateOf(false) }
+    val partyUi = remember(core) { PartyUi() }
+    LaunchedEffect(nowPlayingOpen) { if (!nowPlayingOpen) queueOpen = false }
     var toast by remember { mutableStateOf<String?>(null) }
     // The item whose menu is open, from a long press.
     var menuItem by remember { mutableStateOf<MenuRequest?>(null) }
@@ -321,12 +327,13 @@ fun App(core: Core, controller: MediaController?) {
     }
 
     val stack = stacks.getValue(tab)
-    BackHandler(enabled = mixEdit != null || castOpen || sleepOpen || menuItem != null || nowPlayingOpen || stack.isNotEmpty() || tab != Tab.Home) {
+    BackHandler(enabled = mixEdit != null || castOpen || sleepOpen || menuItem != null || queueOpen || nowPlayingOpen || stack.isNotEmpty() || tab != Tab.Home) {
         when {
             mixEdit != null -> mixEdit = null
             castOpen -> castOpen = false
             sleepOpen -> sleepOpen = false
             menuItem != null -> menuItem = null
+            queueOpen -> queueOpen = false
             nowPlayingOpen -> nowPlayingOpen = false
             stack.isNotEmpty() -> stack.removeAt(stack.lastIndex)
             else -> tab = Tab.Home
@@ -406,12 +413,29 @@ fun App(core: Core, controller: MediaController?) {
                     onCast = { castOpen = true },
                     sleeping = (sleep?.choice ?: 0u) != 0u,
                     onSleep = { sleepOpen = true },
+                    onQueue = { queueOpen = true },
                     liked = liked,
                     onLike = { flipLike() },
                     onOpenArtist = { id, name -> host.open(id, name) },
                     onSwipedAway = { swipedAway = true },
                     open = nowPlayingOpen,
                 ) { nowPlayingOpen = false }
+            }
+        }
+        // The queue, over Now Playing: rises from the bottom, where its
+        // button is, and goes with a swipe down, the X or the player strip.
+        // Under the song menus, which a long press in it opens.
+        AnimatedVisibility(
+            visible = queueOpen && nowPlayingOpen && now != null && controller != null,
+            enter = slideInVertically(tween(300, easing = CubicBezierEasing(0.22f, 1f, 0.36f, 1f))) { it },
+            exit = slideOutVertically(tween(220, easing = FastOutSlowInEasing)) { it },
+        ) {
+            if (now != null && controller != null) {
+                DragToClose({ queueOpen = false }) {
+                    QueueSheet(core, partyUi, now, controller, onMenu = { menuItem = MenuRequest(it.asItem()) }) {
+                        queueOpen = false
+                    }
+                }
             }
         }
         // A song's menu over everything, Now Playing too: the screen dims

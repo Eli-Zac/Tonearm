@@ -74,73 +74,98 @@ private fun myName(core: Core): String =
         ?: android.os.Build.MODEL
 
 /**
- * The Party above the queue: Start a Party and Join a Party (a code, a link
- * or a QR scan); in one, its name, the first few members, Invite, Members
- * and End (Leave for a guest), the invite card with Copy link and the QR
- * code, and for the host "Let others change what's playing".
+ * What the Party header shows, kept above the queue sheet: the header is an
+ * item in the queue's list, which drops it when it scrolls away, and the
+ * sheet comes and goes. Kept here, the invite card shows once when a Party
+ * starts, not each time the queue opens, and a half-typed code survives.
  */
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-fun PartyHeader(core: Core, modifier: Modifier = Modifier) {
-    val context = LocalContext.current
-    val clipboard = LocalClipboardManager.current
-    val scope = rememberCoroutineScope()
-    var party by remember { mutableStateOf<PartyView?>(null) }
-    var joining by remember { mutableStateOf(false) }
-    var busy by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf("") }
-    var invite by remember { mutableStateOf(false) }
-    var members by remember { mutableStateOf(false) }
-    var code by remember { mutableStateOf("") }
+class PartyUi {
+    var party by mutableStateOf<PartyView?>(null)
+    var joining by mutableStateOf(false)
+    var busy by mutableStateOf(false)
+    var error by mutableStateOf("")
+    var invite by mutableStateOf(false)
+    var members by mutableStateOf(false)
+    var menu by mutableStateOf(false)
+    var code by mutableStateOf("")
+    private var seen: ULong? = null
+    /** The Party whose invite card has shown by itself already. */
+    private var invited: String? = null
 
-    LaunchedEffect(core) {
-        var seen: ULong? = null
+    private fun show(now: PartyView?, version: ULong) {
+        // The host sees the invite once, as soon as the Party starts.
+        if (now != null && now.host && invited != now.code) invite = true
+        if (now != null) invited = now.code
+        if (now == null) { invite = false; members = false; menu = false }
+        party = now
+        seen = version
+    }
+
+    /** Reads the Party at once. Only a lock in the core, so fine on the
+     *  main thread: the header opens as it is, never Start a Party first. */
+    fun refresh(core: Core) {
+        val version = core.partyVersion()
+        if (version != seen) show(core.party(), version)
+    }
+
+    /** Keeps following the Party while the queue shows. */
+    suspend fun follow(core: Core) {
         while (true) {
-            val version = withContext(Dispatchers.IO) { core.partyVersion() }
-            if (version != seen) {
-                val now = withContext(Dispatchers.IO) { core.party() }
-                // The host sees the invite as soon as the Party starts.
-                if (party == null && now != null && now.host) invite = true
-                if (now == null) { invite = false; members = false }
-                party = now
-                seen = version
+            val read = withContext(Dispatchers.IO) {
+                val version = core.partyVersion()
+                version to (if (version != seen) core.party() else null)
             }
+            if (read.first != seen) show(read.second, read.first)
             delay(400)
         }
     }
+}
+
+/**
+ * The Party at the top of the queue. Not in one: Start a Party and Join a
+ * Party (a code, a link or a QR scan). In one, a single row: the members'
+ * avatars and the Party's name (both open the members), Invite, and ⋯ for
+ * Members and End (Leave for a guest). Under it the invite card when shown,
+ * and for the host a compact "Let others change what's playing".
+ */
+@Composable
+fun PartyHeader(core: Core, ui: PartyUi, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+    val scope = rememberCoroutineScope()
 
     fun join(text: String) {
-        if (busy) return
-        busy = true
-        error = ""
+        if (ui.busy) return
+        ui.busy = true
+        ui.error = ""
         scope.launch {
             val result = withContext(Dispatchers.IO) { runCatching { core.partyJoin(text, myName(core)) } }
-            busy = false
-            result.exceptionOrNull()?.let { error = it.message ?: "Couldn't join that Party" } ?: run { joining = false; code = "" }
+            ui.busy = false
+            result.exceptionOrNull()?.let { ui.error = it.message ?: "Couldn't join that Party" } ?: run { ui.joining = false; ui.code = "" }
         }
     }
 
-    Column(modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp, bottom = 14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        val p = party
+    Column(modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        val p = ui.party
         if (p == null) {
-            if (!joining) {
+            if (!ui.joining) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    PillButton(if (busy) "Starting…" else "Start a Party") {
-                        if (busy) return@PillButton
-                        busy = true
-                        error = ""
+                    PillButton(if (ui.busy) "Starting…" else "Start a Party") {
+                        if (ui.busy) return@PillButton
+                        ui.busy = true
+                        ui.error = ""
                         scope.launch {
                             val result = withContext(Dispatchers.IO) { runCatching { core.partyStart(myName(core)) } }
-                            busy = false
-                            result.exceptionOrNull()?.let { error = it.message ?: "Couldn't start a Party" }
+                            ui.busy = false
+                            result.exceptionOrNull()?.let { ui.error = it.message ?: "Couldn't start a Party" }
                         }
                     }
-                    PillButton("Join a Party") { joining = true; error = "" }
+                    PillButton("Join a Party") { ui.joining = true; ui.error = "" }
                 }
             } else {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    CodeBox(code, { code = it }, Modifier.weight(1f)) { join(code) }
-                    PillButton(if (busy) "Joining…" else "Join", primary = true) { join(code) }
+                    CodeBox(ui.code, { ui.code = it }, Modifier.weight(1f)) { join(ui.code) }
+                    PillButton(if (ui.busy) "Joining…" else "Join", primary = true) { join(ui.code) }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     PillButton("Scan a QR code") {
@@ -149,41 +174,60 @@ fun PartyHeader(core: Core, modifier: Modifier = Modifier) {
                         GmsBarcodeScanning.getClient(context, options).startScan()
                             .addOnSuccessListener { barcode ->
                                 val found = core.partyCodeFrom(barcode.rawValue.orEmpty())
-                                if (found == null) error = "That QR code isn't a Tonearm Party" else join(found)
+                                if (found == null) ui.error = "That QR code isn't a Tonearm Party" else join(found)
                             }
                     }
-                    PillButton("Cancel") { joining = false; error = "" }
+                    PillButton("Cancel") { ui.joining = false; ui.error = "" }
                 }
             }
-            if (error.isNotEmpty()) Text(error, color = Color(0xFFFF8095), fontFamily = Tonearm.font, fontSize = 13.sp)
+            if (ui.error.isNotEmpty()) Text(ui.error, color = Color(0xFFFF8095), fontFamily = Tonearm.font, fontSize = 13.sp)
             return@Column
         }
 
-        Title(p.name, size = 22.sp, weight = FontWeight.ExtraBold)
-        if (!p.host && p.playing.isNotEmpty()) Dim(p.playing, 14.sp, modifier = Modifier.offset(y = (-6).dp))
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            // The first few members, overlapping; a tap opens the list.
+        Row(Modifier.fillMaxWidth().height(52.dp), verticalAlignment = Alignment.CenterVertically) {
+            // The first few members, overlapping, and the name: a tap
+            // opens the members.
             val shown = p.members.take(4)
-            Box(
-                Modifier.height(36.dp).width((shown.size * 22 + 12).dp).clip(RoundedCornerShape(18.dp))
-                    .clickable { members = !members },
-                contentAlignment = Alignment.CenterStart,
+            Row(
+                Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(12.dp))
+                    .clickable { ui.members = !ui.members },
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                shown.forEachIndexed { i, m ->
-                    Box(Modifier.offset(x = (i * 22).dp)) { PartyAvatar(m.name, 32.dp, ring = Tonearm.bg) }
+                // At least one avatar's room, so the name never shifts as
+                // the members come in.
+                Box(Modifier.width((shown.size.coerceAtLeast(1) * 18 + 14).dp), contentAlignment = Alignment.CenterStart) {
+                    shown.forEachIndexed { i, m ->
+                        Box(Modifier.offset(x = (i * 18).dp)) { PartyAvatar(m.name, 32.dp, ring = Tonearm.bg) }
+                    }
+                }
+                Column(Modifier.weight(1f).padding(start = 10.dp, end = 8.dp)) {
+                    Title(p.name, size = 17.sp, weight = FontWeight.Bold)
+                    Dim(partyLine(p), 13.sp)
                 }
             }
-            PillButton("Invite") { invite = !invite }
-            PillButton("Members") { members = !members }
-            PillButton(if (p.host) "End" else "Leave") { scope.launch(Dispatchers.IO) { core.partyEnd() } }
+            PillButton("Invite") { ui.invite = !ui.invite }
+            Box {
+                Box(
+                    Modifier.size(40.dp).clip(CircleShape).clickable { ui.menu = true },
+                    contentAlignment = Alignment.Center,
+                ) { Icon(Icons.dots, size = 22.sp, filled = true) }
+                if (ui.menu) {
+                    PartyMenu(
+                        host = p.host,
+                        onDismiss = { ui.menu = false },
+                        onMembers = { ui.menu = false; ui.members = !ui.members },
+                        onEnd = { ui.menu = false; scope.launch(Dispatchers.IO) { core.partyEnd() } },
+                    )
+                }
+            }
         }
         if (p.note.isNotEmpty()) Dim(p.note, 13.sp)
-        if (invite) {
+        if (ui.invite) {
             InviteCard(
                 p,
                 qr = remember(p.code) { core.partyQr(p.code) },
                 onCopy = { clipboard.setText(AnnotatedString(p.link)) },
-                onClose = { invite = false },
+                onClose = { ui.invite = false },
             )
         }
         if (p.host) {
@@ -191,7 +235,7 @@ fun PartyHeader(core: Core, modifier: Modifier = Modifier) {
                 scope.launch(Dispatchers.IO) { core.partySetOthers(!p.othersControl) }
             }
         }
-        if (members) {
+        if (ui.members) {
             Column {
                 Dim("Members", 13.sp, modifier = Modifier.padding(bottom = 4.dp))
                 p.members.forEach { m ->
@@ -209,6 +253,43 @@ fun PartyHeader(core: Core, modifier: Modifier = Modifier) {
             }
         }
     }
+}
+
+/** Under the Party's name: for a guest what the host plays, for the host
+ *  how many are in it. */
+private fun partyLine(p: PartyView): String = when {
+    !p.host && p.playing.isNotEmpty() -> p.playing
+    p.members.size <= 1 -> "Just you so far"
+    else -> "${p.members.size} people"
+}
+
+/** ⋯: Members, and End the Party (Leave for a guest), in a small card
+ *  under the button, as the desktop's menu. */
+@Composable
+private fun PartyMenu(host: Boolean, onDismiss: () -> Unit, onMembers: () -> Unit, onEnd: () -> Unit) {
+    val y = with(androidx.compose.ui.platform.LocalDensity.current) { 44.dp.roundToPx() }
+    androidx.compose.ui.window.Popup(
+        alignment = Alignment.TopEnd,
+        offset = androidx.compose.ui.unit.IntOffset(0, y),
+        onDismissRequest = onDismiss,
+        properties = androidx.compose.ui.window.PopupProperties(focusable = true),
+    ) {
+        Column(
+            Modifier.width(200.dp).clip(RoundedCornerShape(Tonearm.panel)).background(Tonearm.raised)
+                .border(1.dp, Tonearm.line, RoundedCornerShape(Tonearm.panel)).padding(vertical = 6.dp),
+        ) {
+            MenuChoice("Members", Tonearm.text, onMembers)
+            MenuChoice(if (host) "End the Party" else "Leave the Party", Color(0xFFFF8095), onEnd)
+        }
+    }
+}
+
+@Composable
+private fun MenuChoice(text: String, color: Color, onClick: () -> Unit) {
+    Box(
+        Modifier.fillMaxWidth().height(46.dp).clickable(onClick = onClick).padding(horizontal = 16.dp),
+        contentAlignment = Alignment.CenterStart,
+    ) { Title(text, size = 15.sp, color = color, weight = FontWeight.Medium) }
 }
 
 /** "Invite friends to your Party": Copy link and the code on the left,
@@ -258,18 +339,19 @@ private fun PartyQr(qr: QrMatrix, modifier: Modifier) {
 
 @Composable
 private fun PartyToggle(title: String, on: Boolean, onToggle: () -> Unit) {
+    // One slim row with a small switch, so it doesn't crowd the queue.
     Row(
-        Modifier.fillMaxWidth().height(52.dp).clip(RoundedCornerShape(12.dp))
-            .background(Color(0x0AFFFFFF)).clickable(onClick = onToggle).padding(horizontal = 16.dp),
+        Modifier.fillMaxWidth().height(40.dp).clip(RoundedCornerShape(10.dp))
+            .clickable(onClick = onToggle).padding(start = 4.dp, end = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Title(title, size = 15.sp, modifier = Modifier.weight(1f))
+        Title(title, size = 14.sp, weight = FontWeight.Medium, color = Tonearm.dim, modifier = Modifier.weight(1f))
         Box(
-            Modifier.width(42.dp).height(24.dp).clip(RoundedCornerShape(12.dp))
+            Modifier.width(34.dp).height(20.dp).clip(RoundedCornerShape(10.dp))
                 .background(if (on) Tonearm.accent else Color(0x30FFFFFF)),
             contentAlignment = if (on) Alignment.CenterEnd else Alignment.CenterStart,
         ) {
-            Box(Modifier.padding(horizontal = 3.dp).size(18.dp).clip(CircleShape).background(Color.White))
+            Box(Modifier.padding(horizontal = 3.dp).size(14.dp).clip(CircleShape).background(Color.White))
         }
     }
 }

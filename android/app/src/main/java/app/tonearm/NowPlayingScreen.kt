@@ -74,6 +74,8 @@ fun NowPlayingScreen(
     /** Whether a sleep timer runs, and the button that opens its choices. */
     sleeping: Boolean = false,
     onSleep: () -> Unit = {},
+    /** The queue button: the queue sheet. */
+    onQueue: () -> Unit = {},
     /** Whether the song is liked; null while unknown or signed out. */
     liked: Boolean?,
     onLike: () -> Unit,
@@ -210,7 +212,6 @@ fun NowPlayingScreen(
             // views do: 220 ms, coming up 16 dp.
             val coverT by animateFloatAsState(if (panel == Panel.Cover) 1f else 0f, tween(220, easing = panelEasing))
             val lyricsT by animateFloatAsState(if (panel == Panel.Lyrics) 1f else 0f, tween(220, easing = panelEasing))
-            val queueT by animateFloatAsState(if (panel == Panel.Queue) 1f else 0f, tween(220, easing = panelEasing))
             val rise = with(LocalDensity.current) { 16.dp.toPx() }
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 // The cover and the lyrics under it, centred in the room
@@ -253,12 +254,6 @@ fun NowPlayingScreen(
                     LyricsPane(lyrics, controller, time, Modifier.fillMaxSize().graphicsLayer {
                         alpha = lyricsT
                         translationY = (1f - lyricsT) * rise
-                    })
-                }
-                if (queueT > 0f) {
-                    QueuePane(core, { onMenu(it.asItem()) }, Modifier.fillMaxSize().padding(top = 8.dp).graphicsLayer {
-                        alpha = queueT
-                        translationY = (1f - queueT) * rise
                     })
                 }
             }
@@ -342,7 +337,8 @@ fun NowPlayingScreen(
                     CastMark(if (cast != null && (cast.active >= 0 || cast.connecting)) Tonearm.accent else Tonearm.dim)
                 }
                 Spacer(Modifier.weight(1f))
-                PanelButton(Icons.queue, if (panel == Panel.Queue) Tonearm.accent else Tonearm.dim) { toggle(Panel.Queue) }
+                // The queue rises over all of this as its own sheet.
+                PanelButton(Icons.queue, Tonearm.dim, onQueue)
             }
             Spacer(Modifier.height(12.dp))
         }
@@ -366,7 +362,7 @@ private fun LyricsSkeleton(height: androidx.compose.ui.unit.Dp) {
 /** An X drawn as two strokes, the weight of the icon font's down arrow
  *  (the font is cut down to the glyphs the app uses, and has none). */
 @Composable
-private fun CloseMark() {
+internal fun CloseMark() {
     androidx.compose.foundation.Canvas(Modifier.size(16.dp)) {
         val w = 2.dp.toPx()
         drawLine(Tonearm.text, androidx.compose.ui.geometry.Offset(0f, 0f), androidx.compose.ui.geometry.Offset(size.width, size.height), w, androidx.compose.ui.graphics.StrokeCap.Round)
@@ -433,8 +429,9 @@ private fun LikeButton(liked: Boolean, onClick: () -> Unit) {
     }
 }
 
-/** What Now Playing shows above the song's name. */
-enum class Panel { Cover, Lyrics, Queue }
+/** What Now Playing shows above the song's name. The queue is a sheet of
+ *  its own over the whole screen (QueueSheet). */
+enum class Panel { Cover, Lyrics }
 
 /** The desktop's panel views' curve, cubic-bezier(0.22, 1, 0.36, 1). */
 private val panelEasing = androidx.compose.animation.core.CubicBezierEasing(0.22f, 1f, 0.36f, 1f)

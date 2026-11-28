@@ -6,7 +6,10 @@ import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.shape.CircleShape
+import androidx.media3.session.MediaController
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.scrollBy
@@ -49,20 +52,107 @@ private val ROW = 60.dp
 private val slideEasing = CubicBezierEasing(0.22f, 1f, 0.36f, 1f)
 
 /**
- * The queue in place of the cover: the song playing, then the songs up
- * next. Tap one to play it, long press it for its menu. Drag one by its
+ * The queue as a full-screen sheet over Now playing, as Spotify's phone
+ * queue: it rises from the queue button and goes with a swipe down or the
+ * X. One list holds the Party, the song playing and what plays next, so
+ * the Party scrolls away and the songs get the screen. A slim player along
+ * the bottom keeps play and pause at hand; tapping it goes back.
+ */
+@Composable
+fun QueueSheet(
+    core: Core,
+    party: PartyUi,
+    now: NowPlaying,
+    controller: MediaController,
+    onMenu: (Song) -> Unit,
+    onClose: () -> Unit,
+) {
+    // Now playing's own flowing backdrop under the queue, the same as on
+    // Now playing, so the sheet reads as part of it. The cover is the
+    // core's, as Now playing picks it.
+    val playing = remember(now.id, now.queueVersion) { core.nowPlaying()?.takeIf { it.videoId == now.id } }
+    val cover = playing?.cover?.ifEmpty { null } ?: now.meta?.artworkUri?.toString()
+    Box(Modifier.fillMaxSize().background(Tonearm.bg)) {
+        FlowingBackdrop(cover, Modifier.fillMaxSize())
+        QueueSheetBody(core, party, now, controller, onMenu, onClose)
+    }
+}
+
+@Composable
+private fun QueueSheetBody(
+    core: Core,
+    party: PartyUi,
+    now: NowPlaying,
+    controller: MediaController,
+    onMenu: (Song) -> Unit,
+    onClose: () -> Unit,
+) {
+    Column(Modifier.fillMaxSize().systemBarsPadding()) {
+        Box(
+            Modifier.align(Alignment.CenterHorizontally).padding(top = 8.dp).size(width = 36.dp, height = 4.dp)
+                .clip(RoundedCornerShape(2.dp)).background(Tonearm.line),
+        )
+        Row(Modifier.fillMaxWidth().height(52.dp).padding(start = 20.dp, end = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Title("Queue", size = 22.sp, weight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            Box(Modifier.size(44.dp).clip(CircleShape).clickable(onClick = onClose), contentAlignment = Alignment.Center) {
+                CloseMark()
+            }
+        }
+        QueuePane(core, party, onMenu, Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp))
+        PlayerStrip(now, controller, onClose)
+    }
+}
+
+/** The song playing, slim, along the sheet's foot: its cover, name and
+ *  play or pause, with the progress line under, as the mini-player. */
+@Composable
+private fun PlayerStrip(now: NowPlaying, controller: MediaController, onOpen: () -> Unit) {
+    val progress = if (now.duration > 0) (now.position.toFloat() / now.duration).coerceIn(0f, 1f) else 0f
+    Column(
+        Modifier.padding(horizontal = 8.dp, vertical = 6.dp).fillMaxWidth()
+            .clip(RoundedCornerShape(Tonearm.radius)).background(Tonearm.island).clickable(onClick = onOpen),
+    ) {
+        Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Art(now.meta?.artworkUri?.toString(), 44.dp)
+            Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                Title(now.meta?.title?.toString() ?: "", size = 15.sp)
+                Dim(now.error ?: now.meta?.artist?.toString() ?: "", 13.sp)
+            }
+            IconButton(if (now.playing) Icons.pause else Icons.play, size = 26) {
+                if (now.playing) controller.pause() else controller.play()
+            }
+        }
+        Box(Modifier.fillMaxWidth().height(2.dp).background(Tonearm.line)) {
+            Box(Modifier.fillMaxWidth(progress).fillMaxHeight().background(Tonearm.text))
+        }
+    }
+}
+
+/** Items in the list before the first song up next: the Party, "Now
+ *  playing", the song playing and "Next up". */
+private const val LEAD = 4
+
+/**
+ * The Party, the song playing, then the songs up next, all in one list.
+ * Tap a song to play it, long press it for its menu. Drag one by its
  * handle to a new place: a raised copy follows the finger, the rows it
  * passes step aside to open the gap it will drop into, and near the top or
  * bottom the list scrolls on.
  */
 @Composable
-fun QueuePane(core: Core, onMenu: (Song) -> Unit, modifier: Modifier = Modifier) {
+private fun QueuePane(core: Core, party: PartyUi, onMenu: (Song) -> Unit, modifier: Modifier = Modifier) {
     val scope = rememberCoroutineScope()
-    var songs by remember { mutableStateOf<List<Song>>(emptyList()) }
-    var index by remember { mutableIntStateOf(-1) }
+    // Read at once, so the sheet opens on the queue as it is rather than
+    // on "Play something" for a moment. Both are only locks in the core.
+    var songs by remember { mutableStateOf(core.queue()) }
+    var index by remember { mutableIntStateOf(core.playback().index.toInt()) }
     // Who added each song in a Party, by video id. Only songs a member
     // added are here, never ones the radio or autoplay put in.
-    var adders by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var adders by remember {
+        mutableStateOf(songs.mapNotNull { s -> core.partyAdder(s.videoId)?.let { s.videoId to it } }.toMap())
+    }
+    remember { party.refresh(core) }
+    LaunchedEffect(core) { party.follow(core) }
     // The row picked up, among those up next; -1 when none.
     var from by remember { mutableIntStateOf(-1) }
     // Where the finger is down the list's view, and where on the row it
@@ -75,6 +165,7 @@ fun QueuePane(core: Core, onMenu: (Song) -> Unit, modifier: Modifier = Modifier)
     // The queue as the core has it, read again whenever it changes. Not
     // while a row is being dragged, which would pull the list from under it.
     LaunchedEffect(core) {
+        // Read once more off the main thread, in case it moved meanwhile.
         var seen: ULong? = null
         var seenParty: ULong? = null
         while (true) {
@@ -104,7 +195,7 @@ fun QueuePane(core: Core, onMenu: (Song) -> Unit, modifier: Modifier = Modifier)
 
     if (index !in songs.indices) {
         Column(modifier) {
-            PartyHeader(core)
+            PartyHeader(core, party)
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) { Dim("Play something to start a queue", 15.sp) }
         }
         return
@@ -114,12 +205,19 @@ fun QueuePane(core: Core, onMenu: (Song) -> Unit, modifier: Modifier = Modifier)
     val rowPx = with(density) { ROW.toPx() }
     val handlePx = with(density) { 56.dp.toPx() }
     val edgePx = with(density) { 72.dp.toPx() }
+    // Where the first song up next would sit in the view, scrolled or not;
+    // kept from the last time one of them was in sight.
+    // Not state: it is worked out while composing, from the list's layout.
+    val rowsTop = remember { floatArrayOf(0f) }
 
-    // Where the dragged row would drop: the slot nearest the raised copy,
-    // counting what the list has scrolled.
+    // Where the dragged row would drop: the slot nearest the raised copy.
+    // The Party above the songs is any height, so the rows are measured
+    // from one of them in sight rather than from the top of the list.
     fun target(): Int {
-        val scrolled = list.firstVisibleItemIndex * rowPx + list.firstVisibleItemScrollOffset
-        return ((fingerY - grab + scrolled) / rowPx).roundToInt().coerceIn(0, upNext.size - 1)
+        list.layoutInfo.visibleItemsInfo.firstOrNull { it.index >= LEAD }?.let {
+            rowsTop[0] = it.offset - (it.index - LEAD) * rowPx
+        }
+        return ((fingerY - grab - rowsTop[0]) / rowPx).roundToInt().coerceIn(0, upNext.size - 1)
     }
     val to = if (from < 0) -1 else target()
 
@@ -138,15 +236,7 @@ fun QueuePane(core: Core, onMenu: (Song) -> Unit, modifier: Modifier = Modifier)
         }
     }
 
-    Column(modifier) {
-        PartyHeader(core)
-        SectionLabel("Now playing")
-        QueueRow(songs[index], current = true, adder = adders[songs[index].videoId], onLongClick = { onMenu(songs[index]) })
-        if (upNext.isNotEmpty()) {
-            Spacer(Modifier.height(12.dp))
-            SectionLabel("Next up")
-        }
-        Box(Modifier.weight(1f).fillMaxWidth()) {
+    Box(modifier) {
             LazyColumn(
                 Modifier
                     .fillMaxSize()
@@ -158,13 +248,15 @@ fun QueuePane(core: Core, onMenu: (Song) -> Unit, modifier: Modifier = Modifier)
                         awaitEachGesture {
                             val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
                             if (down.position.x < size.width - handlePx) return@awaitEachGesture
+                            // Only a song up next has a handle; the Party's
+                            // buttons and the song playing are left alone.
                             val row = list.layoutInfo.visibleItemsInfo.firstOrNull {
                                 down.position.y >= it.offset && down.position.y < it.offset + it.size
-                            } ?: return@awaitEachGesture
+                            }?.takeIf { it.index - LEAD in upNext.indices } ?: return@awaitEachGesture
                             down.consume()
                             grab = down.position.y - row.offset
                             fingerY = down.position.y
-                            from = row.index
+                            from = row.index - LEAD
                             try {
                                 while (true) {
                                     val event = awaitPointerEvent(PointerEventPass.Initial)
@@ -192,6 +284,18 @@ fun QueuePane(core: Core, onMenu: (Song) -> Unit, modifier: Modifier = Modifier)
                 state = list,
                 userScrollEnabled = from < 0,
             ) {
+                // LEAD counts these four.
+                item(key = "party") { PartyHeader(core, party) }
+                item(key = "now-label") { SectionLabel("Now playing") }
+                item(key = "now") {
+                    QueueRow(songs[index], current = true, adder = adders[songs[index].videoId], onLongClick = { onMenu(songs[index]) })
+                }
+                item(key = "next-label") {
+                    // Kept, empty, with nothing up next, so LEAD holds.
+                    if (upNext.isNotEmpty()) {
+                        Box(Modifier.padding(top = 12.dp)) { SectionLabel("Next up") }
+                    }
+                }
                 itemsIndexed(upNext) { i, song ->
                     val lifted = i == from
                     // Rows between the dragged one and where it is going step
@@ -240,7 +344,6 @@ fun QueuePane(core: Core, onMenu: (Song) -> Unit, modifier: Modifier = Modifier)
                     },
                 )
             }
-        }
     }
 }
 
