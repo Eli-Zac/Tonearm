@@ -34,6 +34,7 @@ import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -68,10 +69,20 @@ fun PartyAvatar(name: String, size: Dp, ring: Color? = null) {
 }
 
 /** How this phone shows in a Party: the YouTube Music profile's first name,
- *  else the phone's own name. Blocks. */
-private fun myName(core: Core): String =
-    runCatching { core.account()?.name }.getOrNull()?.trim()?.split(" ")?.firstOrNull()?.takeIf { it.isNotBlank() }
-        ?: android.os.Build.MODEL
+ *  else the phone's own name as set in Settings ("Eli's S22 Ultra"), else
+ *  its model. The profile can take a network fetch, so it gets 3 seconds,
+ *  not the whole join's patience on a poor connection. */
+private suspend fun myName(core: Core, context: android.content.Context): String {
+    // Not a child of the caller: a blocked fetch can't be cancelled, and a
+    // child would hold the timeout until it ended anyway.
+    val fetch = kotlinx.coroutines.CoroutineScope(Dispatchers.IO).async { runCatching { core.account()?.name }.getOrNull() }
+    val profile = kotlinx.coroutines.withTimeoutOrNull(3000) { fetch.await() }
+    profile?.trim()?.split(" ")?.firstOrNull()?.takeIf { it.isNotBlank() }?.let { return it }
+    val device = runCatching {
+        android.provider.Settings.Global.getString(context.contentResolver, android.provider.Settings.Global.DEVICE_NAME)
+    }.getOrNull()
+    return device?.trim()?.takeIf { it.isNotBlank() } ?: android.os.Build.MODEL
+}
 
 /**
  * What the Party header shows, kept above the queue sheet: the header is an
@@ -80,6 +91,11 @@ private fun myName(core: Core): String =
  * starts, not each time the queue opens, and a half-typed code survives.
  */
 class PartyUi {
+    /** Where starting, joining and the rest run: as long-lived as this, not
+     *  the header's own scope, which ends when the header scrolls away or
+     *  the sheet closes. That left "Joining…" stuck for good, and every
+     *  later press ignored, when the queue closed mid join. */
+    val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.Main)
     var party by mutableStateOf<PartyView?>(null)
     var joining by mutableStateOf(false)
     var busy by mutableStateOf(false)
@@ -132,16 +148,20 @@ class PartyUi {
 fun PartyHeader(core: Core, ui: PartyUi, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
-    val scope = rememberCoroutineScope()
+    val scope = ui.scope
 
     fun join(text: String) {
         if (ui.busy) return
         ui.busy = true
         ui.error = ""
         scope.launch {
-            val result = withContext(Dispatchers.IO) { runCatching { core.partyJoin(text, myName(core)) } }
-            ui.busy = false
-            result.exceptionOrNull()?.let { ui.error = it.message ?: "Couldn't join that Party" } ?: run { ui.joining = false; ui.code = "" }
+            try {
+                val name = myName(core, context)
+                val result = withContext(Dispatchers.IO) { runCatching { core.partyJoin(text, name) } }
+                result.exceptionOrNull()?.let { ui.error = it.message ?: "Couldn't join that Party" } ?: run { ui.joining = false; ui.code = "" }
+            } finally {
+                ui.busy = false
+            }
         }
     }
 
@@ -155,9 +175,13 @@ fun PartyHeader(core: Core, ui: PartyUi, modifier: Modifier = Modifier) {
                         ui.busy = true
                         ui.error = ""
                         scope.launch {
-                            val result = withContext(Dispatchers.IO) { runCatching { core.partyStart(myName(core)) } }
-                            ui.busy = false
-                            result.exceptionOrNull()?.let { ui.error = it.message ?: "Couldn't start a Party" }
+                            try {
+                                val name = myName(core, context)
+                                val result = withContext(Dispatchers.IO) { runCatching { core.partyStart(name) } }
+                                result.exceptionOrNull()?.let { ui.error = it.message ?: "Couldn't start a Party" }
+                            } finally {
+                                ui.busy = false
+                            }
                         }
                     }
                     PillButton("Join a Party") { ui.joining = true; ui.error = "" }
